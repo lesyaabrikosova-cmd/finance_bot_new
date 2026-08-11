@@ -51,6 +51,14 @@ from income import (
     router as income_router,
 )
 
+from period import (
+    router as period_router,
+)
+
+from settings_editor import (
+    router as settings_router,
+)
+
 from storage import db
 
 
@@ -118,12 +126,12 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             (
-                "📊 Состояние",
-                "menu:state",
+                "📊 Моя финансовая картина",
+                "menu:analytics",
             ),
             (
-                "📋 Сводка",
-                "menu:summary",
+                "🧭 Мой режим",
+                "menu:state",
             ),
         ],
         [
@@ -138,18 +146,29 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             (
-                "⚙️ Настройки",
-                "menu:settings",
-            ),
+                "📅 Новый расчётный период",
+                "period:new",
+            )
         ],
         [
             (
-                "❓ Как это работает",
+                "⚙️ Настройки",
+                "settings:open",
+            )
+        ],
+        [
+            (
+                "✨ Почему это работает",
+                "menu:about",
+            )
+        ],
+        [
+            (
+                "❓ Помощь",
                 "menu:help",
-            ),
+            )
         ],
     ])
-
 
 # ============================================================
 # ПРОВЕРКА НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ
@@ -570,89 +589,6 @@ async def menu_goals(
 
 
 # ============================================================
-# НАСТРОЙКИ
-# ============================================================
-
-
-@router.callback_query(
-    F.data == "menu:settings"
-)
-async def menu_settings(
-    callback: CallbackQuery,
-):
-
-    await callback.answer()
-
-    allocator = db.load_allocator(
-        callback.from_user.id
-    )
-
-    if allocator is None:
-        return
-
-    settings = allocator.settings
-
-    debts = (
-        "Есть"
-        if any(
-            credit.active
-            for credit in settings.credits
-        )
-        else "Нет"
-    )
-
-    await callback.message.answer(
-        "⚙️ <b>НАСТРОЙКИ</b>\n\n"
-
-        f"👤 Занятость: "
-        f"<b>{settings.employment_type}</b>\n"
-
-        f"💳 Долги: "
-        f"<b>{debts}</b>\n\n"
-
-        f"🔴 Обязательная жизнь: "
-        f"<b>{fmt_money(settings.critical_life)} ₽</b>\n"
-
-        f"🟢 Бытовой резерв: "
-        f"<b>{fmt_money(settings.household_reserve)} ₽</b>\n"
-
-        f"💰 Средний доход: "
-        f"<b>{fmt_money(settings.average_income)} ₽</b>\n\n"
-
-        f"🏛 Налог: "
-        f"<b>{settings.tax_rate}%</b>\n\n"
-
-        "Редактирование отдельных разделов настроек "
-        "мы подключим следующим модулем.",
-        reply_markup=keyboard([
-            [
-                (
-                    "🔄 Настроить заново",
-                    "setup:restart",
-                )
-            ],
-            [
-                (
-                    "⬅️ Главное меню",
-                    "menu:back",
-                )
-            ],
-        ]),
-    )
-
-
-# ============================================================
-# ЗАГЛУШКА ДОХОДА
-#
-# Само распределение дохода сделаем следующим модулем,
-# потому что оно требует отдельного FSM:
-#
-# сумма -> тип -> дата -> подтверждение -> расчёт.
-# ============================================================
-
-
-
-# ============================================================
 # СВОДКА — ПОКА БАЗОВАЯ
 # ============================================================
 
@@ -824,6 +760,16 @@ async def main():
     # Добавление и распределение доходов
     dp.include_router(
         income_router
+    )
+
+    # Новый расчётный период
+    dp.include_router(
+        period_router
+    )
+
+    # Редактирование пользовательских настроек
+    dp.include_router(
+        settings_router
     )
 
     # Главное меню и остальные команды

@@ -566,20 +566,28 @@ class AllocatorState:
 
     def reset_period(self):
         """
-        Сброс расчётного периода.
+        Начало нового расчётного периода.
 
-        Подушка НЕ сбрасывается.
+        Сбрасываются только показатели,
+        которые должны начаться заново.
+
+        НЕ сбрасываются:
+        - Подушка;
+        - инвестиции;
+        - цели;
+        - остатки кредитов;
+        - общий объём досрочного погашения;
+        - история операций.
         """
+
         self.life_balance = ZERO
+
         self.accumulated_minimum_payments = ZERO
 
         self.period_income = ZERO
         self.period_tax = ZERO
 
         self.period_life_topups = {}
-
-        self.operation_log = []
-        self.distribution_history = []
 
 
 # ============================================================

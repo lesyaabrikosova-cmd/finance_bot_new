@@ -36,9 +36,23 @@ from financial_engine import (
 # НАСТРОЙКИ
 # ============================================================
 
+import os
+
 BASE_DIR = Path(__file__).resolve().parent
 
-DATABASE_PATH = BASE_DIR / "allocator.db"
+DATA_DIR = Path(
+    os.getenv(
+        "ALLOCATOR_DATA_DIR",
+        str(BASE_DIR),
+    )
+)
+
+DATA_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+DATABASE_PATH = DATA_DIR / "allocator.db"
 
 
 # ============================================================
