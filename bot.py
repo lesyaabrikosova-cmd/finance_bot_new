@@ -796,7 +796,6 @@ async def set_bot_commands(
 
 
 async def main():
-
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stdout,
@@ -815,7 +814,7 @@ async def main():
         ),
     )
 
-       dp = Dispatcher()
+    dp = Dispatcher()
 
     # Мастер первоначальной настройки
     dp.include_router(
@@ -841,21 +840,17 @@ async def main():
     )
 
     try:
-
         await dp.start_polling(
             bot,
             allowed_updates=dp.resolve_used_update_types(),
         )
 
     finally:
-
         db.close()
-
         await bot.session.close()
 
 
 if __name__ == "__main__":
-
     try:
         asyncio.run(
             main()
