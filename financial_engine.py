@@ -673,51 +673,47 @@ class FinancialAllocator:
     # ========================================================
 
     def life_category_targets(self) -> Dict[str, Decimal]:
-    """
-    Целевые суммы Этапа A.
+        """
+        Целевые суммы Этапа A.
 
-    КЖ_общая = КЖ + минимальные платежи по кредитам.
+        КЖ_общая = КЖ + минимальные платежи по кредитам.
 
-    Минимальные платежи учитываются ОТДЕЛЬНО,
-    чтобы не возникал двойной учёт.
+        Минимальные платежи учитываются отдельно,
+        чтобы не возникал двойной учёт.
 
-    Зарплата является автоматическим остатком
-    внутри обычной Критической жизни:
+        Зарплата является автоматическим остатком
+        внутри обычной Критической жизни:
 
-    Зарплата =
-        КЖ - сумма пользовательских категорий КЖ
-    """
+        Зарплата = КЖ - сумма пользовательских категорий КЖ.
+        """
+        result = dict(self.settings.life_categories)
 
-    result = dict(
-        self.settings.life_categories
-    )
-
-    explicit_sum = sum(
-        result.values(),
-        ZERO,
-    )
-
-    salary = (
-        self.settings.critical_life
-        - explicit_sum
-    )
-
-    if salary < ZERO:
-        raise ValueError(
-            "Сумма категорий обязательных расходов "
-            "превышает общую Критическую жизнь."
+        explicit_sum = sum(
+            result.values(),
+            ZERO,
         )
 
-    result["Зарплата"] = salary
+        salary = (
+            self.settings.critical_life
+            - explicit_sum
+        )
 
-    minimum_payment = (
-        self.settings.minimum_payment_total
-    )
+        if salary < ZERO:
+            raise ValueError(
+                "Сумма категорий обязательных расходов "
+                "превышает общую Критическую жизнь."
+            )
 
-    if minimum_payment > ZERO:
-        result["Мин. платеж"] = minimum_payment
+        result["Зарплата"] = salary
 
-    return result
+        minimum_payment = (
+            self.settings.minimum_payment_total
+        )
+
+        if minimum_payment > ZERO:
+            result["Мин. платеж"] = minimum_payment
+
+        return result
 
     def life_category_shares(self) -> Dict[str, Decimal]:
         """
@@ -897,117 +893,84 @@ class FinancialAllocator:
     # ========================================================
 
     def active_mode(self) -> int:
-    """
-    Определяет финансовый режим пользователя.
+        """
+        Определяет финансовый режим пользователя.
 
-    ВАЖНО:
-    режим 🟤1 зависит от заполненности
-    минимальной ПОДУШКИ, а не от денег,
-    зарезервированных на очередной платёж банку.
-    """
+        Режим 1 зависит от заполненности минимального слоя
+        Подушки, а не от денег, зарезервированных на очередной
+        платёж банку.
+        """
+        has_debts = any(
+            credit.active
+            for credit in self.settings.credits
+        )
 
-    has_debts = any(
-        credit.active
-        for credit in self.settings.credits
-    )
+        if has_debts:
+            if (
+                self.state.pillow_minimum
+                < self.settings.minimum_reserve_limit
+            ):
+                return MODE_1
 
-    # ========================================================
-    # ЕСТЬ ДОЛГИ
-    # ========================================================
-
-    if has_debts:
+            return MODE_2
 
         if (
-            self.state.pillow_minimum
-            < self.settings.minimum_reserve_limit
+            self.state.pillow_force_majeure
+            < self.settings.force_majeure_limit
         ):
-            return MODE_1
+            return MODE_3
 
-        return MODE_2
+        if self.settings.employment_type == "Наёмный":
+            return MODE_6
 
-    # ========================================================
-    # ДОЛГОВ НЕТ
-    # ========================================================
+        if (
+            self.state.pillow_stabilizer
+            < self.settings.stabilizer_life_limit
+        ):
+            return MODE_4
 
-    if (
-        self.state.pillow_force_majeure
-        < self.settings.force_majeure_limit
-    ):
-        return MODE_3
+        if (
+            self.state.pillow_stabilizer
+            < self.settings.stabilizer_full_limit
+        ):
+            return MODE_5
 
-    # Наёмный после формирования
-    # форс-мажорной подушки сразу переходит в 6.
-    if (
-        self.settings.employment_type
-        == "Наёмный"
-    ):
         return MODE_6
-
-    # ========================================================
-    # ФРИЛАНСЕР
-    # ========================================================
-
-    if (
-        self.state.pillow_stabilizer
-        < self.settings.stabilizer_life_limit
-    ):
-        return MODE_4
-
-    if (
-        self.state.pillow_stabilizer
-        < self.settings.stabilizer_full_limit
-    ):
-        return MODE_5
-
-    return MODE_6
-
-    # ========================================================
-    # ПЕРЕХОДЫ
-    # ========================================================
 
     def next_mode_candidates(
         self,
         current_mode: int,
     ) -> List[Tuple[int, Decimal]]:
         """
-        Возвращает возможные переходы:
-
-        (режим, остаток до перехода)
+        Возвращает возможные переходы в виде:
+        (следующий режим, остаток до перехода).
         """
-
         s = self.settings
         st = self.state
-
         candidates = []
 
         if current_mode == MODE_1:
-    remaining = max(
-        ZERO,
-        s.minimum_reserve_limit
-        - st.pillow_minimum,
-    )
+            remaining = max(
+                ZERO,
+                s.minimum_reserve_limit
+                - st.pillow_minimum,
+            )
 
-    if remaining > ZERO:
-        candidates.append(
-            (MODE_2, remaining)
-        )
+            if remaining > ZERO:
+                candidates.append((MODE_2, remaining))
 
         elif current_mode == MODE_2:
-            # Переход в 3 происходит после погашения долгов.
-            if not any(
-                credit.active
-                for credit in s.credits
-            ):
-                remaining = max(
-                    ZERO,
-                    s.force_majeure_limit
-                    - st.pillow_force_majeure,
-                )
+            total_debt = sum(
+                (
+                    credit.principal_balance
+                    for credit in s.credits
+                    if credit.active
+                ),
+                ZERO,
+            )
 
-                if remaining > ZERO:
-                    candidates.append(
-                        (MODE_3, remaining)
-                    )
+            if total_debt > ZERO:
+                candidates.append((MODE_3, total_debt))
 
         elif current_mode == MODE_3:
             remaining = max(
@@ -1016,21 +979,11 @@ class FinancialAllocator:
                 - st.pillow_force_majeure,
             )
 
-            if (
-                s.employment_type == "Фрилансер"
-                and remaining > ZERO
-            ):
-                candidates.append(
-                    (MODE_4, remaining)
-                )
-
-            elif (
-                s.employment_type == "Наёмный"
-                and remaining > ZERO
-            ):
-                candidates.append(
-                    (MODE_6, remaining)
-                )
+            if remaining > ZERO:
+                if s.employment_type == "Фрилансер":
+                    candidates.append((MODE_4, remaining))
+                else:
+                    candidates.append((MODE_6, remaining))
 
         elif current_mode == MODE_4:
             remaining = max(
@@ -1040,9 +993,7 @@ class FinancialAllocator:
             )
 
             if remaining > ZERO:
-                candidates.append(
-                    (MODE_5, remaining)
-                )
+                candidates.append((MODE_5, remaining))
 
         elif current_mode == MODE_5:
             remaining = max(
@@ -1052,9 +1003,7 @@ class FinancialAllocator:
             )
 
             if remaining > ZERO:
-                candidates.append(
-                    (MODE_6, remaining)
-                )
+                candidates.append((MODE_6, remaining))
 
         return [
             candidate
@@ -1132,476 +1081,256 @@ class FinancialAllocator:
     # ========================================================
 
     def stage_a(
-    self,
-    amount: Decimal,
-    mode: int,
-    steps: List[str],
-    allocations: Dict[str, Decimal],
-) -> Decimal:
+        self,
+        amount: Decimal,
+        mode: int,
+        steps: List[str],
+        allocations: Dict[str, Decimal],
+    ) -> Decimal:
+        s = self.settings
+        st = self.state
 
-    s = self.settings
-    st = self.state
-
-    target = s.total_critical_life
-
-    accumulated_kzh = (
-        st.life_balance
-        + st.accumulated_minimum_payments
-    )
-
-    if accumulated_kzh >= target:
-        return amount
-
-    missing = target - accumulated_kzh
-    bracket = s.bracket_a
-
-    required_base = (
-        missing
-        / (ONE - bracket / HUNDRED)
-    )
-
-    part_a = min(
-        amount,
-        required_base,
-    )
-
-    if part_a <= ZERO:
-        return amount
-
-    up_calculated = (
-        part_a
-        * bracket
-        / HUNDRED
-    )
-
-    up_target = self.bracket_up_target(
-        mode
-    )
-
-    # Сколько из "верхней" части не удалось
-    # распределить и должно продолжить водопад.
-    final_overflow = ZERO
-
-    # ========================================================
-    # ПОДУШКА
-    # ========================================================
-
-    if up_target in {
-        "МП",
-        "ФМ",
-        "СтабД",
-    }:
-
-        final_overflow = self.waterfall_pillow(
-            up_calculated,
-            up_target,
+        target = s.total_critical_life
+        accumulated_kzh = (
+            st.life_balance
+            + st.accumulated_minimum_payments
         )
 
-        actual_up = (
-            up_calculated
-            - final_overflow
+        if accumulated_kzh >= target:
+            return amount
+
+        missing = target - accumulated_kzh
+        bracket = s.bracket_a
+        required_base = (
+            missing
+            / (ONE - bracket / HUNDRED)
         )
+        part_a = min(amount, required_base)
 
-        allocations["Подушка"] += (
-            actual_up
+        if part_a <= ZERO:
+            return amount
+
+        up_calculated = (
+            part_a
+            * bracket
+            / HUNDRED
         )
+        up_target = self.bracket_up_target(mode)
+        final_overflow = ZERO
 
-    # ========================================================
-    # ИНВЕСТИЦИИ
-    # ========================================================
-
-    elif up_target == "Инвест":
-
-        self.state.investments += (
-            up_calculated
-        )
-
-        allocations["Инвестиции"] += (
-            up_calculated
-        )
-
-    # ========================================================
-    # ДОСРОЧНОЕ
-    # ========================================================
-
-    elif up_target == "Досрочное":
-
-        applied = self.apply_early_repayment(
-            up_calculated,
-            steps,
-        )
-
-        allocations["Досрочное"] += (
-            applied
-        )
-
-        final_overflow = (
-            up_calculated
-            - applied
-        )
-
-        # Если погашен последний кредит,
-        # остаток сразу идёт в ФМ.
-        if (
-            final_overflow > ZERO
-            and not any(
-                credit.active
-                for credit in s.credits
-            )
-        ):
-
-            pillow_overflow = (
-                self.waterfall_pillow(
-                    final_overflow,
-                    "ФМ",
-                )
-            )
-
-            allocations["Подушка"] += (
-                final_overflow
-                - pillow_overflow
-            )
-
-            final_overflow = (
-                pillow_overflow
-            )
-
-    else:
-
-        raise ValueError(
-            f"Неизвестное направление "
-            f"Бракет_A: {up_target}"
-        )
-
-    # ========================================================
-    # ЧАСТЬ КЖ
-    #
-    # Она всегда считается от исходного бракетного
-    # процента. Переполнение не превращаем в КЖ.
-    # ========================================================
-
-    life_part = (
-        part_a
-        - up_calculated
-    )
-
-    self._allocate_to_life(
-        life_part,
-        allocations,
-    )
-
-    steps.append(
-        "ЭТАП A — обязательная жизнь\n"
-        f"Недостаёт: {missing}\n"
-        f"Необходимая база: {required_base}\n"
-        f"Часть A: {part_a}\n"
-        f"Бракет A ({bracket}%): "
-        f"{up_calculated}\n"
-        f"Направление вверх: {up_target}\n"
-        f"В обязательную жизнь: {life_part}\n"
-        f"Переполнение: {final_overflow}"
-    )
-
-    # Неиспользованный остаток дохода
-    # + переполнение верхнего направления.
-    return (
-        amount
-        - part_a
-        + final_overflow
-    )
-
-    # ========================================================
-    # РАСПРЕДЕЛЕНИЕ В КЖ
-    # ========================================================
-
-    def _allocate_to_life(
-    self,
-    amount: Decimal,
-    allocations: Dict[str, Decimal],
-):
-    """
-    Пропорционально распределяет сумму Этапа A
-    между категориями Критической жизни.
-
-    ВАЖНО:
-
-    обычные расходы -> Баланс жизни
-
-    минимальные платежи по кредитам ->
-    Накоплено_Мин_платеж
-
-    Поэтому минимальный платёж не учитывается
-    второй раз внутри Баланса жизни.
-    """
-
-    if amount <= ZERO:
-        return
-
-    shares = self.life_category_shares()
-
-    category_names = list(
-        shares.keys()
-    )
-
-    distributed = ZERO
-
-    life_added = ZERO
-    minimum_payment_added = ZERO
-
-    for index, name in enumerate(
-        category_names
-    ):
-        share = shares[name]
-
-        # Последняя категория забирает математический
-        # остаток. Это защищает инвариант от погрешностей.
-        if index == len(category_names) - 1:
-            part = (
-                amount
-                - distributed
-            )
-        else:
-            part = (
-                amount
-                * share
-            )
-
-        distributed += part
-
-        # --------------------------------------------
-        # Минимальный платёж по кредитам
-        # --------------------------------------------
-
-        if name == "Мин. платеж":
-
-            minimum_payment_added += part
-
-            self.state.accumulated_minimum_payments += part
-
-            allocations[
-                "Мин. платеж"
-            ] = (
-                allocations.get(
-                    "Мин. платеж",
-                    ZERO,
-                )
-                + part
-            )
-
-            continue
-
-        # --------------------------------------------
-        # Обычные категории КЖ
-        # --------------------------------------------
-
-        self.state.period_life_topups[
-            name
-        ] = (
-            self.state.period_life_topups.get(
-                name,
-                ZERO,
-            )
-            + part
-        )
-
-        allocations[
-            f"КЖ:{name}"
-        ] = (
-            allocations.get(
-                f"КЖ:{name}",
-                ZERO,
-            )
-            + part
-        )
-
-        life_added += part
-
-    self.state.life_balance += life_added
-
-    # ========================================================
-    # ЭТАП B
-    # ========================================================
-
-    def stage_b(
-    self,
-    amount: Decimal,
-    mode: int,
-    steps: List[str],
-    allocations: Dict[str, Decimal],
-) -> Decimal:
-
-    s = self.settings
-    st = self.state
-
-    if not (
-        s.critical_life
-        <= st.life_balance
-        < s.household_life
-    ):
-        return amount
-
-    missing = (
-        s.household_life
-        - st.life_balance
-    )
-
-    bracket = s.bracket_b
-
-    required_base = (
-        missing
-        / (ONE - bracket / HUNDRED)
-    )
-
-    part_b = min(
-        amount,
-        required_base,
-    )
-
-    if part_b <= ZERO:
-        return amount
-
-    up_calculated = (
-        part_b
-        * bracket
-        / HUNDRED
-    )
-
-    up_target = self.bracket_up_target(
-        mode
-    )
-
-    final_overflow = ZERO
-
-    # ========================================================
-    # ПОДУШКА
-    # ========================================================
-
-    if up_target in {
-        "МП",
-        "ФМ",
-        "СтабД",
-    }:
-
-        final_overflow = (
-            self.waterfall_pillow(
+        if up_target in {"МП", "ФМ", "СтабД"}:
+            final_overflow = self.waterfall_pillow(
                 up_calculated,
                 up_target,
             )
-        )
+            actual_up = up_calculated - final_overflow
+            allocations["Подушка"] += actual_up
 
-        actual_up = (
-            up_calculated
-            - final_overflow
-        )
+        elif up_target == "Инвест":
+            st.investments += up_calculated
+            allocations["Инвестиции"] += up_calculated
 
-        allocations["Подушка"] += (
-            actual_up
-        )
-
-    # ========================================================
-    # ИНВЕСТ
-    # ========================================================
-
-    elif up_target == "Инвест":
-
-        st.investments += (
-            up_calculated
-        )
-
-        allocations[
-            "Инвестиции"
-        ] += up_calculated
-
-    # ========================================================
-    # ДОСРОЧНОЕ
-    # ========================================================
-
-    elif up_target == "Досрочное":
-
-        applied = (
-            self.apply_early_repayment(
+        elif up_target == "Досрочное":
+            applied = self.apply_early_repayment(
                 up_calculated,
                 steps,
             )
-        )
+            allocations["Досрочное"] += applied
+            final_overflow = up_calculated - applied
 
-        allocations[
-            "Досрочное"
-        ] += applied
-
-        final_overflow = (
-            up_calculated
-            - applied
-        )
-
-        if (
-            final_overflow > ZERO
-            and not any(
-                credit.active
-                for credit in s.credits
-            )
-        ):
-
-            pillow_overflow = (
-                self.waterfall_pillow(
+            if (
+                final_overflow > ZERO
+                and not any(
+                    credit.active
+                    for credit in s.credits
+                )
+            ):
+                pillow_overflow = self.waterfall_pillow(
                     final_overflow,
                     "ФМ",
                 )
+                allocations["Подушка"] += (
+                    final_overflow - pillow_overflow
+                )
+                final_overflow = pillow_overflow
+
+        else:
+            raise ValueError(
+                f"Неизвестное направление Бракет_A: {up_target}"
             )
 
-            allocations[
-                "Подушка"
-            ] += (
-                final_overflow
-                - pillow_overflow
-            )
-
-            final_overflow = (
-                pillow_overflow
-            )
-
-    # ========================================================
-    # БЫТОВОЙ РЕЗЕРВ
-    # ========================================================
-
-    reserve_part = (
-        part_b
-        - up_calculated
-    )
-
-    st.life_balance += reserve_part
-
-    allocations[
-        "Бытовой резерв"
-    ] = (
-        allocations.get(
-            "Бытовой резерв",
-            ZERO,
+        life_part = part_a - up_calculated
+        self._allocate_to_life(
+            life_part,
+            allocations,
         )
-        + reserve_part
-    )
 
-    steps.append(
-        "ЭТАП B — бытовой резерв\n"
-        f"Недостаёт: {missing}\n"
-        f"Необходимая база: {required_base}\n"
-        f"Часть B: {part_b}\n"
-        f"Бракет B ({bracket}%): "
-        f"{up_calculated}\n"
-        f"Направление вверх: {up_target}\n"
-        f"В бытовой резерв: {reserve_part}\n"
-        f"Переполнение: {final_overflow}"
-    )
+        steps.append(
+            f"""ЭТАП A — обязательная жизнь
+Недостаёт: {missing}
+Необходимая база: {required_base}
+Часть A: {part_a}
+Бракет A ({bracket}%): {up_calculated}
+Направление вверх: {up_target}
+В обязательную жизнь: {life_part}
+Переполнение: {final_overflow}"""
+        )
 
-    return (
-        amount
-        - part_b
-        + final_overflow
-    )
+        return (
+            amount
+            - part_a
+            + final_overflow
+        )
 
-    # ========================================================
-    # ЭТАП C
-    # ========================================================
+    def _allocate_to_life(
+        self,
+        amount: Decimal,
+        allocations: Dict[str, Decimal],
+    ):
+        """
+        Распределяет часть Этапа A между категориями КЖ.
+        Минимальные платежи учитываются отдельно от Баланса жизни.
+        """
+        if amount <= ZERO:
+            return
+
+        shares = self.life_category_shares()
+        category_names = list(shares.keys())
+        distributed = ZERO
+        life_added = ZERO
+
+        for index, name in enumerate(category_names):
+            share = shares[name]
+
+            if index == len(category_names) - 1:
+                part = amount - distributed
+            else:
+                part = amount * share
+
+            distributed += part
+
+            if name == "Мин. платеж":
+                self.state.accumulated_minimum_payments += part
+                allocations["Мин. платеж"] = (
+                    allocations.get("Мин. платеж", ZERO)
+                    + part
+                )
+                continue
+
+            self.state.period_life_topups[name] = (
+                self.state.period_life_topups.get(name, ZERO)
+                + part
+            )
+
+            allocations[f"КЖ:{name}"] = (
+                allocations.get(f"КЖ:{name}", ZERO)
+                + part
+            )
+
+            life_added += part
+
+        self.state.life_balance += life_added
+
+    def stage_b(
+        self,
+        amount: Decimal,
+        mode: int,
+        steps: List[str],
+        allocations: Dict[str, Decimal],
+    ) -> Decimal:
+        s = self.settings
+        st = self.state
+
+        if not (
+            s.critical_life
+            <= st.life_balance
+            < s.household_life
+        ):
+            return amount
+
+        missing = s.household_life - st.life_balance
+        bracket = s.bracket_b
+        required_base = (
+            missing
+            / (ONE - bracket / HUNDRED)
+        )
+        part_b = min(amount, required_base)
+
+        if part_b <= ZERO:
+            return amount
+
+        up_calculated = (
+            part_b
+            * bracket
+            / HUNDRED
+        )
+        up_target = self.bracket_up_target(mode)
+        final_overflow = ZERO
+
+        if up_target in {"МП", "ФМ", "СтабД"}:
+            final_overflow = self.waterfall_pillow(
+                up_calculated,
+                up_target,
+            )
+            actual_up = up_calculated - final_overflow
+            allocations["Подушка"] += actual_up
+
+        elif up_target == "Инвест":
+            st.investments += up_calculated
+            allocations["Инвестиции"] += up_calculated
+
+        elif up_target == "Досрочное":
+            applied = self.apply_early_repayment(
+                up_calculated,
+                steps,
+            )
+            allocations["Досрочное"] += applied
+            final_overflow = up_calculated - applied
+
+            if (
+                final_overflow > ZERO
+                and not any(
+                    credit.active
+                    for credit in s.credits
+                )
+            ):
+                pillow_overflow = self.waterfall_pillow(
+                    final_overflow,
+                    "ФМ",
+                )
+                allocations["Подушка"] += (
+                    final_overflow - pillow_overflow
+                )
+                final_overflow = pillow_overflow
+
+        else:
+            raise ValueError(
+                f"Неизвестное направление Бракет_B: {up_target}"
+            )
+
+        reserve_part = part_b - up_calculated
+        st.life_balance += reserve_part
+        allocations["Бытовой резерв"] = (
+            allocations.get("Бытовой резерв", ZERO)
+            + reserve_part
+        )
+
+        steps.append(
+            f"""ЭТАП B — бытовой резерв
+Недостаёт: {missing}
+Необходимая база: {required_base}
+Часть B: {part_b}
+Бракет B ({bracket}%): {up_calculated}
+Направление вверх: {up_target}
+В бытовой резерв: {reserve_part}
+Переполнение: {final_overflow}"""
+        )
+
+        return (
+            amount
+            - part_b
+            + final_overflow
+        )
 
     def stage_c(
         self,
@@ -2128,11 +1857,11 @@ class FinancialAllocator:
         )
 
         allocations: Dict[str, Decimal] = {
-    "Подушка": ZERO,
-    "Инвестиции": ZERO,
-    "Досрочное": ZERO,
-    "Бытовой резерв": ZERO,
-}
+            "Подушка": ZERO,
+            "Инвестиции": ZERO,
+            "Досрочное": ZERO,
+            "Бытовой резерв": ZERO,
+        }
 
         steps: List[str] = []
 
