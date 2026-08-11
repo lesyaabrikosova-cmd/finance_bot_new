@@ -1,401 +1,867 @@
-import os
-import json
+from __future__ import annotations
+
 import asyncio
-from datetime import datetime
-from decimal import Decimal
-from typing import Dict, Any
-from dataclasses import dataclass, field, asdict
+import logging
+import os
+import sys
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from dotenv import load_dotenv
 
-# ============================================
-# 1. КЛАССЫ ФИНАНСОВОЙ СИСТЕМЫ (упрощённая версия)
-# ============================================
+from aiogram import (
+    Bot,
+    Dispatcher,
+    F,
+    Router,
+)
 
-@dataclass
-class KZCategory:
-    name: str
-    amount: Decimal
+from aiogram.client.default import (
+    DefaultBotProperties,
+)
 
-@dataclass
-class Goal:
-    name: str
-    percent: Decimal
+from aiogram.enums import ParseMode
 
-@dataclass
-class UserSettings:
-    kz: Decimal = Decimal('85000')
-    br: Decimal = Decimal('25000')
-    tax_rate: Decimal = Decimal('6')
-    taxable_income_types: list = field(default_factory=lambda: ['Зарплата'])
-    fm_months: int = 4
-    kz_categories: list = field(default_factory=lambda: [
-        KZCategory('Квартира', Decimal('43000')),
-        KZCategory('Транспорт', Decimal('2075')),
-        KZCategory('Кот', Decimal('3485')),
-        KZCategory('Зарплата', Decimal('36440'))
-    ])
-    goals: list = field(default_factory=lambda: [
-        Goal('Хотелки', Decimal('30')),
-        Goal('Продвижение', Decimal('30')),
-        Goal('Отпуск', Decimal('20')),
-        Goal('Амортизация', Decimal('17')),
-        Goal('Подарки', Decimal('3'))
-    ])
+from aiogram.filters import (
+    Command,
+)
 
-@dataclass
-class MonthlyCounters:
-    income: Decimal = Decimal('0')
-    tax: Decimal = Decimal('0')
-    pillow_month: Decimal = Decimal('0')
-    balance_life_month: Decimal = Decimal('0')
-    br_month: Decimal = Decimal('0')
-    goals_month: Decimal = Decimal('0')
-    investments_month: Decimal = Decimal('0')
-    kz_categories_month: Dict[str, Decimal] = field(default_factory=dict)
-    goals_details: Dict[str, Decimal] = field(default_factory=dict)
+from aiogram.fsm.context import (
+    FSMContext,
+)
 
-@dataclass
-class State:
-    pillow: Decimal = Decimal('0')
-    mp_pillow: Decimal = Decimal('0')
-    fm_pillow: Decimal = Decimal('0')
-    stabd_pillow: Decimal = Decimal('0')
-    balance_life: Decimal = Decimal('0')
-    current_mode: str = '🟠3'
-    monthly: MonthlyCounters = field(default_factory=MonthlyCounters)
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
-class FinancialAllocator:
-    def __init__(self, settings: UserSettings):
-        self.settings = settings
-        self.state = State()
-        self.kz = settings.kz
-        self.br = settings.br
-        self.uz = self.kz + self.br
-        self.fm_limit = Decimal(settings.fm_months) * self.kz
-        self.kz_total = self.kz
-        self.stabd_full_limit = self.uz
-        
-        # Инициализация месячных счетчиков
-        for cat in settings.kz_categories:
-            self.state.monthly.kz_categories_month[cat.name] = Decimal('0')
-        for goal in settings.goals:
-            self.state.monthly.goals_details[goal.name] = Decimal('0')
-    
-    def process_income(self, amount: Decimal, income_type: str) -> Dict:
-        """Обработка дохода (упрощённая версия)"""
-        # Налог
-        tax = Decimal('0')
-        if income_type in self.settings.taxable_income_types:
-            tax = amount * (self.settings.tax_rate / Decimal('100'))
-        
-        sum_to_distribute = amount - tax
-        
-        # Обновляем счётчики
-        self.state.monthly.income += amount
-        self.state.monthly.tax += tax
-        
-        # Упрощённое распределение: 30% в подушку, 30% в КЖ, 20% в БР, 20% в цели
-        to_pillow = sum_to_distribute * Decimal('0.3')
-        to_kz = sum_to_distribute * Decimal('0.3')
-        to_br = sum_to_distribute * Decimal('0.2')
-        to_goals = sum_to_distribute * Decimal('0.2')
-        
-        # Подушка
-        self.state.pillow += to_pillow
-        self.state.fm_pillow += to_pillow
-        self.state.monthly.pillow_month += to_pillow
-        
-        # КЖ (распределяем по категориям)
-        total_kz = sum(cat.amount for cat in self.settings.kz_categories)
-        for cat in self.settings.kz_categories:
-            if total_kz > 0:
-                share = cat.amount / total_kz
-                cat_amount = to_kz * share
-                self.state.monthly.kz_categories_month[cat.name] += cat_amount
-                self.state.monthly.balance_life_month += cat_amount
-        
-        # БР
-        self.state.monthly.br_month += to_br
-        
-        # Цели
-        total_goal_pct = sum(goal.percent for goal in self.settings.goals)
-        for goal in self.settings.goals:
-            if total_goal_pct > 0:
-                goal_amount = to_goals * (goal.percent / total_goal_pct)
-                self.state.monthly.goals_details[goal.name] += goal_amount
-                self.state.monthly.goals_month += goal_amount
-        
-        return {
-            'amount': amount,
-            'income_type': income_type,
-            'tax': tax,
-            'distributed': sum_to_distribute,
-            'pillow': self.state.pillow,
-            'balance_life': self.state.balance_life
-        }
-    
-    def get_summary(self) -> Dict:
-        return {
-            'monthly': self.state.monthly,
-            'pillow': self.state.pillow,
-            'fm_pillow': self.state.fm_pillow,
-            'stabd_pillow': self.state.stabd_pillow,
-            'balance_life': self.state.balance_life,
-            'current_mode': self.state.current_mode,
-            'fm_limit': self.fm_limit,
-            'uz': self.uz
-        }
+from financial_engine import (
+    MODE_NAMES,
+    MODE_TITLES,
+    FinancialAllocator,
+    fmt_money,
+)
 
-# ============================================
-# 2. ХРАНЕНИЕ ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ
-# ============================================
+from onboarding import (
+    router as onboarding_router,
+)
 
-class UserDataManager:
-    def __init__(self, data_dir="user_data"):
-        self.data_dir = data_dir
-        os.makedirs(data_dir, exist_ok=True)
-    
-    def get_user_file(self, user_id: int) -> str:
-        return os.path.join(self.data_dir, f"user_{user_id}.json")
-    
-    def load_user_data(self, user_id: int) -> Dict:
-        file_path = self.get_user_file(user_id)
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return None
-    
-    def save_user_data(self, user_id: int, data: Dict):
-        file_path = self.get_user_file(user_id)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-    
-    def user_exists(self, user_id: int) -> bool:
-        return os.path.exists(self.get_user_file(user_id))
+from income import (
+    router as income_router,
+)
 
-# ============================================
-# 3. TELEGRAM БОТ
-# ============================================
+from storage import db
 
-class FinanceBot:
-    def __init__(self, token: str):
-        self.token = token
-        self.user_manager = UserDataManager()
-        self.app = Application.builder().token(token).build()
-        self._setup_handlers()
-    
-    def _setup_handlers(self):
-        self.app.add_handler(CommandHandler("start", self.cmd_start))
-        self.app.add_handler(CommandHandler("help", self.cmd_help))
-        self.app.add_handler(CommandHandler("income", self.cmd_income))
-        self.app.add_handler(CommandHandler("summary", self.cmd_summary))
-        self.app.add_handler(CommandHandler("status", self.cmd_status))
-        self.app.add_handler(CommandHandler("reset", self.cmd_reset))
-        self.app.add_handler(CallbackQueryHandler(self.callback_handler))
-    
-    def get_allocator(self, user_id: int) -> FinancialAllocator:
-        user_data = self.user_manager.load_user_data(user_id)
-        
-        if user_data is None:
-            settings = UserSettings()
-            allocator = FinancialAllocator(settings)
-            self.user_manager.save_user_data(user_id, {'settings': asdict(settings), 'state': asdict(allocator.state)})
-            return allocator
-        
-        settings = UserSettings(
-            kz=Decimal(str(user_data['settings'].get('kz', 85000))),
-            br=Decimal(str(user_data['settings'].get('br', 25000))),
-            tax_rate=Decimal(str(user_data['settings'].get('tax_rate', 6))),
-            fm_months=user_data['settings'].get('fm_months', 4)
-        )
-        
-        allocator = FinancialAllocator(settings)
-        
-        # Восстанавливаем состояние
-        state_data = user_data.get('state', {})
-        allocator.state.pillow = Decimal(str(state_data.get('pillow', 0)))
-        allocator.state.fm_pillow = Decimal(str(state_data.get('fm_pillow', 0)))
-        allocator.state.stabd_pillow = Decimal(str(state_data.get('stabd_pillow', 0)))
-        allocator.state.balance_life = Decimal(str(state_data.get('balance_life', 0)))
-        allocator.state.current_mode = state_data.get('current_mode', '🟠3')
-        
-        return allocator
-    
-    def save_allocator_state(self, user_id: int, allocator: FinancialAllocator):
-        self.user_manager.save_user_data(user_id, {
-            'settings': asdict(allocator.settings),
-            'state': asdict(allocator.state)
-        })
-    
-    # ============================================
-    # ОБРАБОТЧИКИ КОМАНД
-    # ============================================
-    
-    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if not self.user_manager.user_exists(user_id):
-            allocator = self.get_allocator(user_id)
-            self.save_allocator_state(user_id, allocator)
-        
-        keyboard = [
-            [InlineKeyboardButton("💰 Добавить доход", callback_data="add_income")],
-            [InlineKeyboardButton("📊 Сводка", callback_data="summary")],
-            [InlineKeyboardButton("📈 Статус", callback_data="status")],
-            [InlineKeyboardButton("🆘 Помощь", callback_data="help")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            f"👋 Привет! Я Финансовый AI-аллокатор.\n\n"
-            f"📌 Что я умею:\n"
-            f"• Распределять доход\n"
-            f"• Считать налоги\n"
-            f"• Отслеживать подушку безопасности\n"
-            f"• Помогать копить на цели\n\n"
-            f"Начни с добавления дохода!",
-            reply_markup=reply_markup
-        )
-    
-    async def cmd_income(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        try:
-            if not context.args:
-                await update.message.reply_text(
-                    "❌ Укажи сумму и тип дохода\n"
-                    "Пример: /income 180000 Зарплата"
+
+# ============================================================
+# ЗАГРУЗКА НАСТРОЕК
+# ============================================================
+
+
+load_dotenv()
+
+
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN"
+)
+
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Не найден BOT_TOKEN.\n\n"
+        "Создайте файл .env рядом с bot.py "
+        "и добавьте строку:\n\n"
+        "BOT_TOKEN=ваш_токен"
+    )
+
+
+# ============================================================
+# ROUTER ОСНОВНОГО ИНТЕРФЕЙСА
+# ============================================================
+
+
+router = Router()
+
+
+# ============================================================
+# КНОПКИ
+# ============================================================
+
+
+def keyboard(
+    rows: list[list[tuple[str, str]]]
+) -> InlineKeyboardMarkup:
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=data,
                 )
-                return
-            
-            amount = Decimal(str(context.args[0]))
-            income_type = context.args[1] if len(context.args) > 1 else "Зарплата"
-            
-            allocator = self.get_allocator(user_id)
-            result = allocator.process_income(amount, income_type)
-            self.save_allocator_state(user_id, allocator)
-            
-            response = f"✅ **ДОХОД ОБРАБОТАН!**\n\n"
-            response += f"💰 Сумма: {amount:,.2f} ₽\n"
-            response += f"📌 Тип: {income_type}\n"
-            response += f"🏛️ Налог: {result['tax']:,.2f} ₽\n"
-            response += f"📊 К распределению: {result['distributed']:,.2f} ₽\n\n"
-            response += f"🛟 Подушка: {result['pillow']:,.2f} ₽\n"
-            
-            await update.message.reply_text(response, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка: {str(e)}\nИспользуй: /income 180000 Зарплата")
-    
-    async def cmd_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        allocator = self.get_allocator(user_id)
-        summary = allocator.get_summary()
-        
-        response = f"📊 **СВОДНАЯ ТАБЛИЦА**\n\n"
-        response += f"📈 Доход (за месяц): {summary['monthly'].income:,.2f} ₽\n"
-        response += f"🏛️ Налог (за месяц): {summary['monthly'].tax:,.2f} ₽\n\n"
-        
-        response += f"🛟 **ПОДУШКА:**\n"
-        response += f"• За месяц: {summary['monthly'].pillow_month:,.2f} ₽\n"
-        response += f"• Всего: {summary['pillow']:,.2f} ₽\n"
-        response += f"• ФМ: {summary['fm_pillow']:,.2f} ₽ / {summary['fm_limit']:,.2f} ₽\n\n"
-        
-        response += f"❤️ **КРИТИЧЕСКАЯ ЖИЗНЬ:**\n"
-        for cat, amount in summary['monthly'].kz_categories_month.items():
-            if amount > 0:
-                response += f"• {cat}: {amount:,.2f} ₽\n"
-        
-        response += f"\n🟢 **БЫТОВОЙ РЕЗЕРВ:**\n"
-        response += f"• За месяц: {summary['monthly'].br_month:,.2f} ₽\n\n"
-        
-        response += f"🟡 **ЦЕЛИ:**\n"
-        response += f"• За месяц: {summary['monthly'].goals_month:,.2f} ₽\n"
-        for goal, amount in summary['monthly'].goals_details.items():
-            if amount > 0:
-                response += f"• {goal}: {amount:,.2f} ₽\n"
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-    
-    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        allocator = self.get_allocator(user_id)
-        summary = allocator.get_summary()
-        
-        response = f"📈 **ТЕКУЩИЙ СТАТУС**\n\n"
-        response += f"⚙️ Режим: {summary['current_mode']}\n"
-        response += f"🛟 Подушка: {summary['pillow']:,.2f} ₽\n"
-        response += f"📊 Баланс жизни: {summary['balance_life']:,.2f} ₽\n"
-        
-        await update.message.reply_text(response, parse_mode='Markdown')
-    
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = """
-📚 **ПОМОЩЬ ПО КОМАНДАМ**
+                for text, data in row
+            ]
+            for row in rows
+        ]
+    )
 
-/start - Главное меню
-/income [сумма] [тип] - Добавить доход
-/summary - Сводная таблица
-/status - Текущий статус
-/reset - Сбросить месяц
-/help - Эта помощь
 
-📱 **КОМАНДЫ В КНОПКАХ:**
-• 💰 Добавить доход - введи сумму и тип
-• 📊 Сводка - вся статистика за месяц
-• 📈 Статус - текущие балансы
-        """
-        await update.message.reply_text(help_text)
-    
-    async def cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        allocator = self.get_allocator(user_id)
-        allocator.state.monthly = MonthlyCounters()
-        self.save_allocator_state(user_id, allocator)
-        await update.message.reply_text("✅ Расчётный период сброшен!")
-    
-    async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "add_income":
-            await query.edit_message_text(
-                "💰 **ДОБАВИТЬ ДОХОД**\n\n"
-                "Используй команду:\n"
-                "`/income [сумма] [тип]`\n\n"
-                "Пример:\n"
-                "`/income 180000 Зарплата`",
-                parse_mode='Markdown'
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+
+    return keyboard([
+        [
+            (
+                "💰 Добавить доход",
+                "menu:income",
             )
-        elif query.data == "summary":
-            await self.cmd_summary(update, context)
-        elif query.data == "status":
-            await self.cmd_status(update, context)
-        elif query.data == "help":
-            await self.cmd_help(update, context)
-        elif query.data == "reset":
-            await self.cmd_reset(update, context)
+        ],
+        [
+            (
+                "📊 Состояние",
+                "menu:state",
+            ),
+            (
+                "📋 Сводка",
+                "menu:summary",
+            ),
+        ],
+        [
+            (
+                "💳 Кредиты",
+                "menu:credits",
+            ),
+            (
+                "⭐️ Цели",
+                "menu:goals",
+            ),
+        ],
+        [
+            (
+                "⚙️ Настройки",
+                "menu:settings",
+            ),
+        ],
+        [
+            (
+                "❓ Как это работает",
+                "menu:help",
+            ),
+        ],
+    ])
 
-# ============================================
-# 4. ЗАПУСК БОТА
-# ============================================
 
-def main():
-    token = os.environ.get("TELEGRAM_TOKEN")
-    
-    if not token:
-        print("❌ Ошибка: TELEGRAM_TOKEN не найден!")
-        print("1. Найди @BotFather в Telegram")
-        print("2. Создай бота командой /newbot")
-        print("3. Скопируй токен")
-        print("4. В Railway добавь переменную окружения TELEGRAM_TOKEN")
+# ============================================================
+# ПРОВЕРКА НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ
+# ============================================================
+
+
+async def get_allocator_or_warn(
+    message: Message,
+) -> FinancialAllocator | None:
+
+    allocator = db.load_allocator(
+        message.from_user.id
+    )
+
+    if allocator is None:
+
+        await message.answer(
+            "Сначала нужно создать финансовый профиль.\n\n"
+            "Отправьте команду /start и пройдите "
+            "первоначальную настройку."
+        )
+
+        return None
+
+    return allocator
+
+
+# ============================================================
+# КОМАНДА /MENU
+# ============================================================
+
+
+@router.message(
+    Command("menu")
+)
+async def command_menu(
+    message: Message,
+):
+
+    allocator = db.load_allocator(
+        message.from_user.id
+    )
+
+    if allocator is None:
+
+        await message.answer(
+            "Финансовый профиль пока не настроен.\n\n"
+            "Начните с команды /start."
+        )
+
         return
-    
-    bot = FinanceBot(token)
-    print("🚀 Бот запущен!")
-    bot.app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    await message.answer(
+        "🧪 <b>ФИНАНСОВЫЙ АЛЛОКАТОР</b>\n\n"
+        "Что хотите сделать?",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# КОМАНДА /STATE
+# ============================================================
+
+
+@router.message(
+    Command("state")
+)
+async def command_state(
+    message: Message,
+):
+
+    allocator = await get_allocator_or_warn(
+        message
+    )
+
+    if allocator is None:
+        return
+
+    await send_state(
+        message,
+        allocator,
+    )
+
+
+@router.callback_query(
+    F.data == "menu:state"
+)
+async def menu_state(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    if allocator is None:
+
+        await callback.message.answer(
+            "Сначала выполните /start."
+        )
+
+        return
+
+    await send_state(
+        callback.message,
+        allocator,
+    )
+
+
+# ============================================================
+# СОСТОЯНИЕ
+# ============================================================
+
+
+async def send_state(
+    message: Message,
+    allocator: FinancialAllocator,
+):
+
+    settings = allocator.settings
+    state = allocator.state
+
+    mode = allocator.active_mode()
+
+    next_info = allocator.next_mode_info()
+
+    profile_debt = (
+        "с долгами"
+        if any(
+            credit.active
+            for credit in settings.credits
+        )
+        else "без долгов"
+    )
+
+    text = (
+        "🧭 <b>ТЕКУЩЕЕ СОСТОЯНИЕ</b>\n\n"
+
+        f"👤 Профиль: "
+        f"<b>{settings.employment_type}, "
+        f"{profile_debt}</b>\n\n"
+
+        f"⚙️ Активный режим: "
+        f"<b>{MODE_NAMES[mode]} "
+        f"{MODE_TITLES[mode]}</b>\n\n"
+
+        f"💰 Доход за период: "
+        f"<b>{fmt_money(state.period_income)} ₽</b>\n"
+
+        f"🏛 Налог за период: "
+        f"<b>{fmt_money(state.period_tax)} ₽</b>\n\n"
+
+        f"🔄 Баланс жизни: "
+        f"<b>{fmt_money(state.life_balance)} ₽</b>\n"
+
+        f"🛟 Подушка всего: "
+        f"<b>{fmt_money(state.pillow_balance)} ₽</b>\n"
+
+        f"📈 Инвестиции всего: "
+        f"<b>{fmt_money(state.investments)} ₽</b>\n"
+
+        f"💳 Досрочно погашено: "
+        f"<b>{fmt_money(state.early_repayment)} ₽</b>"
+    )
+
+    if next_info:
+
+        text += (
+            "\n\n🏆 До следующего режима "
+            f"{next_info['next_name']} осталось:\n"
+            f"<b>{fmt_money(next_info['remaining'])} ₽</b>"
+        )
+
+    if settings.developer_mode:
+
+        text += (
+            "\n\n🛠 <b>СЛОИ ПОДУШКИ</b>\n\n"
+
+            f"Минимальная: "
+            f"{fmt_money(state.pillow_minimum)} ₽ "
+            f"/ "
+            f"{fmt_money(settings.minimum_reserve_limit)} ₽\n"
+
+            f"Форс-мажорная: "
+            f"{fmt_money(state.pillow_force_majeure)} ₽ "
+            f"/ "
+            f"{fmt_money(settings.force_majeure_limit)} ₽\n"
+
+            f"Стабилизатор: "
+            f"{fmt_money(state.pillow_stabilizer)} ₽ "
+            f"/ "
+            f"{fmt_money(settings.stabilizer_full_limit)} ₽"
+        )
+
+    await message.answer(
+        text,
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# ПОМОЩЬ
+# ============================================================
+
+
+HELP_TEXT = """
+❓ <b>КАК РАБОТАЕТ ФИНАНСОВЫЙ АЛЛОКАТОР</b>
+
+Обычный трекер расходов рассказывает, куда деньги уже ушли.
+
+Аллокатор работает наоборот: когда деньги приходят, он заранее решает, какую часть оставить на обязательную жизнь, какую отправить в резерв, на цели, погашение долгов или инвестиции.
+
+<b>🔴 Обязательная жизнь</b>
+
+Деньги на необходимые ежемесячные расходы: жильё, продукты, коммунальные услуги, связь, транспорт, лекарства и другие обязательства.
+
+<b>🟢 Бытовой резерв</b>
+
+Деньги на нерегулярные, но нормальные жизненные расходы: одежду, ремонт, кафе, подарки, стрижку, бытовые покупки и подобные траты.
+
+<b>🛟 Финансовая подушка</b>
+
+Аллокатор постепенно формирует защитный запас.
+
+Если есть долги, сначала создаётся небольшая минимальная подушка.
+
+После закрытия долгов формируется более серьёзная форс-мажорная подушка.
+
+Для человека с нерегулярным доходом дополнительно создаётся стабилизатор дохода — запас на слабые месяцы, отпуск или временное отсутствие заказов.
+
+<b>💳 Долги</b>
+
+Когда уровень безопасности позволяет, алгоритм начинает направлять свободные деньги на досрочное погашение.
+
+<b>⭐️ Цели</b>
+
+На более устойчивых этапах открывается накопление на отпуск, подарки, технику, ремонт и любые другие цели.
+
+<b>📈 Инвестиции</b>
+
+После достижения определённых уровней финансовой устойчивости часть дохода начинает направляться на долгосрочный капитал.
+
+<b>Главный принцип</b>
+
+Каждое новое поступление проходит через систему последовательно. Сначала защищается текущая жизнь и финансовая устойчивость, а уже затем свободные деньги направляются дальше.
+
+Вам не нужно самостоятельно считать проценты. Добавляйте реальные поступления, а бот рассчитает распределение.
+"""
+
+
+@router.message(
+    Command("help")
+)
+async def command_help(
+    message: Message,
+):
+
+    await message.answer(
+        HELP_TEXT,
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.callback_query(
+    F.data == "menu:help"
+)
+async def menu_help(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    await callback.message.answer(
+        HELP_TEXT,
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# КРЕДИТЫ
+# ============================================================
+
+
+@router.callback_query(
+    F.data == "menu:credits"
+)
+async def menu_credits(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    if allocator is None:
+        return
+
+    credits = allocator.settings.credits
+
+    if not credits:
+
+        await callback.message.answer(
+            "💳 <b>КРЕДИТЫ</b>\n\n"
+            "У вас нет активных кредитов "
+            "в финансовом профиле.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    lines = [
+        "💳 <b>КРЕДИТНЫЙ РЕЕСТР</b>",
+        "",
+    ]
+
+    total = 0
+
+    for number, credit in enumerate(
+        credits,
+        start=1,
+    ):
+
+        total += credit.principal_balance
+
+        status_icon = (
+            "🟢"
+            if not credit.active
+            else "🔴"
+        )
+
+        lines.extend([
+            f"<b>{number}. {credit.name}</b>",
+            f"Остаток: "
+            f"{fmt_money(credit.principal_balance)} ₽",
+            f"Ставка: {credit.annual_rate}%",
+            f"Мин. платёж: "
+            f"{fmt_money(credit.minimum_payment)} ₽",
+            f"{status_icon} {credit.status}",
+            "",
+        ])
+
+    lines.append(
+        f"Общий остаток долга: "
+        f"<b>{fmt_money(total)} ₽</b>"
+    )
+
+    await callback.message.answer(
+        "\n".join(lines),
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# ЦЕЛИ
+# ============================================================
+
+
+@router.callback_query(
+    F.data == "menu:goals"
+)
+async def menu_goals(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    if allocator is None:
+        return
+
+    goals = allocator.settings.goals
+
+    if not goals:
+
+        await callback.message.answer(
+            "⭐️ <b>ЦЕЛИ</b>\n\n"
+            "Отдельные категории целей пока "
+            "не настроены.\n\n"
+            "Когда алгоритм начнёт направлять "
+            "деньги на цели, они будут учитываться "
+            "в общей категории «Цели (всего)».",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    lines = [
+        "⭐️ <b>ФИНАНСОВЫЕ ЦЕЛИ</b>",
+        "",
+    ]
+
+    for goal in goals:
+
+        balance = (
+            allocator.state.goal_balances.get(
+                goal.name,
+                0,
+            )
+        )
+
+        lines.append(
+            f"⭐️ <b>{goal.name}</b>\n"
+            f"Доля: {goal.percentage}%\n"
+            f"Накоплено: {fmt_money(balance)} ₽\n"
+        )
+
+    await callback.message.answer(
+        "\n".join(lines),
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
+
+
+@router.callback_query(
+    F.data == "menu:settings"
+)
+async def menu_settings(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    if allocator is None:
+        return
+
+    settings = allocator.settings
+
+    debts = (
+        "Есть"
+        if any(
+            credit.active
+            for credit in settings.credits
+        )
+        else "Нет"
+    )
+
+    await callback.message.answer(
+        "⚙️ <b>НАСТРОЙКИ</b>\n\n"
+
+        f"👤 Занятость: "
+        f"<b>{settings.employment_type}</b>\n"
+
+        f"💳 Долги: "
+        f"<b>{debts}</b>\n\n"
+
+        f"🔴 Обязательная жизнь: "
+        f"<b>{fmt_money(settings.critical_life)} ₽</b>\n"
+
+        f"🟢 Бытовой резерв: "
+        f"<b>{fmt_money(settings.household_reserve)} ₽</b>\n"
+
+        f"💰 Средний доход: "
+        f"<b>{fmt_money(settings.average_income)} ₽</b>\n\n"
+
+        f"🏛 Налог: "
+        f"<b>{settings.tax_rate}%</b>\n\n"
+
+        "Редактирование отдельных разделов настроек "
+        "мы подключим следующим модулем.",
+        reply_markup=keyboard([
+            [
+                (
+                    "🔄 Настроить заново",
+                    "setup:restart",
+                )
+            ],
+            [
+                (
+                    "⬅️ Главное меню",
+                    "menu:back",
+                )
+            ],
+        ]),
+    )
+
+
+# ============================================================
+# ЗАГЛУШКА ДОХОДА
+#
+# Само распределение дохода сделаем следующим модулем,
+# потому что оно требует отдельного FSM:
+#
+# сумма -> тип -> дата -> подтверждение -> расчёт.
+# ============================================================
+
+
+
+# ============================================================
+# СВОДКА — ПОКА БАЗОВАЯ
+# ============================================================
+
+
+@router.callback_query(
+    F.data == "menu:summary"
+)
+async def menu_summary(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    if allocator is None:
+        return
+
+    state = allocator.state
+
+    await callback.message.answer(
+        "📋 <b>СВОДКА ТЕКУЩЕГО ПЕРИОДА</b>\n\n"
+
+        f"💰 Доход: "
+        f"<b>{fmt_money(state.period_income)} ₽</b>\n"
+
+        f"🏛 Налог: "
+        f"<b>{fmt_money(state.period_tax)} ₽</b>\n"
+
+        f"🛟 Подушка всего: "
+        f"<b>{fmt_money(state.pillow_balance)} ₽</b>\n"
+
+        f"📈 Инвестиции всего: "
+        f"<b>{fmt_money(state.investments)} ₽</b>\n\n"
+
+        "Полную сводную таблицу по правилам "
+        "исходного алгоритма подключим после "
+        "обработчика поступлений.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# НАЗАД
+# ============================================================
+
+
+@router.callback_query(
+    F.data == "menu:back"
+)
+async def menu_back(
+    callback: CallbackQuery,
+):
+
+    await callback.answer()
+
+    await callback.message.answer(
+        "🧪 <b>ФИНАНСОВЫЙ АЛЛОКАТОР</b>\n\n"
+        "Выберите действие.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# НЕИЗВЕСТНОЕ СООБЩЕНИЕ
+# ============================================================
+
+
+@router.message()
+async def unknown_message(
+    message: Message,
+    state: FSMContext,
+):
+
+    current_state = await state.get_state()
+
+    # Если человек находится внутри какого-либо
+    # мастера FSM, этот обработчик не должен мешать.
+    if current_state is not None:
+        return
+
+    allocator = db.load_allocator(
+        message.from_user.id
+    )
+
+    if allocator is None:
+
+        await message.answer(
+            "Я пока не знаю ваш финансовый профиль.\n\n"
+            "Отправьте /start, и я проведу вас "
+            "через настройку."
+        )
+
+        return
+
+    await message.answer(
+        "Не понял команду.\n\n"
+        "Используйте кнопки меню или команду /menu.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# ============================================================
+# TELEGRAM COMMAND MENU
+# ============================================================
+
+
+async def set_bot_commands(
+    bot: Bot,
+):
+
+    commands = [
+        BotCommand(
+            command="start",
+            description="Начать / настроить профиль",
+        ),
+        BotCommand(
+            command="menu",
+            description="Главное меню",
+        ),
+        BotCommand(
+            command="state",
+            description="Текущее состояние",
+        ),
+        BotCommand(
+            command="help",
+            description="Как работает система",
+        ),
+    ]
+
+    await bot.set_my_commands(
+        commands
+    )
+
+
+# ============================================================
+# ЗАПУСК
+# ============================================================
+
+
+async def main():
+
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format=(
+            "%(asctime)s | "
+            "%(levelname)s | "
+            "%(name)s | "
+            "%(message)s"
+        ),
+    )
+
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML,
+        ),
+    )
+
+    dp = Dispatcher()
+
+    # ВАЖНО:
+    # onboarding подключаем первым,
+    # поскольку там находится /start и FSM настройки.
+    dp.include_router(
+    onboarding_router
+)
+
+dp.include_router(
+    income_router
+)
+
+dp.include_router(
+    router
+)
+
+    await set_bot_commands(
+        bot
+    )
+
+    logging.info(
+        "Финансовый Аллокатор запущен."
+    )
+
+    try:
+
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
+
+    finally:
+
+        db.close()
+
+        await bot.session.close()
+
 
 if __name__ == "__main__":
-    main()
+
+    try:
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+        print(
+            "\nБот остановлен."
+        )

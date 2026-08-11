@@ -1,0 +1,1186 @@
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from html import escape
+
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
+
+from financial_engine import (
+    MODE_NAMES,
+    MODE_TITLES,
+    FinancialAllocator,
+    fmt_money,
+)
+
+from storage import db
+
+
+router = Router()
+
+
+# ============================================================
+# FSM
+# ============================================================
+
+
+class IncomeStates(StatesGroup):
+
+    amount = State()
+    income_type = State()
+    custom_income_type = State()
+    income_date = State()
+    confirmation = State()
+
+
+# ============================================================
+# КНОПКИ
+# ============================================================
+
+
+def keyboard(
+    rows: list[list[tuple[str, str]]]
+) -> InlineKeyboardMarkup:
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=data,
+                )
+                for text, data in row
+            ]
+            for row in rows
+        ]
+    )
+
+
+# ============================================================
+# ЧИСЛА
+# ============================================================
+
+
+def parse_decimal(
+    text: str,
+) -> Decimal | None:
+
+    if not text:
+        return None
+
+    value = (
+        text.strip()
+        .replace("₽", "")
+        .replace("\u00a0", "")
+        .replace(" ", "")
+    )
+
+    if "," in value and "." not in value:
+
+        value = value.replace(
+            ",",
+            ".",
+        )
+
+    elif (
+        "," in value
+        and "." in value
+    ):
+
+        value = (
+            value
+            .replace(".", "")
+            .replace(",", ".")
+        )
+
+    try:
+
+        return Decimal(
+            value
+        )
+
+    except (
+        InvalidOperation,
+        ValueError,
+    ):
+
+        return None
+
+
+def rub(
+    value,
+) -> str:
+
+    return (
+        fmt_money(
+            Decimal(str(value))
+        )
+        + " ₽"
+    )
+
+
+# ============================================================
+# ЗАПУСК ДОБАВЛЕНИЯ ДОХОДА
+# ============================================================
+
+
+@router.message(
+    Command("income")
+)
+async def income_command(
+    message: Message,
+    state: FSMContext,
+):
+
+    await start_income(
+        message,
+        state,
+        message.from_user.id,
+    )
+
+
+@router.callback_query(
+    F.data == "menu:income"
+)
+async def income_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await start_income(
+        callback.message,
+        state,
+        callback.from_user.id,
+    )
+
+
+async def start_income(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+):
+
+    allocator = db.load_allocator(
+        telegram_id
+    )
+
+    if allocator is None:
+
+        await message.answer(
+            "Сначала нужно настроить финансовый профиль.\n\n"
+            "Отправьте /start."
+        )
+
+        return
+
+    await state.clear()
+
+    await state.set_state(
+        IncomeStates.amount
+    )
+
+    await message.answer(
+        "💰 <b>НОВОЕ ПОСТУПЛЕНИЕ</b>\n\n"
+
+        "Сколько денег вы получили?\n\n"
+
+        "Введите полную сумму поступления "
+        "<b>до удержания налога</b>.\n\n"
+
+        "Примеры:\n"
+        "<code>50000</code>\n"
+        "<code>125 000</code>\n"
+        "<code>47850,50</code>"
+    )
+
+
+# ============================================================
+# СУММА
+# ============================================================
+
+
+@router.message(
+    IncomeStates.amount
+)
+async def income_amount(
+    message: Message,
+    state: FSMContext,
+):
+
+    amount = parse_decimal(
+        message.text
+    )
+
+    if (
+        amount is None
+        or amount <= 0
+    ):
+
+        await message.answer(
+            "Не получилось распознать сумму.\n\n"
+
+            "Введите положительное число.\n"
+            "Например: <code>75000</code>"
+        )
+
+        return
+
+    await state.update_data(
+        income_amount=str(amount)
+    )
+
+    allocator = db.load_allocator(
+        message.from_user.id
+    )
+
+    settings = allocator.settings
+
+    await state.set_state(
+        IncomeStates.income_type
+    )
+
+    # --------------------------------------------------------
+    # Собираем удобный список типов.
+    # --------------------------------------------------------
+
+    types = []
+
+    for item in (
+        settings.taxable_income_types
+    ):
+
+        if item not in types:
+            types.append(item)
+
+    common = [
+        "Зарплата",
+        "Фриланс",
+        "Подарок",
+        "Кэшбэк",
+    ]
+
+    for item in common:
+
+        if item not in types:
+            types.append(item)
+
+    # Telegram callback_data ограничен,
+    # поэтому используем номер типа.
+    await state.update_data(
+        available_income_types=types
+    )
+
+    rows = []
+
+    for index, item in enumerate(
+        types
+    ):
+
+        rows.append([
+            (
+                item,
+                f"incometype:{index}",
+            )
+        ])
+
+    rows.append([
+        (
+            "✏️ Другой тип",
+            "incometype:custom",
+        )
+    ])
+
+    tax_note = ""
+
+    if settings.tax_rate > 0:
+
+        taxable = (
+            ", ".join(
+                settings.taxable_income_types
+            )
+            if settings.taxable_income_types
+            else "не указаны"
+        )
+
+        tax_note = (
+            f"\n\n🏛 Ваша ставка налога: "
+            f"<b>{settings.tax_rate}%</b>\n"
+            f"Облагаемые типы: "
+            f"<b>{escape(taxable)}</b>"
+        )
+
+    await message.answer(
+        "🏷 <b>Что это за доход?</b>\n\n"
+
+        "Тип дохода нужен, в частности, чтобы бот "
+        "понимал, следует ли резервировать с этого "
+        "поступления налог."
+        + tax_note,
+        reply_markup=keyboard(
+            rows
+        ),
+    )
+
+
+# ============================================================
+# ТИП ДОХОДА
+# ============================================================
+
+
+@router.callback_query(
+    IncomeStates.income_type,
+    F.data.startswith("incometype:")
+)
+async def income_type_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    value = callback.data.split(
+        ":",
+        1,
+    )[1]
+
+    if value == "custom":
+
+        await state.set_state(
+            IncomeStates.custom_income_type
+        )
+
+        await callback.message.answer(
+            "Введите название типа дохода.\n\n"
+            "Например:\n"
+            "<code>Продажа техники</code>"
+        )
+
+        return
+
+    data = await state.get_data()
+
+    types = data[
+        "available_income_types"
+    ]
+
+    try:
+
+        income_type = types[
+            int(value)
+        ]
+
+    except (
+        ValueError,
+        IndexError,
+    ):
+
+        await callback.message.answer(
+            "Не удалось определить тип дохода. "
+            "Попробуйте ещё раз."
+        )
+
+        return
+
+    await state.update_data(
+        income_type=income_type
+    )
+
+    await ask_date(
+        callback.message,
+        state,
+    )
+
+
+@router.message(
+    IncomeStates.custom_income_type
+)
+async def custom_income_type(
+    message: Message,
+    state: FSMContext,
+):
+
+    value = message.text.strip()
+
+    if len(value) < 2:
+
+        await message.answer(
+            "Введите понятное название."
+        )
+
+        return
+
+    await state.update_data(
+        income_type=value
+    )
+
+    await ask_date(
+        message,
+        state,
+    )
+
+
+# ============================================================
+# ДАТА
+# ============================================================
+
+
+async def ask_date(
+    message: Message,
+    state: FSMContext,
+):
+
+    await state.set_state(
+        IncomeStates.income_date
+    )
+
+    today = date.today()
+
+    await message.answer(
+        "📅 <b>Когда поступили деньги?</b>\n\n"
+
+        f"Сегодня: "
+        f"<b>{today.strftime('%d.%m.%Y')}</b>\n\n"
+
+        "Можно выбрать сегодня или ввести другую дату "
+        "в формате <code>ДД.ММ.ГГГГ</code>.",
+        reply_markup=keyboard([
+            [
+                (
+                    "Сегодня",
+                    "incomedate:today",
+                )
+            ]
+        ]),
+    )
+
+
+@router.callback_query(
+    IncomeStates.income_date,
+    F.data == "incomedate:today"
+)
+async def income_date_today(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        income_date=date.today().isoformat()
+    )
+
+    await show_income_confirmation(
+        callback.message,
+        state,
+        callback.from_user.id,
+    )
+
+
+@router.message(
+    IncomeStates.income_date
+)
+async def income_date_text(
+    message: Message,
+    state: FSMContext,
+):
+
+    try:
+
+        parsed = datetime.strptime(
+            message.text.strip(),
+            "%d.%m.%Y",
+        ).date()
+
+    except ValueError:
+
+        await message.answer(
+            "Не удалось распознать дату.\n\n"
+            "Используйте формат:\n"
+            "<code>11.08.2026</code>"
+        )
+
+        return
+
+    if parsed > date.today():
+
+        await message.answer(
+            "Дата поступления не может быть "
+            "в будущем."
+        )
+
+        return
+
+    await state.update_data(
+        income_date=parsed.isoformat()
+    )
+
+    await show_income_confirmation(
+        message,
+        state,
+        message.from_user.id,
+    )
+
+
+# ============================================================
+# ПОДТВЕРЖДЕНИЕ
+# ============================================================
+
+
+async def show_income_confirmation(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+):
+
+    data = await state.get_data()
+
+    allocator = db.load_allocator(
+        telegram_id
+    )
+
+    amount = Decimal(
+        data["income_amount"]
+    )
+
+    income_type = data[
+        "income_type"
+    ]
+
+    income_date = date.fromisoformat(
+        data["income_date"]
+    )
+
+    tax = allocator.calculate_tax(
+        amount,
+        income_type,
+    )
+
+    after_tax = (
+        amount
+        - tax
+    )
+
+    taxable = (
+        tax > 0
+    )
+
+    tax_text = (
+        f"🏛 Налог: <b>{rub(tax)}</b>\n"
+        if taxable
+        else "🏛 Налог: <b>не удерживается</b>\n"
+    )
+
+    await state.set_state(
+        IncomeStates.confirmation
+    )
+
+    await message.answer(
+        "📋 <b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
+
+        f"💰 Сумма: "
+        f"<b>{rub(amount)}</b>\n"
+
+        f"🏷 Тип: "
+        f"<b>{escape(income_type)}</b>\n"
+
+        f"📅 Дата: "
+        f"<b>{income_date.strftime('%d.%m.%Y')}</b>\n\n"
+
+        + tax_text +
+
+        f"💵 После налога: "
+        f"<b>{rub(after_tax)}</b>\n\n"
+
+        "После подтверждения бот сразу распределит "
+        "всю сумму по вашему финансовому алгоритму.",
+        reply_markup=keyboard([
+            [
+                (
+                    "✅ Распределить",
+                    "income:confirm",
+                )
+            ],
+            [
+                (
+                    "❌ Отмена",
+                    "income:cancel",
+                )
+            ],
+        ]),
+    )
+
+
+# ============================================================
+# ОТМЕНА
+# ============================================================
+
+
+@router.callback_query(
+    IncomeStates.confirmation,
+    F.data == "income:cancel"
+)
+async def cancel_income(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.clear()
+
+    await callback.message.answer(
+        "Операция отменена.\n\n"
+        "Деньги не распределялись."
+    )
+
+
+# ============================================================
+# РАСПРЕДЕЛЕНИЕ
+# ============================================================
+
+
+@router.callback_query(
+    IncomeStates.confirmation,
+    F.data == "income:confirm"
+)
+async def confirm_income(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    telegram_id = (
+        callback.from_user.id
+    )
+
+    data = await state.get_data()
+
+    allocator = db.load_allocator(
+        telegram_id
+    )
+
+    if allocator is None:
+
+        await state.clear()
+
+        await callback.message.answer(
+            "Финансовый профиль не найден."
+        )
+
+        return
+
+    income = Decimal(
+        data["income_amount"]
+    )
+
+    income_type = data[
+        "income_type"
+    ]
+
+    income_date = date.fromisoformat(
+        data["income_date"]
+    )
+
+    # ========================================================
+    # ЗАПУСК ФИНАНСОВОГО ЯДРА
+    # ========================================================
+
+    try:
+
+        result = allocator.process_income(
+            income=income,
+            income_type=income_type,
+            income_date=income_date,
+        )
+
+    except Exception as error:
+
+        await callback.message.answer(
+            "⚠️ Во время расчёта произошла ошибка.\n\n"
+
+            f"<code>{escape(str(error))}</code>\n\n"
+
+            "Операция не была сохранена."
+        )
+
+        return
+
+    # ========================================================
+    # СНАЧАЛА ПРОВЕРКА
+    # ========================================================
+
+    if not result.checks["ok"]:
+
+        difference = result.checks[
+            "difference"
+        ]
+
+        await callback.message.answer(
+            "❌ <b>РАСПРЕДЕЛЕНИЕ НЕ СОХРАНЕНО</b>\n\n"
+
+            "Контрольная сумма не сошлась.\n\n"
+
+            f"Расхождение: "
+            f"<b>{rub(difference)}</b>\n\n"
+
+            "Это защитная остановка: бот не будет "
+            "записывать финансовую операцию, пока "
+            "математика не сходится."
+        )
+
+        return
+
+    # ========================================================
+    # СОХРАНЕНИЕ
+    # ========================================================
+
+    db.save_allocator(
+        telegram_id,
+        allocator,
+    )
+
+    await state.clear()
+
+    await send_distribution_report(
+        callback.message,
+        allocator,
+        result,
+        income_type,
+        income_date,
+    )
+
+
+# ============================================================
+# ОТЧЁТ
+# ============================================================
+
+
+async def send_distribution_report(
+    message: Message,
+    allocator: FinancialAllocator,
+    result,
+    income_type: str,
+    income_date: date,
+):
+
+    allocations = (
+        result.allocations
+    )
+
+    income = result.income
+
+    # ========================================================
+    # ЗАГОЛОВОК
+    # ========================================================
+
+    lines = [
+        "💰 <b>РАСПРЕДЕЛЕНИЕ ПОСТУПЛЕНИЯ</b>",
+        "",
+        f"Поступление: <b>{rub(income)}</b>",
+        f"Тип: <b>{escape(income_type)}</b>",
+        f"Дата: <b>{income_date.strftime('%d.%m.%Y')}</b>",
+        "",
+    ]
+
+    # ========================================================
+    # НАЛОГ
+    # ========================================================
+
+    if result.tax > 0:
+
+        lines.extend([
+            "🏛 <b>Шаг 1. Налог</b>",
+            f"Ставка: "
+            f"{allocator.settings.tax_rate}%",
+            f"Налог: <b>{rub(result.tax)}</b>",
+            "",
+        ])
+
+    # ========================================================
+    # СУММА ПОСЛЕ НАЛОГА
+    # ========================================================
+
+    lines.extend([
+        "💵 <b>Сумма к распределению</b>",
+        f"Поступление: {rub(result.income)}",
+        f"Налог: {rub(result.tax)}",
+        f"К распределению: "
+        f"<b>{rub(result.amount_to_distribute)}</b>",
+        "",
+    ])
+
+    # ========================================================
+    # РАСПРЕДЕЛЕНИЕ
+    # ========================================================
+
+    lines.append(
+        "📦 <b>Куда направить деньги</b>"
+    )
+
+    lines.append("")
+
+    # Налог
+    if result.tax > 0:
+
+        lines.append(
+            f"🏛 Налог — "
+            f"<b>{rub(result.tax)}</b>"
+        )
+
+    # Инвестиции
+    investment = allocations.get(
+        "Инвестиции",
+        Decimal("0"),
+    )
+
+    if (
+        investment > 0
+        or allocator.settings.developer_mode
+    ):
+
+        lines.append(
+            f"📈 Инвестиции — "
+            f"<b>{rub(investment)}</b>"
+        )
+
+    # Подушка
+    pillow = allocations.get(
+        "Подушка",
+        Decimal("0"),
+    )
+
+    if (
+        pillow > 0
+        or allocator.settings.developer_mode
+    ):
+
+        lines.append(
+            f"🛟 Подушка — "
+            f"<b>{rub(pillow)}</b>"
+        )
+
+    # КЖ
+    life_items = []
+
+    for key, value in allocations.items():
+
+        if key.startswith("КЖ:"):
+
+            name = key.split(
+                ":",
+                1,
+            )[1]
+
+            life_items.append(
+                (
+                    name,
+                    value,
+                )
+            )
+
+    if life_items:
+
+        life_total = sum(
+            (
+                value
+                for _, value
+                in life_items
+            ),
+            Decimal("0"),
+        )
+
+        lines.append(
+            f"🔴 Обязательная жизнь — "
+            f"<b>{rub(life_total)}</b>"
+        )
+
+        for name, value in life_items:
+
+            if (
+                value > 0
+                or allocator.settings.developer_mode
+            ):
+
+                lines.append(
+                    f"   ❤️ {escape(name)} — "
+                    f"{rub(value)}"
+                )
+
+    # Минимальный платёж
+    minimum = allocations.get(
+        "Мин. платеж",
+        Decimal("0"),
+    )
+
+    if (
+        minimum > 0
+        or (
+            allocator.settings.developer_mode
+            and allocator.settings.credits
+        )
+    ):
+
+        lines.append(
+            f"💳 Минимальные платежи — "
+            f"<b>{rub(minimum)}</b>"
+        )
+
+    # Досрочное
+    early = allocations.get(
+        "Досрочное",
+        Decimal("0"),
+    )
+
+    if (
+        early > 0
+        or allocator.settings.developer_mode
+    ):
+
+        lines.append(
+            f"💳 Досрочное погашение — "
+            f"<b>{rub(early)}</b>"
+        )
+
+    # Бытовой резерв
+    household = allocations.get(
+        "Бытовой резерв",
+        Decimal("0"),
+    )
+
+    if (
+        household > 0
+        or allocator.settings.developer_mode
+    ):
+
+        lines.append(
+            f"🟢 Бытовой резерв — "
+            f"<b>{rub(household)}</b>"
+        )
+
+    # Цели
+    goal_items = []
+
+    for key, value in allocations.items():
+
+        if key.startswith("Цели:"):
+
+            name = key.split(
+                ":",
+                1,
+            )[1]
+
+            goal_items.append(
+                (
+                    name,
+                    value,
+                )
+            )
+
+    if goal_items:
+
+        goals_total = sum(
+            (
+                value
+                for _, value
+                in goal_items
+            ),
+            Decimal("0"),
+        )
+
+        lines.append(
+            f"⭐️ Цели — "
+            f"<b>{rub(goals_total)}</b>"
+        )
+
+        for name, value in goal_items:
+
+            if (
+                value > 0
+                or allocator.settings.developer_mode
+            ):
+
+                lines.append(
+                    f"   ⭐️ {escape(name)} — "
+                    f"{rub(value)}"
+                )
+
+    # ========================================================
+    # ПРОВЕРКА
+    # ========================================================
+
+    check = result.checks
+
+    lines.extend([
+        "",
+        "☑️ <b>ПРОВЕРКА</b>",
+        f"Распределено + налог: "
+        f"<b>{rub(check['total'])}</b>",
+        f"Доход: "
+        f"<b>{rub(check['income'])}</b>",
+    ])
+
+    if check["ok"]:
+
+        lines.append(
+            "Статус: ✅ <b>Сходится</b>"
+        )
+
+    else:
+
+        lines.append(
+            "Статус: ❌ <b>Расхождение</b>"
+        )
+
+    # ========================================================
+    # РЕЖИМ
+    # ========================================================
+
+    mode = allocator.active_mode()
+
+    lines.extend([
+        "",
+        "⚙️ <b>ТЕКУЩИЙ РЕЖИМ</b>",
+        f"{MODE_NAMES[mode]} "
+        f"<b>{MODE_TITLES[mode]}</b>",
+    ])
+
+    if result.mode_before != result.mode_after:
+
+        lines.append(
+            f"✅ Переход: "
+            f"{MODE_NAMES[result.mode_before]} → "
+            f"{MODE_NAMES[result.mode_after]}"
+        )
+
+    else:
+
+        next_info = (
+            allocator.next_mode_info()
+        )
+
+        if next_info:
+
+            lines.append(
+                f"Режим не изменился."
+            )
+
+            lines.append(
+                f"До {next_info['next_name']} осталось "
+                f"<b>{rub(next_info['remaining'])}</b>"
+            )
+
+    # ========================================================
+    # РЕЖИМ РАЗРАБОТЧИКА
+    # ========================================================
+
+    if allocator.settings.developer_mode:
+
+        lines.extend([
+            "",
+            "🛠 <b>ПОШАГОВЫЙ РАСЧЁТ</b>",
+            "",
+        ])
+
+        for number, step in enumerate(
+            result.steps,
+            start=1,
+        ):
+
+            lines.append(
+                f"<b>{number}.</b>\n"
+                f"<code>{escape(str(step))}</code>"
+            )
+
+    # ========================================================
+    # СОСТОЯНИЕ
+    # ========================================================
+
+    lines.extend([
+        "",
+        "📊 <b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>",
+        f"🔄 Баланс жизни: "
+        f"<b>{rub(allocator.state.life_balance)}</b>",
+        f"🛟 Подушка: "
+        f"<b>{rub(allocator.state.pillow_balance)}</b>",
+        f"📈 Инвестиции: "
+        f"<b>{rub(allocator.state.investments)}</b>",
+    ])
+
+    # Telegram ограничивает длину сообщения.
+    # Поэтому отправляем частями.
+    await send_long_message(
+        message,
+        "\n".join(lines),
+    )
+
+
+# ============================================================
+# ДЛИННЫЕ СООБЩЕНИЯ
+# ============================================================
+
+
+async def send_long_message(
+    message: Message,
+    text: str,
+    max_length: int = 3800,
+):
+
+    if len(text) <= max_length:
+
+        await message.answer(
+            text
+        )
+
+        return
+
+    paragraphs = text.split(
+        "\n"
+    )
+
+    current = ""
+
+    for paragraph in paragraphs:
+
+        candidate = (
+            current
+            + paragraph
+            + "\n"
+        )
+
+        if (
+            len(candidate)
+            > max_length
+        ):
+
+            if current:
+
+                await message.answer(
+                    current
+                )
+
+            current = (
+                paragraph
+                + "\n"
+            )
+
+        else:
+
+            current = candidate
+
+    if current:
+
+        await message.answer(
+            current
+        )

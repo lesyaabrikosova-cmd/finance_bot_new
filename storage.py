@@ -1,0 +1,1489 @@
+# storage.py
+#
+# Хранилище финансового аллокатора.
+#
+# Использует SQLite.
+# Не требует отдельного сервера базы данных.
+#
+# Основная задача:
+# 1. сохранить настройки пользователя;
+# 2. сохранить текущее состояние;
+# 3. сохранить кредиты;
+# 4. сохранить цели;
+# 5. сохранить журнал операций;
+# 6. восстановить FinancialAllocator после перезапуска бота.
+
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Optional
+
+from financial_engine import (
+    AllocatorState,
+    Credit,
+    FinancialAllocator,
+    Goal,
+    UserSettings,
+)
+
+
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+
+DATABASE_PATH = BASE_DIR / "allocator.db"
+
+
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
+
+def decimal_to_string(value: Decimal) -> str:
+    """
+    Decimal нельзя напрямую записывать в SQLite как Decimal.
+
+    Поэтому храним денежные значения строками.
+
+    Например:
+
+        Decimal("12500.50")
+
+    превращается в:
+
+        "12500.50"
+    """
+
+    return str(value)
+
+
+def string_to_decimal(value) -> Decimal:
+    """
+    Обратное преобразование строки в Decimal.
+    """
+
+    if value is None:
+        return Decimal("0")
+
+    return Decimal(str(value))
+
+
+def json_default(value):
+    """
+    Как превращать специальные Python-типы в JSON.
+
+    Нужно для журналов операций.
+    """
+
+    if isinstance(value, Decimal):
+        return {
+            "__decimal__": str(value)
+        }
+
+    if isinstance(value, datetime):
+        return {
+            "__datetime__": value.isoformat()
+        }
+
+    raise TypeError(
+        f"Объект типа {type(value)} "
+        f"не поддерживается JSON."
+    )
+
+
+def json_object_hook(value):
+    """
+    Восстанавливает Decimal и datetime
+    после чтения JSON.
+    """
+
+    if "__decimal__" in value:
+        return Decimal(
+            value["__decimal__"]
+        )
+
+    if "__datetime__" in value:
+        return datetime.fromisoformat(
+            value["__datetime__"]
+        )
+
+    return value
+
+
+def serialize_json(value) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        default=json_default,
+    )
+
+
+def deserialize_json(value):
+    return json.loads(
+        value,
+        object_hook=json_object_hook,
+    )
+
+
+# ============================================================
+# КЛАСС DATABASE
+# ============================================================
+
+class Database:
+    """
+    Единая точка доступа к SQLite.
+
+    Telegram-обработчики не должны напрямую работать
+    с SQL.
+
+    Они обращаются сюда:
+
+        db.get_allocator(...)
+        db.save_allocator(...)
+        db.save_operation(...)
+    """
+
+    def __init__(
+        self,
+        database_path: str | Path = DATABASE_PATH,
+    ):
+        self.database_path = Path(
+            database_path
+        )
+
+        self.connection = sqlite3.connect(
+            self.database_path,
+            check_same_thread=False,
+        )
+
+        self.connection.row_factory = (
+            sqlite3.Row
+        )
+
+        # SQLite в нашем случае используется
+        # как постоянное локальное хранилище.
+        self.connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
+        self.connection.execute(
+            "PRAGMA journal_mode = WAL"
+        )
+
+        self.create_tables()
+
+    # ========================================================
+    # СОЗДАНИЕ ТАБЛИЦ
+    # ========================================================
+
+    def create_tables(self):
+        """
+        Создаёт все необходимые таблицы.
+
+        IF NOT EXISTS означает:
+        повторный запуск бота не уничтожит данные.
+        """
+
+        cursor = self.connection.cursor()
+
+        # ----------------------------------------------------
+        # Пользователи
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id INTEGER PRIMARY KEY,
+
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # Настройки пользователя
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                telegram_id INTEGER PRIMARY KEY,
+
+                has_debts INTEGER NOT NULL,
+                employment_type TEXT NOT NULL,
+
+                critical_life TEXT NOT NULL,
+                household_reserve TEXT NOT NULL,
+                average_income TEXT NOT NULL,
+
+                tax_rate TEXT NOT NULL,
+
+                taxable_income_types TEXT NOT NULL,
+
+                minimum_reserve_months TEXT NOT NULL,
+                force_majeure_months TEXT NOT NULL,
+
+                bracket_a TEXT NOT NULL,
+                bracket_b TEXT NOT NULL,
+                bracket_c TEXT NOT NULL,
+                bracket_d TEXT NOT NULL,
+                bracket_e TEXT NOT NULL,
+
+                goals_share_c TEXT NOT NULL,
+                pillow_share_c TEXT NOT NULL,
+
+                life_categories TEXT NOT NULL,
+
+                debt_strategy TEXT NOT NULL,
+
+                calculate_interest_savings INTEGER NOT NULL,
+                developer_mode INTEGER NOT NULL,
+
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # Цели
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                telegram_id INTEGER NOT NULL,
+
+                name TEXT NOT NULL,
+                percentage TEXT NOT NULL,
+                balance TEXT NOT NULL,
+
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # Кредиты
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS credits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                telegram_id INTEGER NOT NULL,
+
+                name TEXT NOT NULL,
+
+                principal_balance TEXT NOT NULL,
+                full_repayment_amount TEXT,
+
+                annual_rate TEXT NOT NULL,
+                minimum_payment TEXT NOT NULL,
+
+                payment_type TEXT NOT NULL,
+                early_repayment_action TEXT NOT NULL,
+
+                status TEXT NOT NULL,
+
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # Состояние алгоритма
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS state (
+                telegram_id INTEGER PRIMARY KEY,
+
+                life_balance TEXT NOT NULL,
+                accumulated_minimum_payments TEXT NOT NULL,
+
+                pillow_minimum TEXT NOT NULL,
+                pillow_force_majeure TEXT NOT NULL,
+                pillow_stabilizer TEXT NOT NULL,
+
+                investments TEXT NOT NULL,
+                early_repayment TEXT NOT NULL,
+
+                goal_balances TEXT NOT NULL,
+                period_life_topups TEXT NOT NULL,
+
+                period_income TEXT NOT NULL,
+                period_tax TEXT NOT NULL,
+
+                period_started_at TEXT,
+
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # Журнал операций
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                telegram_id INTEGER NOT NULL,
+
+                operation_type TEXT NOT NULL,
+
+                created_at TEXT NOT NULL,
+
+                payload TEXT NOT NULL,
+
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        # ----------------------------------------------------
+        # Индексы
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_operation_log_user
+            ON operation_log(telegram_id)
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_operation_log_date
+            ON operation_log(telegram_id, created_at)
+            """
+        )
+
+        self.connection.commit()
+
+    # ========================================================
+    # ПОЛЬЗОВАТЕЛЬ
+    # ========================================================
+
+    def ensure_user(
+        self,
+        telegram_id: int,
+    ):
+        """
+        Создаёт пользователя, если его ещё нет.
+
+        Повторный вызов безопасен.
+        """
+
+        now = datetime.utcnow().isoformat()
+
+        self.connection.execute(
+            """
+            INSERT INTO users (
+                telegram_id,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?)
+
+            ON CONFLICT(telegram_id)
+            DO UPDATE SET
+                updated_at = excluded.updated_at
+            """,
+            (
+                telegram_id,
+                now,
+                now,
+            ),
+        )
+
+        self.connection.commit()
+
+    def user_exists(
+        self,
+        telegram_id: int,
+    ) -> bool:
+
+        row = self.connection.execute(
+            """
+            SELECT telegram_id
+            FROM users
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+
+        return row is not None
+
+    # ========================================================
+    # СОХРАНЕНИЕ НАСТРОЕК
+    # ========================================================
+
+    def save_settings(
+        self,
+        telegram_id: int,
+        settings: UserSettings,
+    ):
+        """
+        Полностью сохраняет настройки пользователя.
+
+        Перед сохранением старые цели и кредиты удаляются
+        и записываются заново.
+
+        Это проще и надёжнее для нашего первого варианта.
+        """
+
+        self.ensure_user(
+            telegram_id
+        )
+
+        cursor = self.connection.cursor()
+
+        # ----------------------------------------------------
+        # Основные настройки
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            INSERT INTO settings (
+                telegram_id,
+
+                has_debts,
+                employment_type,
+
+                critical_life,
+                household_reserve,
+                average_income,
+
+                tax_rate,
+
+                taxable_income_types,
+
+                minimum_reserve_months,
+                force_majeure_months,
+
+                bracket_a,
+                bracket_b,
+                bracket_c,
+                bracket_d,
+                bracket_e,
+
+                goals_share_c,
+                pillow_share_c,
+
+                life_categories,
+
+                debt_strategy,
+
+                calculate_interest_savings,
+                developer_mode
+            )
+
+            VALUES (
+                ?, ?, ?,
+                ?, ?, ?,
+                ?,
+                ?,
+                ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?,
+                ?,
+                ?,
+                ?, ?
+            )
+
+            ON CONFLICT(telegram_id)
+            DO UPDATE SET
+
+                has_debts =
+                    excluded.has_debts,
+
+                employment_type =
+                    excluded.employment_type,
+
+                critical_life =
+                    excluded.critical_life,
+
+                household_reserve =
+                    excluded.household_reserve,
+
+                average_income =
+                    excluded.average_income,
+
+                tax_rate =
+                    excluded.tax_rate,
+
+                taxable_income_types =
+                    excluded.taxable_income_types,
+
+                minimum_reserve_months =
+                    excluded.minimum_reserve_months,
+
+                force_majeure_months =
+                    excluded.force_majeure_months,
+
+                bracket_a =
+                    excluded.bracket_a,
+
+                bracket_b =
+                    excluded.bracket_b,
+
+                bracket_c =
+                    excluded.bracket_c,
+
+                bracket_d =
+                    excluded.bracket_d,
+
+                bracket_e =
+                    excluded.bracket_e,
+
+                goals_share_c =
+                    excluded.goals_share_c,
+
+                pillow_share_c =
+                    excluded.pillow_share_c,
+
+                life_categories =
+                    excluded.life_categories,
+
+                debt_strategy =
+                    excluded.debt_strategy,
+
+                calculate_interest_savings =
+                    excluded.calculate_interest_savings,
+
+                developer_mode =
+                    excluded.developer_mode
+            """,
+            (
+                telegram_id,
+
+                int(settings.has_debts),
+                settings.employment_type,
+
+                decimal_to_string(
+                    settings.critical_life
+                ),
+
+                decimal_to_string(
+                    settings.household_reserve
+                ),
+
+                decimal_to_string(
+                    settings.average_income
+                ),
+
+                decimal_to_string(
+                    settings.tax_rate
+                ),
+
+                serialize_json(
+                    settings.taxable_income_types
+                ),
+
+                decimal_to_string(
+                    settings.minimum_reserve_months
+                ),
+
+                decimal_to_string(
+                    settings.force_majeure_months
+                ),
+
+                decimal_to_string(
+                    settings.bracket_a
+                ),
+
+                decimal_to_string(
+                    settings.bracket_b
+                ),
+
+                decimal_to_string(
+                    settings.bracket_c
+                ),
+
+                decimal_to_string(
+                    settings.bracket_d
+                ),
+
+                decimal_to_string(
+                    settings.bracket_e
+                ),
+
+                decimal_to_string(
+                    settings.goals_share_c
+                ),
+
+                decimal_to_string(
+                    settings.pillow_share_c
+                ),
+
+                serialize_json(
+                    settings.life_categories
+                ),
+
+                settings.debt_strategy,
+
+                int(
+                    settings.calculate_interest_savings
+                ),
+
+                int(
+                    settings.developer_mode
+                ),
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Цели
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            DELETE FROM goals
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        )
+
+        for goal in settings.goals:
+
+            cursor.execute(
+                """
+                INSERT INTO goals (
+                    telegram_id,
+                    name,
+                    percentage,
+                    balance
+                )
+
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    telegram_id,
+
+                    goal.name,
+
+                    decimal_to_string(
+                        goal.percentage
+                    ),
+
+                    decimal_to_string(
+                        goal.balance
+                    ),
+                ),
+            )
+
+        # ----------------------------------------------------
+        # Кредиты
+        # ----------------------------------------------------
+
+        cursor.execute(
+            """
+            DELETE FROM credits
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        )
+
+        for credit in settings.credits:
+
+            full_repayment = None
+
+            if (
+                credit.full_repayment_amount
+                is not None
+            ):
+                full_repayment = (
+                    decimal_to_string(
+                        credit.full_repayment_amount
+                    )
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO credits (
+                    telegram_id,
+
+                    name,
+
+                    principal_balance,
+                    full_repayment_amount,
+
+                    annual_rate,
+                    minimum_payment,
+
+                    payment_type,
+                    early_repayment_action,
+
+                    status
+                )
+
+                VALUES (
+                    ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?
+                )
+                """,
+                (
+                    telegram_id,
+
+                    credit.name,
+
+                    decimal_to_string(
+                        credit.principal_balance
+                    ),
+
+                    full_repayment,
+
+                    decimal_to_string(
+                        credit.annual_rate
+                    ),
+
+                    decimal_to_string(
+                        credit.minimum_payment
+                    ),
+
+                    credit.payment_type,
+                    credit.early_repayment_action,
+
+                    credit.status,
+                ),
+            )
+
+        self.connection.commit()
+
+    # ========================================================
+    # ЗАГРУЗКА НАСТРОЕК
+    # ========================================================
+
+    def load_settings(
+        self,
+        telegram_id: int,
+    ) -> Optional[UserSettings]:
+
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM settings
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        # ----------------------------------------------------
+        # Цели
+        # ----------------------------------------------------
+
+        goal_rows = self.connection.execute(
+            """
+            SELECT *
+            FROM goals
+            WHERE telegram_id = ?
+            ORDER BY id
+            """,
+            (telegram_id,),
+        ).fetchall()
+
+        goals = []
+
+        for goal_row in goal_rows:
+
+            goals.append(
+                Goal(
+                    name=goal_row["name"],
+
+                    percentage=
+                        string_to_decimal(
+                            goal_row["percentage"]
+                        ),
+
+                    balance=
+                        string_to_decimal(
+                            goal_row["balance"]
+                        ),
+                )
+            )
+
+        # ----------------------------------------------------
+        # Кредиты
+        # ----------------------------------------------------
+
+        credit_rows = self.connection.execute(
+            """
+            SELECT *
+            FROM credits
+            WHERE telegram_id = ?
+            ORDER BY id
+            """,
+            (telegram_id,),
+        ).fetchall()
+
+        credits = []
+
+        for credit_row in credit_rows:
+
+            full_repayment = (
+                None
+                if credit_row[
+                    "full_repayment_amount"
+                ] is None
+                else string_to_decimal(
+                    credit_row[
+                        "full_repayment_amount"
+                    ]
+                )
+            )
+
+            credits.append(
+                Credit(
+                    name=credit_row["name"],
+
+                    principal_balance=
+                        string_to_decimal(
+                            credit_row[
+                                "principal_balance"
+                            ]
+                        ),
+
+                    full_repayment_amount=
+                        full_repayment,
+
+                    annual_rate=
+                        string_to_decimal(
+                            credit_row[
+                                "annual_rate"
+                            ]
+                        ),
+
+                    minimum_payment=
+                        string_to_decimal(
+                            credit_row[
+                                "minimum_payment"
+                            ]
+                        ),
+
+                    payment_type=
+                        credit_row[
+                            "payment_type"
+                        ],
+
+                    early_repayment_action=
+                        credit_row[
+                            "early_repayment_action"
+                        ],
+
+                    status=
+                        credit_row[
+                            "status"
+                        ],
+                )
+            )
+
+        # ----------------------------------------------------
+        # Создание UserSettings
+        # ----------------------------------------------------
+
+        settings = UserSettings(
+
+            has_debts=bool(
+                row["has_debts"]
+            ),
+
+            employment_type=
+                row["employment_type"],
+
+            critical_life=
+                string_to_decimal(
+                    row["critical_life"]
+                ),
+
+            household_reserve=
+                string_to_decimal(
+                    row["household_reserve"]
+                ),
+
+            average_income=
+                string_to_decimal(
+                    row["average_income"]
+                ),
+
+            tax_rate=
+                string_to_decimal(
+                    row["tax_rate"]
+                ),
+
+            taxable_income_types=
+                deserialize_json(
+                    row[
+                        "taxable_income_types"
+                    ]
+                ),
+
+            minimum_reserve_months=
+                string_to_decimal(
+                    row[
+                        "minimum_reserve_months"
+                    ]
+                ),
+
+            force_majeure_months=
+                string_to_decimal(
+                    row[
+                        "force_majeure_months"
+                    ]
+                ),
+
+            bracket_a=
+                string_to_decimal(
+                    row["bracket_a"]
+                ),
+
+            bracket_b=
+                string_to_decimal(
+                    row["bracket_b"]
+                ),
+
+            bracket_c=
+                string_to_decimal(
+                    row["bracket_c"]
+                ),
+
+            bracket_d=
+                string_to_decimal(
+                    row["bracket_d"]
+                ),
+
+            bracket_e=
+                string_to_decimal(
+                    row["bracket_e"]
+                ),
+
+            goals_share_c=
+                string_to_decimal(
+                    row["goals_share_c"]
+                ),
+
+            pillow_share_c=
+                string_to_decimal(
+                    row["pillow_share_c"]
+                ),
+
+            life_categories=
+                deserialize_json(
+                    row["life_categories"]
+                ),
+
+            goals=goals,
+
+            credits=credits,
+
+            debt_strategy=
+                row["debt_strategy"],
+
+            calculate_interest_savings=
+                bool(
+                    row[
+                        "calculate_interest_savings"
+                    ]
+                ),
+
+            developer_mode=
+                bool(
+                    row[
+                        "developer_mode"
+                    ]
+                ),
+        )
+
+        return settings
+
+    # ========================================================
+    # СОХРАНЕНИЕ STATE
+    # ========================================================
+
+    def save_state(
+        self,
+        telegram_id: int,
+        state: AllocatorState,
+    ):
+
+        self.ensure_user(
+            telegram_id
+        )
+
+        self.connection.execute(
+            """
+            INSERT INTO state (
+
+                telegram_id,
+
+                life_balance,
+                accumulated_minimum_payments,
+
+                pillow_minimum,
+                pillow_force_majeure,
+                pillow_stabilizer,
+
+                investments,
+                early_repayment,
+
+                goal_balances,
+                period_life_topups,
+
+                period_income,
+                period_tax,
+
+                period_started_at
+            )
+
+            VALUES (
+                ?,
+                ?, ?,
+                ?, ?, ?,
+                ?, ?,
+                ?, ?,
+                ?, ?,
+                ?
+            )
+
+            ON CONFLICT(telegram_id)
+            DO UPDATE SET
+
+                life_balance =
+                    excluded.life_balance,
+
+                accumulated_minimum_payments =
+                    excluded.accumulated_minimum_payments,
+
+                pillow_minimum =
+                    excluded.pillow_minimum,
+
+                pillow_force_majeure =
+                    excluded.pillow_force_majeure,
+
+                pillow_stabilizer =
+                    excluded.pillow_stabilizer,
+
+                investments =
+                    excluded.investments,
+
+                early_repayment =
+                    excluded.early_repayment,
+
+                goal_balances =
+                    excluded.goal_balances,
+
+                period_life_topups =
+                    excluded.period_life_topups,
+
+                period_income =
+                    excluded.period_income,
+
+                period_tax =
+                    excluded.period_tax,
+
+                period_started_at =
+                    excluded.period_started_at
+            """,
+            (
+                telegram_id,
+
+                decimal_to_string(
+                    state.life_balance
+                ),
+
+                decimal_to_string(
+                    state.accumulated_minimum_payments
+                ),
+
+                decimal_to_string(
+                    state.pillow_minimum
+                ),
+
+                decimal_to_string(
+                    state.pillow_force_majeure
+                ),
+
+                decimal_to_string(
+                    state.pillow_stabilizer
+                ),
+
+                decimal_to_string(
+                    state.investments
+                ),
+
+                decimal_to_string(
+                    state.early_repayment
+                ),
+
+                serialize_json(
+                    state.goal_balances
+                ),
+
+                serialize_json(
+                    state.period_life_topups
+                ),
+
+                decimal_to_string(
+                    state.period_income
+                ),
+
+                decimal_to_string(
+                    state.period_tax
+                ),
+
+                state.period_started_at,
+            ),
+        )
+
+        self.connection.commit()
+
+    # ========================================================
+    # ЗАГРУЗКА STATE
+    # ========================================================
+
+    def load_state(
+        self,
+        telegram_id: int,
+    ) -> Optional[AllocatorState]:
+
+        row = self.connection.execute(
+            """
+            SELECT *
+            FROM state
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        state = AllocatorState(
+
+            life_balance=
+                string_to_decimal(
+                    row["life_balance"]
+                ),
+
+            accumulated_minimum_payments=
+                string_to_decimal(
+                    row[
+                        "accumulated_minimum_payments"
+                    ]
+                ),
+
+            pillow_minimum=
+                string_to_decimal(
+                    row["pillow_minimum"]
+                ),
+
+            pillow_force_majeure=
+                string_to_decimal(
+                    row["pillow_force_majeure"]
+                ),
+
+            pillow_stabilizer=
+                string_to_decimal(
+                    row["pillow_stabilizer"]
+                ),
+
+            investments=
+                string_to_decimal(
+                    row["investments"]
+                ),
+
+            early_repayment=
+                string_to_decimal(
+                    row["early_repayment"]
+                ),
+
+            goal_balances=
+                deserialize_json(
+                    row["goal_balances"]
+                ),
+
+            period_life_topups=
+                deserialize_json(
+                    row[
+                        "period_life_topups"
+                    ]
+                ),
+
+            period_income=
+                string_to_decimal(
+                    row["period_income"]
+                ),
+
+            period_tax=
+                string_to_decimal(
+                    row["period_tax"]
+                ),
+
+            period_started_at=
+                row["period_started_at"],
+        )
+
+        return state
+
+    # ========================================================
+    # СОХРАНЕНИЕ ОПЕРАЦИИ
+    # ========================================================
+
+    def save_operation(
+        self,
+        telegram_id: int,
+        operation_type: str,
+        payload: dict,
+    ):
+
+        self.ensure_user(
+            telegram_id
+        )
+
+        self.connection.execute(
+            """
+            INSERT INTO operation_log (
+                telegram_id,
+                operation_type,
+                created_at,
+                payload
+            )
+
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                telegram_id,
+
+                operation_type,
+
+                datetime.utcnow().isoformat(),
+
+                serialize_json(
+                    payload
+                ),
+            ),
+        )
+
+        self.connection.commit()
+
+    # ========================================================
+    # ЗАГРУЗКА ОПЕРАЦИЙ
+    # ========================================================
+
+    def load_operations(
+        self,
+        telegram_id: int,
+        limit: int = 100,
+    ) -> list[dict]:
+
+        rows = self.connection.execute(
+            """
+            SELECT
+                id,
+                operation_type,
+                created_at,
+                payload
+
+            FROM operation_log
+
+            WHERE telegram_id = ?
+
+            ORDER BY id DESC
+
+            LIMIT ?
+            """,
+            (
+                telegram_id,
+                limit,
+            ),
+        ).fetchall()
+
+        result = []
+
+        for row in rows:
+
+            result.append({
+                "id": row["id"],
+
+                "type":
+                    row["operation_type"],
+
+                "created_at":
+                    row["created_at"],
+
+                "payload":
+                    deserialize_json(
+                        row["payload"]
+                    ),
+            })
+
+        return result
+
+    # ========================================================
+    # ЗАГРУЗКА ВСЕГО АЛЛОКАТОРА
+    # ========================================================
+
+    def load_allocator(
+        self,
+        telegram_id: int,
+    ) -> Optional[FinancialAllocator]:
+
+        settings = self.load_settings(
+            telegram_id
+        )
+
+        if settings is None:
+            return None
+
+        state = self.load_state(
+            telegram_id
+        )
+
+        if state is None:
+            state = AllocatorState()
+
+        allocator = FinancialAllocator(
+            settings=settings,
+            state=state,
+        )
+
+        return allocator
+
+    # ========================================================
+    # СОХРАНЕНИЕ ВСЕГО АЛЛОКАТОРА
+    # ========================================================
+
+    def save_allocator(
+        self,
+        telegram_id: int,
+        allocator: FinancialAllocator,
+    ):
+
+        self.ensure_user(
+            telegram_id
+        )
+
+        # Сохраняем настройки.
+        self.save_settings(
+            telegram_id,
+            allocator.settings,
+        )
+
+        # Сохраняем состояние.
+        self.save_state(
+            telegram_id,
+            allocator.state,
+        )
+
+        # Отдельно сохраняем последние операции
+        # из operation_log ядра.
+        #
+        # Для защиты от повторной записи здесь
+        # используется отдельная логика ниже.
+
+        operations = (
+            allocator.state.operation_log
+        )
+
+        if operations:
+
+            latest = operations[-1]
+
+            operation_type = latest.get(
+                "type",
+                "unknown",
+            )
+
+            self.save_operation(
+                telegram_id,
+                operation_type,
+                latest,
+            )
+
+    # ========================================================
+    # ПОЛНОЕ УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ
+    # ========================================================
+
+    def delete_user(
+        self,
+        telegram_id: int,
+    ):
+
+        self.connection.execute(
+            """
+            DELETE FROM users
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        )
+
+        self.connection.commit()
+
+    # ========================================================
+    # СТАТИСТИКА
+    # ========================================================
+
+    def operation_count(
+        self,
+        telegram_id: int,
+    ) -> int:
+
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM operation_log
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+
+        return int(
+            row["count"]
+        )
+
+    # ========================================================
+    # ЗАКРЫТИЕ
+    # ========================================================
+
+    def close(self):
+
+        if self.connection:
+            self.connection.close()
+
+
+# ============================================================
+# ГЛОБАЛЬНЫЙ ОБЪЕКТ БАЗЫ
+# ============================================================
+
+db = Database()

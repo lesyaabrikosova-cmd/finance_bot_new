@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+allocator.db
+.DS_Store
