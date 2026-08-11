@@ -59,6 +59,10 @@ from settings_editor import (
     router as settings_router,
 )
 
+from dashboard import (
+    router as dashboard_router,
+)
+
 from storage import db
 
 
@@ -120,51 +124,51 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return keyboard([
         [
             (
-                "💰 Добавить доход",
+                "Новый доход",
                 "menu:income",
             )
         ],
         [
             (
-                "📊 Моя финансовая картина",
+                "Балансы",
                 "menu:analytics",
             ),
             (
-                "🧭 Мой режим",
+                "Режим",
                 "menu:state",
             ),
         ],
         [
             (
-                "💳 Кредиты",
+                "Кредиты",
                 "menu:credits",
             ),
             (
-                "⭐️ Цели",
+                "Цели",
                 "menu:goals",
             ),
         ],
         [
             (
-                "📅 Новый расчётный период",
+                "Новый расчётный период",
                 "period:new",
             )
         ],
         [
             (
-                "⚙️ Настройки",
+                "Настройки",
                 "settings:open",
             )
         ],
         [
             (
-                "✨ Почему это работает",
+                "От разработчика",
                 "menu:about",
             )
         ],
         [
             (
-                "❓ Помощь",
+                "Помощь",
                 "menu:help",
             )
         ],
@@ -713,11 +717,11 @@ async def set_bot_commands(
         ),
         BotCommand(
             command="state",
-            description="Текущее состояние",
+            description="Мой режим",
         ),
         BotCommand(
             command="help",
-            description="Как работает система",
+            description="Как пользоваться ботом",
         ),
     ]
 
@@ -761,6 +765,11 @@ async def main():
     dp.include_router(
         income_router
     )
+    # Главное меню, Балансы, режим, помощь
+    # ВАЖНО: этот роутер должен быть ДО settings_router.
+    dp.include_router(
+        dashboard_router
+    )
 
     # Новый расчётный период
     dp.include_router(
@@ -772,7 +781,7 @@ async def main():
         settings_router
     )
 
-    # Главное меню и остальные команды
+    # Старые обработчики и остальные команды
     dp.include_router(
         router
     )

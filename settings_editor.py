@@ -74,6 +74,18 @@ async def show_settings_menu(message: Message, telegram_id: int):
 
     s = allocator.settings
     st = allocator.state
+    
+    dev_status = (
+        "включён"
+        if s.developer_mode
+        else "выключен"
+    )
+
+    dev_button = (
+        "🛠 Выключить режим разработчика"
+        if s.developer_mode
+        else "🛠 Включить режим разработчика"
+    )
 
     goals = ", ".join(f"{g.name} {g.percentage}%" for g in s.goals) if s.goals else "без отдельных категорий"
     categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"
@@ -84,7 +96,8 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
         f"🏛 Налог: <b>{s.tax_rate}%</b>\n"
-        f"🛟 Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n\n"
+        f"🛟 Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
+        f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"
         f"⭐️ Цели: {escape(goals)}\n\n"
         f"Распределение этапа C: ⭐️ цели {s.goals_share_c}% / 🛟 подушка {s.pillow_share_c}%",
@@ -96,15 +109,76 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("❤️ Категории КЖ", "settings:life_categories")],
             [("⭐️ Проценты целей", "settings:goals")],
             [("⚖️ Цели / Подушка этапа C", "settings:c_split")],
+            [(dev_button, "settings:developer")],
             [("🔄 Пройти настройку заново", "setup:restart")],
             [("⬅️ Главное меню", "menu:back")],
         ]),
     )
 
-@router.callback_query(F.data.in_({"settings:open", "menu:settings"}))
-async def open_settings(callback: CallbackQuery):
+@router.callback_query(
+    F.data.in_(
+        {
+            "settings:open",
+            "menu:settings",
+        }
+    )
+)
+async def open_settings(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
     await callback.answer()
-    await show_settings_menu(callback.message, callback.from_user.id)
+
+    await state.clear()
+
+    await show_settings_menu(
+        callback.message,
+        callback.from_user.id,
+    )
+
+@router.callback_query(
+    F.data == "settings:developer"
+)
+async def toggle_developer(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.clear()
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    if allocator is None:
+        return
+
+    allocator.settings.developer_mode = (
+        not allocator.settings.developer_mode
+    )
+
+    db.save_allocator(
+        callback.from_user.id,
+        allocator,
+    )
+
+    status = (
+        "включён"
+        if allocator.settings.developer_mode
+        else "выключен"
+    )
+
+    await callback.message.answer(
+        f"✅ Режим разработчика {status}."
+    )
+
+    await show_settings_menu(
+        callback.message,
+        callback.from_user.id,
+    )
 
 @router.callback_query(F.data == "settings:pillow")
 async def edit_pillow(callback: CallbackQuery, state: FSMContext):
