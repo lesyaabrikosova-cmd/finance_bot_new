@@ -815,22 +815,22 @@ async def main():
         ),
     )
 
-    dp = Dispatcher()
+       dp = Dispatcher()
 
-    # ВАЖНО:
-    # onboarding подключаем первым,
-    # поскольку там находится /start и FSM настройки.
+    # Мастер первоначальной настройки
     dp.include_router(
-    onboarding_router
-)
+        onboarding_router
+    )
 
-dp.include_router(
-    income_router
-)
+    # Добавление и распределение доходов
+    dp.include_router(
+        income_router
+    )
 
-dp.include_router(
-    router
-)
+    # Главное меню и остальные команды
+    dp.include_router(
+        router
+    )
 
     await set_bot_commands(
         bot
