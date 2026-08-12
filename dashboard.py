@@ -591,25 +591,25 @@ async def send_balances(
     lines = [
         f"<b>БАЛАНСЫ — {period_label.upper()}</b>",
         "",
-        f"👛 Доход итого: "
+        f"Доход итого: "
         f"<b>{rub(income)}</b>",
-        f"🏛️ Налог: "
+        f"Налог: "
         f"<b>{rub(tax)}</b> "
         f"({pct(tax, income)})",
         "",
-        f"🛟 Подушка за период: "
+        f"Подушка за период: "
         f"<b>{rub(pillow_period)}</b> "
         f"({pct(pillow_period, income)})",
-        f"🛟 Подушка итого: "
+        f"Подушка итого: "
         f"<b>{rub(state.pillow_balance)}</b>",
         "",
-        f"📈 Инвестиции за период: "
+        f"Инвестиции за период: "
         f"<b>{rub(investment_period)}</b> "
         f"({pct(investment_period, income)})",
-        f"📈 Инвестиции итого: "
+        f"Всего направлено в инвестиции: "
         f"<b>{rub(state.investments)}</b>",
         "",
-        f"🔄 Баланс жизни: "
+        f"Баланс жизни: "
         f"<b>{rub(state.life_balance)}</b>",
         "",
         "<b>КАТЕГОРИИ КЖ</b>",
@@ -643,7 +643,7 @@ async def send_balances(
         )
 
         lines.append(
-            f"❤️ {escape(name)}: "
+            f"{escape(name)}: "
             f"<b>{rub(amount)}</b> "
             f"({pct(amount, income)})"
         )
@@ -654,7 +654,7 @@ async def send_balances(
 
     lines.extend([
         "",
-        f"💚 Бытовой резерв: "
+        f"Бытовой резерв: "
         f"<b>{rub(household_period)}</b> "
         f"({pct(household_period, income)})",
         "",
@@ -678,7 +678,7 @@ async def send_balances(
             )
 
             lines.append(
-                f"⭐️ {escape(goal.name)}: "
+                f"{escape(goal.name)}: "
                 f"<b>{rub(amount)}</b> "
                 f"({pct(amount, income)})"
             )
@@ -691,7 +691,7 @@ async def send_balances(
         )
 
         lines.append(
-            f"⭐️ Цели (всего): "
+            f"Цели (всего): "
             f"<b>{rub(amount)}</b> "
             f"({pct(amount, income)})"
         )
@@ -715,15 +715,15 @@ async def send_balances(
         lines.extend([
             "",
             "<b>КРЕДИТЫ</b>",
-            f"💳 Минимальные платежи за период: "
+            f"Минимальные платежи за период: "
             f"<b>{rub(minimum_period)}</b> "
             f"({pct(minimum_period, income)})",
-            f"💳 Досрочно за период: "
+            f"Досрочно за период: "
             f"<b>{rub(early_period)}</b> "
             f"({pct(early_period, income)})",
-            f"💳 Досрочно погашено всего: "
+            f"Досрочно погашено всего: "
             f"<b>{rub(state.early_repayment)}</b>",
-            f"💳 Остаток активных долгов: "
+            f"Остаток активных долгов: "
             f"<b>{rub(active_debt)}</b>",
         ])
 
@@ -750,16 +750,16 @@ async def send_balances(
     lines.extend([
         "",
         "<b>ПОРОГИ</b>",
-        f"🎯 До КЖ осталось: "
+        f"До КЖ осталось: "
         f"<b>{rub(until_kzh)}</b>",
-        f"🎯 До УЖ осталось: "
+        f"До УЖ осталось: "
         f"<b>{rub(until_uzh)}</b>",
     ])
 
     if next_info:
 
         lines.append(
-            f"🎯 До следующего режима "
+            f"До следующего режима "
             f"{next_info['next_name']}: "
             f"<b>{rub(next_info['remaining'])}</b>"
         )
@@ -767,7 +767,7 @@ async def send_balances(
     else:
 
         lines.append(
-            "🎯 До следующего режима: "
+            "До следующего режима: "
             "<b>максимальный режим достигнут</b>"
         )
 
@@ -873,4 +873,276 @@ async def menu_about(
     await callback.message.answer(
         ABOUT_TEXT,
         reply_markup=main_menu_keyboard(),
+    )
+
+    
+# ============================================================
+# АНАЛИЗ ДОХОДОВ
+# ============================================================
+
+def income_operations_current_period(allocator) -> list[dict]:
+    operations = []
+
+    for operation in getattr(
+        allocator.state,
+        "distribution_history",
+        [],
+    ):
+        if operation.get("type") != "income_distribution":
+            continue
+
+        if not operation_is_in_current_period(
+            operation,
+            getattr(
+                allocator.state,
+                "period_started_at",
+                None,
+            ),
+        ):
+            continue
+
+        operations.append(operation)
+
+    return operations
+
+
+async def send_income_analysis(
+    message: Message,
+    telegram_id: int,
+):
+    allocator = db.load_allocator(telegram_id)
+
+    if allocator is None:
+        await message.answer(
+            "Сначала создайте финансовый профиль через /start."
+        )
+        return
+
+    operations = income_operations_current_period(
+        allocator
+    )
+
+    if not operations:
+        await message.answer(
+            "<b>АНАЛИЗ ДОХОДОВ</b>\n\n"
+            "В текущем расчётном периоде пока нет поступлений.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    totals: dict[str, Decimal] = {}
+    total_income = Decimal("0")
+
+    for operation in operations:
+        income_type = str(
+            operation.get("income_type")
+            or "Без типа"
+        )
+        amount = D(
+            operation.get(
+                "income",
+                Decimal("0"),
+            )
+        )
+
+        totals[income_type] = (
+            totals.get(
+                income_type,
+                Decimal("0"),
+            )
+            + amount
+        )
+
+        total_income += amount
+
+    ordered = sorted(
+        totals.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    lines = [
+        "<b>АНАЛИЗ ДОХОДОВ</b>",
+        "",
+        f"👛 Доход итого: <b>{rub(total_income)}</b>",
+        "",
+    ]
+
+    for income_type, amount in ordered:
+        lines.append(
+            f"{escape(income_type)} — "
+            f"<b>{rub(amount)}</b> "
+            f"({pct(amount, total_income)})"
+        )
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.callback_query(
+    F.data == "menu:income_analysis"
+)
+async def menu_income_analysis(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+    await state.clear()
+
+    await send_income_analysis(
+        callback.message,
+        callback.from_user.id,
+    )
+
+
+# ============================================================
+# ИСТОРИЯ
+# ============================================================
+
+async def send_history(
+    message: Message,
+    telegram_id: int,
+):
+    allocator = db.load_allocator(telegram_id)
+
+    if allocator is None:
+        await message.answer(
+            "Сначала создайте финансовый профиль через /start."
+        )
+        return
+
+    operations = list(
+        getattr(
+            allocator.state,
+            "operation_log",
+            [],
+        )
+    )
+
+    if not operations:
+        await message.answer(
+            "<b>ИСТОРИЯ</b>\n\n"
+            "Операций пока нет.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    lines = [
+        "<b>ИСТОРИЯ</b>",
+        "",
+        "Последние операции:",
+        "",
+    ]
+
+    shown = 0
+
+    for operation in reversed(operations):
+        op_type = operation.get("type")
+
+        if op_type == "income_distribution":
+            raw_date = str(
+                operation.get("date", "")
+            )
+
+            try:
+                formatted_date = date.fromisoformat(
+                    raw_date[:10]
+                ).strftime("%d.%m.%Y")
+            except ValueError:
+                formatted_date = raw_date or "без даты"
+
+            income_type = escape(
+                str(
+                    operation.get(
+                        "income_type",
+                        "Без типа",
+                    )
+                )
+            )
+
+            amount = D(
+                operation.get(
+                    "income",
+                    Decimal("0"),
+                )
+            )
+
+            lines.append(
+                f"{formatted_date} — "
+                f"{income_type} — "
+                f"<b>{rub(amount)}</b>"
+            )
+
+        elif op_type == "minimum_payment":
+            raw_date = str(
+                operation.get("date", "")
+            )
+
+            try:
+                formatted_date = date.fromisoformat(
+                    raw_date[:10]
+                ).strftime("%d.%m.%Y")
+            except ValueError:
+                formatted_date = raw_date or "без даты"
+
+            credit_name = escape(
+                str(
+                    operation.get(
+                        "credit",
+                        "Кредит",
+                    )
+                )
+            )
+
+            lines.append(
+                f"{formatted_date} — "
+                f"минимальный платёж — "
+                f"{credit_name}"
+            )
+
+        elif op_type == "period_reset":
+            lines.append(
+                "Начат новый расчётный период"
+            )
+
+        else:
+            continue
+
+        shown += 1
+
+        if shown >= 20:
+            break
+
+    if shown == 0:
+        lines.append(
+            "Подходящих операций пока нет."
+        )
+
+    if len(operations) > shown:
+        lines.extend([
+            "",
+            "Показаны последние 20 операций.",
+        ])
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.callback_query(
+    F.data == "menu:history"
+)
+async def menu_history(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+    await state.clear()
+
+    await send_history(
+        callback.message,
+        callback.from_user.id,
     )
