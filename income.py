@@ -270,9 +270,13 @@ async def income_amount(
 
     common = [
         "Зарплата",
-        "Фриланс",
+        "Халтура",
+        "Частник",
         "Подарок",
-        "Кэшбэк",
+        "Авито",
+        "Подработка",
+        "Премия",
+        "Фриланс",
     ]
 
     for item in common:
@@ -624,15 +628,15 @@ async def show_income_confirmation(
     )
 
     await message.answer(
-        "📋 <b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
+        "<b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
 
-        f"💰 Сумма: "
+        f"Сумма: "
         f"<b>{rub(amount)}</b>\n"
 
-        f"🏷 Тип: "
+        f"Тип: "
         f"<b>{escape(income_type)}</b>\n"
 
-        f"📅 Дата: "
+        f"Дата: "
         f"<b>{income_date.strftime('%d.%m.%Y')}</b>\n\n"
 
         + tax_text +
