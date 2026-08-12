@@ -271,13 +271,9 @@ async def income_amount(
 
     common = [
         "Зарплата",
-        "Халтура",
-        "Частник",
-        "Подарок",
-        "Авито",
-        "Подработка",
-        "Премия",
         "Фриланс",
+        "Подарок",
+        "Кэшбэк",
     ]
 
     for item in common:
@@ -571,14 +567,6 @@ async def show_income_confirmation(
         data["income_date"]
     )
 
-    # --------------------------------------------------------
-    # Налог:
-    #
-    # tax_override = None -> обычное правило профиля;
-    # tax_override = "0"  -> принудительно без налога;
-    # другое значение     -> налог только этой операции.
-    # --------------------------------------------------------
-
     tax_override = data.get(
         "tax_override"
     )
@@ -629,15 +617,15 @@ async def show_income_confirmation(
     )
 
     await message.answer(
-        "<b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
+        "📋 <b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
 
-        f"Сумма: "
+        f"💰 Сумма: "
         f"<b>{rub(amount)}</b>\n"
 
-        f"Тип: "
+        f"🏷 Тип: "
         f"<b>{escape(income_type)}</b>\n"
 
-        f"Дата: "
+        f"📅 Дата: "
         f"<b>{income_date.strftime('%d.%m.%Y')}</b>\n\n"
 
         + tax_text +
@@ -780,9 +768,7 @@ async def tax_edit_auto(
 
     await state.update_data(
         tax_override=None,
-        tax_override_label=(
-            "по настройкам профиля"
-        ),
+        tax_override_label="по настройкам профиля",
     )
 
     await show_income_confirmation(
@@ -827,23 +813,19 @@ async def tax_edit_fixed_percent(
     await callback.answer()
 
     try:
-
         percent = Decimal(
             callback.data.split(
                 ":",
                 2,
             )[2]
         )
-
     except (
         InvalidOperation,
         IndexError,
     ):
-
         await callback.message.answer(
             "Не удалось определить ставку."
         )
-
         return
 
     data = await state.get_data()
@@ -860,9 +842,7 @@ async def tax_edit_fixed_percent(
 
     await state.update_data(
         tax_override=str(tax),
-        tax_override_label=(
-            f"вручную {percent}%"
-        ),
+        tax_override_label=f"вручную {percent}%",
     )
 
     await show_income_confirmation(
@@ -911,11 +891,9 @@ async def save_custom_tax_percent(
         or percent < 0
         or percent > 100
     ):
-
         await message.answer(
             "Введите процент от 0 до 100."
         )
-
         return
 
     data = await state.get_data()
@@ -932,9 +910,7 @@ async def save_custom_tax_percent(
 
     await state.update_data(
         tax_override=str(tax),
-        tax_override_label=(
-            f"вручную {percent}%"
-        ),
+        tax_override_label=f"вручную {percent}%",
     )
 
     await show_income_confirmation(
@@ -989,19 +965,15 @@ async def save_custom_tax_amount(
         or tax < 0
         or tax > amount
     ):
-
         await message.answer(
             "Введите сумму от 0 ₽ до суммы "
             f"поступления {rub(amount)}."
         )
-
         return
 
     await state.update_data(
         tax_override=str(tax),
-        tax_override_label=(
-            "сумма введена вручную"
-        ),
+        tax_override_label="сумма введена вручную",
     )
 
     await show_income_confirmation(
@@ -1204,6 +1176,12 @@ async def send_distribution_report(
 
     ZERO = Decimal("0")
 
+    # Без знака ₽ — для компактного основного отчёта.
+    def money_plain(value) -> str:
+        return fmt_money(
+            Decimal(str(value))
+        )
+
     # ========================================================
     # ДАНО
     # ========================================================
@@ -1211,23 +1189,18 @@ async def send_distribution_report(
     lines = [
         "<b>ДАНО</b>",
         "",
-        f"Поступление: <b>{rub(result.income)}</b>",
-        f"Тип: <b>{escape(income_type)}</b>",
-        f"Дата: <b>{income_date.strftime('%d.%m.%Y')}</b>",
+        f"{income_date.strftime('%d.%m.%Y')}",
+        f"{escape(income_type)} — "
+        f"{money_plain(result.income)}",
         "",
-        "<b>РАСПРЕДЕЛЕНИЕ</b>",
         "",
     ]
 
     # ========================================================
-    # ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ
-    #
-    # Обычный режим:
-    # показываем только суммы > 0.
-    #
-    # Режим разработчика:
-    # показываем вообще всё, включая 0 ₽.
+    # РАСПРЕДЕЛЕНИЕ
     # ========================================================
+
+    distribution_lines = []
 
     def add_distribution_line(
         emoji: str,
@@ -1235,28 +1208,24 @@ async def send_distribution_report(
         amount: Decimal,
     ):
 
-        amount = Decimal(str(amount))
+        amount = Decimal(
+            str(amount)
+        )
 
+        # Обычный пользователь видит только ненулевые строки.
+        # Разработчик — все строки.
         if developer_mode or amount > ZERO:
 
-            lines.append(
-                f"{emoji} {escape(name)}: "
-                f"<b>{rub(amount)}</b>"
+            distribution_lines.append(
+                f"{emoji} <b>{escape(name)}</b> — "
+                f"{money_plain(amount)}"
             )
-
-    # ========================================================
-    # НАЛОГ
-    # ========================================================
 
     add_distribution_line(
         "🏛️",
         "Налог",
         result.tax,
     )
-
-    # ========================================================
-    # ПОДУШКА
-    # ========================================================
 
     add_distribution_line(
         "🛟",
@@ -1266,10 +1235,6 @@ async def send_distribution_report(
             ZERO,
         ),
     )
-
-    # ========================================================
-    # КАТЕГОРИИ КЖ
-    # ========================================================
 
     for name in settings.life_categories.keys():
 
@@ -1281,8 +1246,6 @@ async def send_distribution_report(
                 ZERO,
             ),
         )
-
-    # Остаточная категория КЖ "Зарплата"
 
     if (
         "Зарплата"
@@ -1298,35 +1261,23 @@ async def send_distribution_report(
             ),
         )
 
-    # ========================================================
-    # ДОЛГИ
-    # ========================================================
-
-    minimum_payment = allocations.get(
-        "Мин. платеж",
-        ZERO,
-    )
-
-    early_payment = allocations.get(
-        "Досрочное",
-        ZERO,
-    )
-
     add_distribution_line(
         "💳",
         "Минимальные платежи",
-        minimum_payment,
+        allocations.get(
+            "Мин. платеж",
+            ZERO,
+        ),
     )
 
     add_distribution_line(
         "💳",
         "Досрочное погашение",
-        early_payment,
+        allocations.get(
+            "Досрочное",
+            ZERO,
+        ),
     )
-
-    # ========================================================
-    # БЫТОВОЙ РЕЗЕРВ
-    # ========================================================
 
     add_distribution_line(
         "💚",
@@ -1336,10 +1287,6 @@ async def send_distribution_report(
             ZERO,
         ),
     )
-
-    # ========================================================
-    # ЦЕЛИ
-    # ========================================================
 
     if settings.goals:
 
@@ -1365,10 +1312,6 @@ async def send_distribution_report(
             ),
         )
 
-    # ========================================================
-    # ИНВЕСТИЦИИ
-    # ========================================================
-
     add_distribution_line(
         "📈",
         "Инвестиции",
@@ -1378,32 +1321,82 @@ async def send_distribution_report(
         ),
     )
 
-    # ========================================================
-    # ТЕКУЩИЙ РЕЖИМ
-    # ========================================================
+    # В Telegram блок цитаты.
+    lines.append(
+        "<b>РАСПРЕДЕЛЕНИЕ</b>"
+    )
 
-    mode = allocator.active_mode()
+    lines.append("")
 
-    MODE_EMOJI = {
-        1: "🟤",
-        2: "🔴",
-        3: "🟠",
-        4: "🟣",
-        5: "🔵",
-        6: "🟢",
-    }
-
-    mode_emoji = MODE_EMOJI.get(
-        mode,
-        "",
+    lines.append(
+        "<blockquote>"
+        + "\n".join(
+            distribution_lines
+        )
+        + "</blockquote>"
     )
 
     lines.extend([
         "",
-        "<b>ТЕКУЩИЙ РЕЖИМ</b>",
         "",
-        f"{mode_emoji} "
-        f"<b>{escape(MODE_TITLES[mode])}</b>",
+    ])
+
+    # ========================================================
+    # ТВОИ НАГРАДЫ ЗА ПОДУШКУ
+    # ========================================================
+
+    mode = allocator.active_mode()
+
+    if settings.employment_type == "Фрилансер":
+
+        reward_map = {
+            1: "🏆➖➖➖➖➖",
+            2: "🏆🏆➖➖➖➖",
+            3: "🏆🏆🏆➖➖➖",
+            4: "🏆🏆🏆🏆➖➖",
+            5: "🏆🏆🏆🏆🏆➖",
+            6: "🏆🏆🏆🏆🏆🏆",
+        }
+
+    else:
+
+        reward_map = {
+            1: "🏆➖➖➖",
+            2: "🏆🏆➖➖",
+            3: "🏆🏆🏆➖",
+            6: "🏆🏆🏆🏆",
+        }
+
+    reward = reward_map.get(
+        mode,
+        "",
+    )
+
+    next_info = allocator.next_mode_info()
+
+    lines.extend([
+        "<b>ТВОИ НАГРАДЫ ЗА ПОДУШКУ</b>",
+        "",
+        reward,
+    ])
+
+    if next_info:
+
+        lines.append(
+            "Отложи на Подушку еще "
+            f"{money_plain(next_info['remaining'])} ₽ "
+            "и получи следующий кубок!"
+        )
+
+    else:
+
+        lines.append(
+            "Все кубки этого профиля уже получены!"
+        )
+
+    lines.extend([
+        "",
+        "",
     ])
 
     # ========================================================
@@ -1423,17 +1416,16 @@ async def send_distribution_report(
     )
 
     lines.extend([
-        "",
         "<b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>",
         "",
-        f"🔄 Баланс жизни: "
-        f"<b>{rub(state.life_balance)}</b>",
-        f"🛟 Подушка: "
-        f"<b>{rub(state.pillow_balance)}</b>",
-        f"До Критического минимума осталось: "
-        f"<b>{rub(life_remaining)}</b>",
-        f"До Устойчивой жизни осталось: "
-        f"<b>{rub(sustainable_remaining)}</b>",
+        f"🔄 <b>Баланс жизни</b> — "
+        f"{money_plain(state.life_balance)}",
+        f"🛟 <b>Подушка</b> — "
+        f"{money_plain(state.pillow_balance)}",
+        f"<b>До Критического минимума осталось</b> — "
+        f"{money_plain(life_remaining)}",
+        f"<b>До Устойчивой жизни осталось</b> — "
+        f"{money_plain(sustainable_remaining)}",
     ])
 
     # ========================================================
@@ -1445,6 +1437,7 @@ async def send_distribution_report(
         check = result.checks
 
         lines.extend([
+            "",
             "",
             "<b>РАСЧЁТ — РЕЖИМ РАЗРАБОТЧИКА</b>",
             "",
@@ -1476,6 +1469,7 @@ async def send_distribution_report(
         reply_markup=main_menu_keyboard(),
     )
 
+
 # ============================================================
 # ДЛИННЫЕ СООБЩЕНИЯ
 # ============================================================
@@ -1488,8 +1482,6 @@ async def send_long_message(
     reply_markup=None,
 ):
 
-    # Если сообщение помещается целиком —
-    # сразу показываем под ним главное меню.
     if len(text) <= max_length:
 
         await message.answer(
@@ -1499,7 +1491,6 @@ async def send_long_message(
 
         return
 
-    # Если отчёт длинный, разбиваем его.
     paragraphs = text.split(
         "\n"
     )
@@ -1536,9 +1527,6 @@ async def send_long_message(
             current
         )
 
-    # Отправляем части отчёта.
-    # Главное меню прикрепляем только
-    # к последней части.
     for index, chunk in enumerate(
         chunks
     ):
@@ -1556,3 +1544,4 @@ async def send_long_message(
                 else None
             ),
         )
+

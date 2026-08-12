@@ -555,11 +555,6 @@ class AllocatorState:
             for name, balance in self.period_life_topups.items()
         }
 
-        self.period_allocations = {
-            name: D(balance)
-            for name, balance in self.period_allocations.items()
-        }
-
     @property
     def pillow_balance(self) -> Decimal:
         """
