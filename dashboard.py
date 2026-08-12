@@ -257,14 +257,15 @@ def operation_is_in_current_period(
 
 def get_period_allocations(
     allocator,
+    telegram_id: int,
 ) -> dict[str, Decimal]:
     """
-    Все распределения текущего расчётного периода.
+    Возвращает распределения текущего расчётного периода.
 
-    Приоритет:
-    1. Новый отдельный счётчик period_allocations.
-    2. Для старых сохранённых профилей — восстановление
-       по distribution_history.
+    1. Если period_allocations уже сохранён в state — используем его.
+    2. Если текущие данные ещё не сохранены в этом поле —
+       восстанавливаем их из постоянного SQLite operation_log
+       после последнего period_reset.
     """
 
     stored = getattr(
@@ -273,40 +274,45 @@ def get_period_allocations(
         None,
     )
 
-    if stored is not None:
-
+    if stored:
         return {
             key: D(value)
-            for key, value
-            in stored.items()
+            for key, value in stored.items()
         }
 
     result: dict[str, Decimal] = {}
 
-    for operation in getattr(
-        allocator.state,
-        "distribution_history",
-        [],
-    ):
+    operations = db.load_operations(
+        telegram_id,
+        limit=1000,
+    )
 
-        if operation.get("type") != "income_distribution":
+    # Операции идут от новых к старым.
+    # Всё после последнего period_reset относится
+    # к текущему расчётному периоду.
+    for operation in operations:
+
+        operation_type = operation.get(
+            "type"
+        )
+
+        if operation_type == "period_reset":
+            break
+
+        if operation_type != "income_distribution":
             continue
 
-        if not operation_is_in_current_period(
-            operation,
-            getattr(
-                allocator.state,
-                "period_started_at",
-                None,
-            ),
-        ):
-            continue
+        payload = (
+            operation.get("payload")
+            or {}
+        )
 
-        for key, value in operation.get(
-            "allocations",
-            {},
-        ).items():
+        allocations = (
+            payload.get("allocations")
+            or {}
+        )
 
+        for key, value in allocations.items():
             result[key] = (
                 result.get(
                     key,
@@ -526,7 +532,8 @@ async def send_balances(
 
     allocations = (
         get_period_allocations(
-            allocator
+            allocator,
+            telegram_id,
         )
     )
 
@@ -612,7 +619,7 @@ async def send_balances(
         f"🔄 Баланс жизни: "
         f"<b>{rub(state.life_balance)}</b>",
         "",
-        "<b>КАТЕГОРИИ КРИТИЧЕСКОГО МИНИМУМА</b>",
+        "<b>КАТЕГОРИИ КЖ</b>",
     ]
 
     # --------------------------------------------------------
@@ -731,16 +738,29 @@ async def send_balances(
     # Пороги
     # --------------------------------------------------------
 
+    critical_minimum = D(
+        settings.critical_life
+    )
+
+    sustainable_life = (
+        D(settings.critical_life)
+        + D(settings.household_reserve)
+    )
+
+    life_balance = D(
+        state.life_balance
+    )
+
     until_kzh = max(
         Decimal("0"),
-        settings.critical_life
-        - D(state.life_balance),
+        critical_minimum
+        - life_balance,
     )
 
     until_uzh = max(
         Decimal("0"),
-        settings.household_life
-        - D(state.life_balance),
+        sustainable_life
+        - life_balance,
     )
 
     next_info = (
@@ -750,9 +770,9 @@ async def send_balances(
     lines.extend([
         "",
         "<b>ПОРОГИ</b>",
-        f"🎯 До Критического минимума осталось: "
+        f"🎯 До КЖ осталось: "
         f"<b>{rub(until_kzh)}</b>",
-        f"🎯 До Устойчивой жизни осталось: "
+        f"🎯 До УЖ осталось: "
         f"<b>{rub(until_uzh)}</b>",
     ])
 

@@ -371,7 +371,7 @@ class UserSettings:
 
         if self.critical_life <= ZERO:
             errors.append(
-                "Критический минимум должен быть больше 0."
+                "Критическая жизнь должна быть больше 0."
             )
 
         if self.household_reserve < ZERO:
@@ -394,7 +394,7 @@ class UserSettings:
         if self.household_life < self.critical_life:
             errors.append(
                 "Устойчивая жизнь не может быть меньше "
-                "Критического минимума."
+                "Критической жизни."
             )
 
         if (
@@ -553,6 +553,11 @@ class AllocatorState:
         self.period_life_topups = {
             name: D(balance)
             for name, balance in self.period_life_topups.items()
+        }
+
+        self.period_allocations = {
+            name: D(balance)
+            for name, balance in self.period_allocations.items()
         }
 
     @property
@@ -1181,13 +1186,13 @@ class FinancialAllocator:
         )
 
         steps.append(
-            f"""ЭТАП A — Критический минимум
+            f"""ЭТАП A — обязательная жизнь
 Недостаёт: {missing}
 Необходимая база: {required_base}
 Часть A: {part_a}
 Бракет A ({bracket}%): {up_calculated}
 Направление вверх: {up_target}
-В Критический минимум: {life_part}
+В обязательную жизнь: {life_part}
 Переполнение: {final_overflow}"""
         )
 
@@ -1841,6 +1846,7 @@ class FinancialAllocator:
         income_type: str,
         income_date: Optional[date] = None,
         reset_period: bool = False,
+        tax_override: Optional[Decimal] = None,
     ) -> DistributionResult:
 
         income = D(income)
@@ -1861,10 +1867,29 @@ class FinancialAllocator:
 
         mode_before = self.active_mode()
 
-        tax = self.calculate_tax(
-            income,
-            income_type,
-        )
+        if tax_override is None:
+
+            tax = self.calculate_tax(
+                income,
+                income_type,
+            )
+
+        else:
+
+            tax = D(
+                tax_override
+            )
+
+            if tax < ZERO:
+                raise ValueError(
+                    "Налог не может быть отрицательным."
+                )
+
+            if tax > income:
+                raise ValueError(
+                    "Налог не может быть больше "
+                    "суммы поступления."
+                )
 
         amount = (
             income
@@ -2041,6 +2066,9 @@ class FinancialAllocator:
             "income_type": income_type,
             "income": income,
             "tax": tax,
+            "tax_overridden": (
+                tax_override is not None
+            ),
             "allocations": dict(allocations),
             "mode_before": mode_before,
             "mode_after": mode_after,

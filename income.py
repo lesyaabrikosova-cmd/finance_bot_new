@@ -41,6 +41,11 @@ class IncomeStates(StatesGroup):
     income_date = State()
     confirmation = State()
 
+    # Редактирование налога конкретного поступления
+    tax_edit = State()
+    tax_custom_percent = State()
+    tax_custom_amount = State()
+
 
 # ============================================================
 # КНОПКИ
@@ -561,25 +566,58 @@ async def show_income_confirmation(
         data["income_date"]
     )
 
-    tax = allocator.calculate_tax(
-        amount,
-        income_type,
+    # --------------------------------------------------------
+    # Налог:
+    #
+    # tax_override = None -> обычное правило профиля;
+    # tax_override = "0"  -> принудительно без налога;
+    # другое значение     -> налог только этой операции.
+    # --------------------------------------------------------
+
+    tax_override = data.get(
+        "tax_override"
     )
+
+    if tax_override is None:
+
+        tax = allocator.calculate_tax(
+            amount,
+            income_type,
+        )
+
+        tax_rule = (
+            "по настройкам профиля"
+        )
+
+    else:
+
+        tax = Decimal(
+            str(tax_override)
+        )
+
+        tax_rule = data.get(
+            "tax_override_label",
+            "изменён вручную",
+        )
 
     after_tax = (
         amount
         - tax
     )
 
-    taxable = (
-        tax > 0
-    )
+    if tax > 0:
 
-    tax_text = (
-        f"🏛 Налог: <b>{rub(tax)}</b>\n"
-        if taxable
-        else "🏛 Налог: <b>не удерживается</b>\n"
-    )
+        tax_text = (
+            f"🏛 Налог: <b>{rub(tax)}</b>\n"
+            f"Правило: <i>{escape(tax_rule)}</i>\n"
+        )
+
+    else:
+
+        tax_text = (
+            "🏛 Налог: <b>0 ₽</b>\n"
+            f"Правило: <i>{escape(tax_rule)}</i>\n"
+        )
 
     await state.set_state(
         IncomeStates.confirmation
@@ -613,11 +651,376 @@ async def show_income_confirmation(
             ],
             [
                 (
+                    "🏛️ Редактировать налог",
+                    "income:edit_tax",
+                )
+            ],
+            [
+                (
                     "❌ Отмена",
                     "income:cancel",
                 )
             ],
         ]),
+    )
+
+
+# ============================================================
+# РЕДАКТИРОВАНИЕ НАЛОГА КОНКРЕТНОГО ПОСТУПЛЕНИЯ
+# ============================================================
+
+
+@router.callback_query(
+    IncomeStates.confirmation,
+    F.data == "income:edit_tax"
+)
+async def edit_income_tax(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    data = await state.get_data()
+
+    amount = Decimal(
+        data["income_amount"]
+    )
+
+    income_type = data[
+        "income_type"
+    ]
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    automatic_tax = (
+        allocator.calculate_tax(
+            amount,
+            income_type,
+        )
+    )
+
+    await state.set_state(
+        IncomeStates.tax_edit
+    )
+
+    await callback.message.answer(
+        "🏛️ <b>НАЛОГ ЭТОГО ПОСТУПЛЕНИЯ</b>\n\n"
+        f"Сумма поступления: <b>{rub(amount)}</b>\n"
+        f"Тип: <b>{escape(income_type)}</b>\n\n"
+        f"По настройкам профиля сейчас: "
+        f"<b>{rub(automatic_tax)}</b>\n\n"
+        "Изменение ниже действует <b>только на это "
+        "поступление</b> и не меняет налоговые "
+        "настройки профиля.",
+        reply_markup=keyboard([
+            [
+                (
+                    "По настройкам",
+                    "taxedit:auto",
+                ),
+                (
+                    "Без налога",
+                    "taxedit:none",
+                ),
+            ],
+            [
+                (
+                    "4%",
+                    "taxedit:pct:4",
+                ),
+                (
+                    "6%",
+                    "taxedit:pct:6",
+                ),
+                (
+                    "13%",
+                    "taxedit:pct:13",
+                ),
+            ],
+            [
+                (
+                    "Ввести свой %",
+                    "taxedit:custom_percent",
+                )
+            ],
+            [
+                (
+                    "Ввести сумму налога",
+                    "taxedit:custom_amount",
+                )
+            ],
+            [
+                (
+                    "⬅️ Назад",
+                    "taxedit:back",
+                )
+            ],
+        ]),
+    )
+
+
+@router.callback_query(
+    IncomeStates.tax_edit,
+    F.data == "taxedit:auto"
+)
+async def tax_edit_auto(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        tax_override=None,
+        tax_override_label=(
+            "по настройкам профиля"
+        ),
+    )
+
+    await show_income_confirmation(
+        callback.message,
+        state,
+        callback.from_user.id,
+    )
+
+
+@router.callback_query(
+    IncomeStates.tax_edit,
+    F.data == "taxedit:none"
+)
+async def tax_edit_none(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.update_data(
+        tax_override="0",
+        tax_override_label="без налога",
+    )
+
+    await show_income_confirmation(
+        callback.message,
+        state,
+        callback.from_user.id,
+    )
+
+
+@router.callback_query(
+    IncomeStates.tax_edit,
+    F.data.startswith("taxedit:pct:")
+)
+async def tax_edit_fixed_percent(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    try:
+
+        percent = Decimal(
+            callback.data.split(
+                ":",
+                2,
+            )[2]
+        )
+
+    except (
+        InvalidOperation,
+        IndexError,
+    ):
+
+        await callback.message.answer(
+            "Не удалось определить ставку."
+        )
+
+        return
+
+    data = await state.get_data()
+
+    amount = Decimal(
+        data["income_amount"]
+    )
+
+    tax = (
+        amount
+        * percent
+        / Decimal("100")
+    )
+
+    await state.update_data(
+        tax_override=str(tax),
+        tax_override_label=(
+            f"вручную {percent}%"
+        ),
+    )
+
+    await show_income_confirmation(
+        callback.message,
+        state,
+        callback.from_user.id,
+    )
+
+
+@router.callback_query(
+    IncomeStates.tax_edit,
+    F.data == "taxedit:custom_percent"
+)
+async def ask_custom_tax_percent(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.set_state(
+        IncomeStates.tax_custom_percent
+    )
+
+    await callback.message.answer(
+        "Введите процент налога для этого "
+        "поступления.\n\n"
+        "Например: <code>7,5</code>"
+    )
+
+
+@router.message(
+    IncomeStates.tax_custom_percent
+)
+async def save_custom_tax_percent(
+    message: Message,
+    state: FSMContext,
+):
+
+    percent = parse_decimal(
+        message.text
+    )
+
+    if (
+        percent is None
+        or percent < 0
+        or percent > 100
+    ):
+
+        await message.answer(
+            "Введите процент от 0 до 100."
+        )
+
+        return
+
+    data = await state.get_data()
+
+    amount = Decimal(
+        data["income_amount"]
+    )
+
+    tax = (
+        amount
+        * percent
+        / Decimal("100")
+    )
+
+    await state.update_data(
+        tax_override=str(tax),
+        tax_override_label=(
+            f"вручную {percent}%"
+        ),
+    )
+
+    await show_income_confirmation(
+        message,
+        state,
+        message.from_user.id,
+    )
+
+
+@router.callback_query(
+    IncomeStates.tax_edit,
+    F.data == "taxedit:custom_amount"
+)
+async def ask_custom_tax_amount(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.set_state(
+        IncomeStates.tax_custom_amount
+    )
+
+    await callback.message.answer(
+        "Введите точную сумму налога, которую "
+        "нужно зарезервировать из этого поступления.\n\n"
+        "Например: <code>8450</code>"
+    )
+
+
+@router.message(
+    IncomeStates.tax_custom_amount
+)
+async def save_custom_tax_amount(
+    message: Message,
+    state: FSMContext,
+):
+
+    tax = parse_decimal(
+        message.text
+    )
+
+    data = await state.get_data()
+
+    amount = Decimal(
+        data["income_amount"]
+    )
+
+    if (
+        tax is None
+        or tax < 0
+        or tax > amount
+    ):
+
+        await message.answer(
+            "Введите сумму от 0 ₽ до суммы "
+            f"поступления {rub(amount)}."
+        )
+
+        return
+
+    await state.update_data(
+        tax_override=str(tax),
+        tax_override_label=(
+            "сумма введена вручную"
+        ),
+    )
+
+    await show_income_confirmation(
+        message,
+        state,
+        message.from_user.id,
+    )
+
+
+@router.callback_query(
+    IncomeStates.tax_edit,
+    F.data == "taxedit:back"
+)
+async def tax_edit_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await show_income_confirmation(
+        callback.message,
+        state,
+        callback.from_user.id,
     )
 
 
@@ -699,10 +1102,23 @@ async def confirm_income(
 
     try:
 
+        tax_override_raw = data.get(
+            "tax_override"
+        )
+
+        tax_override = (
+            None
+            if tax_override_raw is None
+            else Decimal(
+                str(tax_override_raw)
+            )
+        )
+
         result = allocator.process_income(
             income=income,
             income_type=income_type,
             income_date=income_date,
+            tax_override=tax_override,
         )
 
     except Exception as error:

@@ -344,6 +344,7 @@ class Database:
 
                 period_income TEXT NOT NULL,
                 period_tax TEXT NOT NULL,
+                period_allocations TEXT NOT NULL DEFAULT '{}',
 
                 period_started_at TEXT,
 
@@ -353,6 +354,26 @@ class Database:
             )
             """
         )
+
+        # ----------------------------------------------------
+        # Миграция старой базы: period_allocations
+        # ----------------------------------------------------
+
+        state_columns = {
+            row["name"]
+            for row in cursor.execute(
+                "PRAGMA table_info(state)"
+            ).fetchall()
+        }
+
+        if "period_allocations" not in state_columns:
+            cursor.execute(
+                """
+                ALTER TABLE state
+                ADD COLUMN period_allocations
+                TEXT NOT NULL DEFAULT '{}'
+                """
+            )
 
         # ----------------------------------------------------
         # Журнал операций
@@ -1076,6 +1097,7 @@ class Database:
 
                 period_income,
                 period_tax,
+                period_allocations,
 
                 period_started_at
             )
@@ -1086,7 +1108,7 @@ class Database:
                 ?, ?, ?,
                 ?, ?,
                 ?, ?,
-                ?, ?,
+                ?, ?, ?,
                 ?
             )
 
@@ -1125,6 +1147,9 @@ class Database:
 
                 period_tax =
                     excluded.period_tax,
+
+                period_allocations =
+                    excluded.period_allocations,
 
                 period_started_at =
                     excluded.period_started_at
@@ -1174,6 +1199,10 @@ class Database:
 
                 decimal_to_string(
                     state.period_tax
+                ),
+
+                serialize_json(
+                    state.period_allocations
                 ),
 
                 state.period_started_at,
@@ -1262,6 +1291,11 @@ class Database:
             period_tax=
                 string_to_decimal(
                     row["period_tax"]
+                ),
+
+            period_allocations=
+                deserialize_json(
+                    row["period_allocations"]
                 ),
 
             period_started_at=
