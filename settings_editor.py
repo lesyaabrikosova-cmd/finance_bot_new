@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from html import escape
 
@@ -110,6 +111,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("⭐️ Проценты целей", "settings:goals")],
             [("⚖️ Цели / Подушка этапа C", "settings:c_split")],
             [(dev_button, "settings:developer")],
+            [("🗑 Полный сброс учёта", "settings:full_reset")],
             [("🔄 Пройти настройку заново", "setup:restart")],
             [("⬅️ Главное меню", "menu:back")],
         ]),
@@ -179,6 +181,131 @@ async def toggle_developer(
         callback.message,
         callback.from_user.id,
     )
+
+
+@router.callback_query(
+    F.data == "settings:full_reset"
+)
+async def ask_full_reset(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+    await state.clear()
+
+    await callback.message.answer(
+        "⚠️ <b>ПОЛНЫЙ СБРОС УЧЁТА</b>\n\n"
+        "Будут обнулены:\n"
+        "🔄 Баланс жизни\n"
+        "🛟 Подушка\n"
+        "📈 Инвестиции\n"
+        "💳 Счётчик досрочного погашения\n"
+        "⭐️ Накопления по целям\n"
+        "❤️ Категории КЖ текущего периода\n"
+        "💚 Бытовой резерв текущего периода\n"
+        "👛 Доход текущего периода\n"
+        "🏛️ Налог текущего периода\n"
+        "📜 История распределений\n\n"
+        "<b>Настройки профиля сохранятся.</b>\n"
+        "КЖ, Бытовой резерв, категории, проценты, налог, "
+        "тип занятости и данные кредитов останутся без изменений.",
+        reply_markup=keyboard([
+            [("Да, обнулить учёт", "settings:full_reset_confirm")],
+            [("Отмена", "settings:full_reset_cancel")],
+        ]),
+    )
+
+
+@router.callback_query(
+    F.data == "settings:full_reset_cancel"
+)
+async def cancel_full_reset(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer("Сброс отменён")
+    await state.clear()
+
+    await show_settings_menu(
+        callback.message,
+        callback.from_user.id,
+    )
+
+
+@router.callback_query(
+    F.data == "settings:full_reset_confirm"
+)
+async def confirm_full_reset(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+    await state.clear()
+
+    allocator = db.load_allocator(
+        callback.from_user.id
+    )
+
+    if allocator is None:
+        await callback.message.answer(
+            "Финансовый профиль не найден."
+        )
+        return
+
+    st = allocator.state
+
+    # Баланс жизни и резерв минимальных платежей
+    st.life_balance = Decimal("0")
+    st.accumulated_minimum_payments = Decimal("0")
+
+    # Подушка
+    st.pillow_minimum = Decimal("0")
+    st.pillow_force_majeure = Decimal("0")
+    st.pillow_stabilizer = Decimal("0")
+
+    # Накопительные финансовые показатели
+    st.investments = Decimal("0")
+    st.early_repayment = Decimal("0")
+
+    # Цели
+    st.goal_balances = {
+        goal.name: Decimal("0")
+        for goal in allocator.settings.goals
+    }
+
+    # Категории КЖ текущего периода
+    st.period_life_topups = {
+        name: Decimal("0")
+        for name in allocator.settings.life_categories
+    }
+    st.period_life_topups["Зарплата"] = Decimal("0")
+
+    # Периодические счётчики
+    st.period_income = Decimal("0")
+    st.period_tax = Decimal("0")
+
+    if hasattr(st, "period_allocations"):
+        st.period_allocations = {}
+
+    # История
+    st.operation_log = []
+    st.distribution_history = []
+
+    # Новый отсчёт начинается сейчас
+    st.period_started_at = datetime.now().isoformat()
+
+    db.save_allocator(
+        callback.from_user.id,
+        allocator,
+    )
+
+    await callback.message.answer(
+        "✅ <b>УЧЁТ ПОЛНОСТЬЮ ОБНУЛЁН</b>\n\n"
+        "Все финансовые счётчики начаты с нуля.\n"
+        "Настройки профиля сохранены.",
+        reply_markup=main_menu_keyboard(),
+    )
+
 
 @router.callback_query(F.data == "settings:pillow")
 async def edit_pillow(callback: CallbackQuery, state: FSMContext):
