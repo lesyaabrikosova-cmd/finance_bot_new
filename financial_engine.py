@@ -371,7 +371,7 @@ class UserSettings:
 
         if self.critical_life <= ZERO:
             errors.append(
-                "Критическая жизнь должна быть больше 0."
+                "Критический минимум должен быть больше 0."
             )
 
         if self.household_reserve < ZERO:
@@ -394,7 +394,7 @@ class UserSettings:
         if self.household_life < self.critical_life:
             errors.append(
                 "Устойчивая жизнь не может быть меньше "
-                "Критической жизни."
+                "Критического минимума."
             )
 
         if (
@@ -553,6 +553,11 @@ class AllocatorState:
         self.period_life_topups = {
             name: D(balance)
             for name, balance in self.period_life_topups.items()
+        }
+
+        self.period_allocations = {
+            name: D(balance)
+            for name, balance in self.period_allocations.items()
         }
 
     @property
@@ -716,7 +721,7 @@ class FinancialAllocator:
         if salary < ZERO:
             raise ValueError(
                 "Сумма категорий обязательных расходов "
-                "превышает общую Критическую жизнь."
+                "превышает Критический минимум."
             )
 
         result["Зарплата"] = salary
@@ -1181,13 +1186,13 @@ class FinancialAllocator:
         )
 
         steps.append(
-            f"""ЭТАП A — обязательная жизнь
+            f"""ЭТАП A — Критический минимум
 Недостаёт: {missing}
 Необходимая база: {required_base}
 Часть A: {part_a}
 Бракет A ({bracket}%): {up_calculated}
 Направление вверх: {up_target}
-В обязательную жизнь: {life_part}
+В Критический минимум: {life_part}
 Переполнение: {final_overflow}"""
         )
 

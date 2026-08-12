@@ -1325,7 +1325,7 @@ async def send_distribution_report(
     ])
 
     # ========================================================
-    # ТВОИ НАГРАДЫ ЗА ПОДУШКУ
+    # ТВОИ НАГРАДЫ
     # ========================================================
 
     mode = allocator.active_mode()
@@ -1358,18 +1358,32 @@ async def send_distribution_report(
     next_info = allocator.next_mode_info()
 
     lines.extend([
-        "<b>ТВОИ НАГРАДЫ ЗА ПОДУШКУ</b>",
+        "<b>ТВОИ НАГРАДЫ</b>",
         "",
         reward,
     ])
 
     if next_info:
 
-        lines.append(
-            "Отложи на Подушку еще "
-            f"{money_plain(next_info['remaining'])} ₽ "
-            "и получи следующий кубок!"
+        remaining = money_plain(
+            next_info["remaining"]
         )
+
+        if mode == 2:
+
+            lines.append(
+                "Погаси еще "
+                f"{remaining} ₽ долгов "
+                "и получи следующий кубок!"
+            )
+
+        else:
+
+            lines.append(
+                "Отложи на Подушку еще "
+                f"{remaining} ₽ "
+                "и получи следующий кубок!"
+            )
 
     else:
 

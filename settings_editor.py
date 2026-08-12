@@ -94,7 +94,8 @@ async def show_settings_menu(message: Message, telegram_id: int):
     await message.answer(
         "⚙️ <b>РЕДАКТИРОВАНИЕ НАСТРОЕК</b>\n\n"
         f"🔴 Критический минимум: <b>{rub(s.critical_life)}</b>\n"
-        f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"        f"🟢 Устойчивая жизнь: <b>{rub(s.household_life)}</b> <i>(автоматически)</i>\n"
+        f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
+        f"🟢 Устойчивая жизнь: <b>{rub(s.household_life)}</b> <i>(автоматически)</i>\n"
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
         f"🏛 Налог: <b>{s.tax_rate}%</b>\n"
         f"🛟 Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
@@ -205,7 +206,7 @@ async def ask_full_reset(
         "💚 Бытовой резерв текущего периода\n"
         "👛 Доход текущего периода\n"
         "🏛️ Налог текущего периода\n"
-        "📜 История распределений\n\n"
+        "📊 Анализ доходов текущего периода\n\n"
         "<b>Настройки профиля сохранятся.</b>\n"
         "Критический минимум, Бытовой резерв, категории, проценты, налог, "
         "тип занятости и данные кредитов останутся без изменений.",
@@ -297,6 +298,18 @@ async def confirm_full_reset(
     db.save_allocator(
         callback.from_user.id,
         allocator,
+    )
+
+    # Ставим границу нового периода в постоянном журнале SQLite.
+    # Благодаря этому «Анализ доходов» после полного сброса
+    # не подтягивает старые поступления.
+    db.save_operation(
+        callback.from_user.id,
+        "period_reset",
+        {
+            "started_at": st.period_started_at,
+            "reason": "full_reset",
+        },
     )
 
     await callback.message.answer(
