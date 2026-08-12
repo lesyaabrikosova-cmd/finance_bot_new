@@ -591,25 +591,25 @@ async def send_balances(
     lines = [
         f"<b>БАЛАНСЫ — {period_label.upper()}</b>",
         "",
-        f"Доход итого: "
+        f"👛 Доход итого: "
         f"<b>{rub(income)}</b>",
-        f"Налог: "
+        f"🏛️ Налог: "
         f"<b>{rub(tax)}</b> "
         f"({pct(tax, income)})",
         "",
-        f"Подушка за период: "
+        f"🛟 Подушка за период: "
         f"<b>{rub(pillow_period)}</b> "
         f"({pct(pillow_period, income)})",
-        f"Подушка итого: "
+        f"🛟 Подушка итого: "
         f"<b>{rub(state.pillow_balance)}</b>",
         "",
-        f"Инвестиции за период: "
+        f"📈 Инвестиции за период: "
         f"<b>{rub(investment_period)}</b> "
         f"({pct(investment_period, income)})",
-        f"Всего направлено в инвестиции: "
+        f"📈 Инвестиции итого: "
         f"<b>{rub(state.investments)}</b>",
         "",
-        f"Баланс жизни: "
+        f"🔄 Баланс жизни: "
         f"<b>{rub(state.life_balance)}</b>",
         "",
         "<b>КАТЕГОРИИ КЖ</b>",
@@ -643,7 +643,7 @@ async def send_balances(
         )
 
         lines.append(
-            f"{escape(name)}: "
+            f"❤️ {escape(name)}: "
             f"<b>{rub(amount)}</b> "
             f"({pct(amount, income)})"
         )
@@ -654,7 +654,7 @@ async def send_balances(
 
     lines.extend([
         "",
-        f"Бытовой резерв: "
+        f"💚 Бытовой резерв: "
         f"<b>{rub(household_period)}</b> "
         f"({pct(household_period, income)})",
         "",
@@ -678,7 +678,7 @@ async def send_balances(
             )
 
             lines.append(
-                f"{escape(goal.name)}: "
+                f"⭐️ {escape(goal.name)}: "
                 f"<b>{rub(amount)}</b> "
                 f"({pct(amount, income)})"
             )
@@ -691,7 +691,7 @@ async def send_balances(
         )
 
         lines.append(
-            f"Цели (всего): "
+            f"⭐️ Цели (всего): "
             f"<b>{rub(amount)}</b> "
             f"({pct(amount, income)})"
         )
@@ -715,15 +715,15 @@ async def send_balances(
         lines.extend([
             "",
             "<b>КРЕДИТЫ</b>",
-            f"Минимальные платежи за период: "
+            f"💳 Минимальные платежи за период: "
             f"<b>{rub(minimum_period)}</b> "
             f"({pct(minimum_period, income)})",
-            f"Досрочно за период: "
+            f"💳 Досрочно за период: "
             f"<b>{rub(early_period)}</b> "
             f"({pct(early_period, income)})",
-            f"Досрочно погашено всего: "
+            f"💳 Досрочно погашено всего: "
             f"<b>{rub(state.early_repayment)}</b>",
-            f"Остаток активных долгов: "
+            f"💳 Остаток активных долгов: "
             f"<b>{rub(active_debt)}</b>",
         ])
 
@@ -750,16 +750,16 @@ async def send_balances(
     lines.extend([
         "",
         "<b>ПОРОГИ</b>",
-        f"До КЖ осталось: "
+        f"🎯 До КЖ осталось: "
         f"<b>{rub(until_kzh)}</b>",
-        f"До УЖ осталось: "
+        f"🎯 До УЖ осталось: "
         f"<b>{rub(until_uzh)}</b>",
     ])
 
     if next_info:
 
         lines.append(
-            f"До следующего режима "
+            f"🎯 До следующего режима "
             f"{next_info['next_name']}: "
             f"<b>{rub(next_info['remaining'])}</b>"
         )
@@ -767,7 +767,7 @@ async def send_balances(
     else:
 
         lines.append(
-            "До следующего режима: "
+            "🎯 До следующего режима: "
             "<b>максимальный режим достигнут</b>"
         )
 
