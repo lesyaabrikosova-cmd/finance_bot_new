@@ -776,9 +776,12 @@ async def send_distribution_report(
 ):
 
     allocations = result.allocations
-
     settings = allocator.settings
     state = allocator.state
+
+    developer_mode = settings.developer_mode
+
+    ZERO = Decimal("0")
 
     # ========================================================
     # ДАНО
@@ -796,37 +799,51 @@ async def send_distribution_report(
     ]
 
     # ========================================================
+    # ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ
+    #
+    # Обычный режим:
+    # показываем только суммы > 0.
+    #
+    # Режим разработчика:
+    # показываем вообще всё, включая 0 ₽.
+    # ========================================================
+
+    def add_distribution_line(
+        emoji: str,
+        name: str,
+        amount: Decimal,
+    ):
+
+        amount = Decimal(str(amount))
+
+        if developer_mode or amount > ZERO:
+
+            lines.append(
+                f"{emoji} {escape(name)}: "
+                f"<b>{rub(amount)}</b>"
+            )
+
+    # ========================================================
     # НАЛОГ
     # ========================================================
 
-    lines.append(
-        f"Налог: <b>{rub(result.tax)}</b>"
+    add_distribution_line(
+        "🏛️",
+        "Налог",
+        result.tax,
     )
 
     # ========================================================
     # ПОДУШКА
     # ========================================================
 
-    pillow = allocations.get(
+    add_distribution_line(
+        "🛟",
         "Подушка",
-        Decimal("0"),
-    )
-
-    lines.append(
-        f"Подушка: <b>{rub(pillow)}</b>"
-    )
-
-    # ========================================================
-    # ИНВЕСТИЦИИ
-    # ========================================================
-
-    investments = allocations.get(
-        "Инвестиции",
-        Decimal("0"),
-    )
-
-    lines.append(
-        f"Инвестиции: <b>{rub(investments)}</b>"
+        allocations.get(
+            "Подушка",
+            ZERO,
+        ),
     )
 
     # ========================================================
@@ -835,65 +852,69 @@ async def send_distribution_report(
 
     for name in settings.life_categories.keys():
 
-        amount = allocations.get(
-            f"КЖ:{name}",
-            Decimal("0"),
+        add_distribution_line(
+            "❤️",
+            name,
+            allocations.get(
+                f"КЖ:{name}",
+                ZERO,
+            ),
         )
 
-        lines.append(
-            f"{escape(name)}: "
-            f"<b>{rub(amount)}</b>"
+    # Остаточная категория КЖ "Зарплата"
+
+    if (
+        "Зарплата"
+        not in settings.life_categories
+    ):
+
+        add_distribution_line(
+            "❤️",
+            "Зарплата",
+            allocations.get(
+                "КЖ:Зарплата",
+                ZERO,
+            ),
         )
 
-    # Остаточная категория
-    salary_amount = allocations.get(
-        "КЖ:Зарплата",
-        Decimal("0"),
+    # ========================================================
+    # ДОЛГИ
+    # ========================================================
+
+    minimum_payment = allocations.get(
+        "Мин. платеж",
+        ZERO,
     )
 
-    lines.append(
-        f"Зарплата: <b>{rub(salary_amount)}</b>"
+    early_payment = allocations.get(
+        "Досрочное",
+        ZERO,
+    )
+
+    add_distribution_line(
+        "💳",
+        "Минимальные платежи",
+        minimum_payment,
+    )
+
+    add_distribution_line(
+        "💳",
+        "Досрочное погашение",
+        early_payment,
     )
 
     # ========================================================
     # БЫТОВОЙ РЕЗЕРВ
     # ========================================================
 
-    household = allocations.get(
+    add_distribution_line(
+        "💚",
         "Бытовой резерв",
-        Decimal("0"),
+        allocations.get(
+            "Бытовой резерв",
+            ZERO,
+        ),
     )
-
-    lines.append(
-        f"Бытовой резерв: "
-        f"<b>{rub(household)}</b>"
-    )
-
-    # ========================================================
-    # КРЕДИТЫ
-    # ========================================================
-
-    if settings.credits:
-
-        minimum = allocations.get(
-            "Мин. платеж",
-            Decimal("0"),
-        )
-
-        early = allocations.get(
-            "Досрочное",
-            Decimal("0"),
-        )
-
-        lines.append(
-            f"Минимальные платежи: "
-            f"<b>{rub(minimum)}</b>"
-        )
-
-        lines.append(
-            f"Досрочное погашение: "
-            f"<b>{rub(early)}</b>"
-        )
 
     # ========================================================
     # ЦЕЛИ
@@ -903,26 +924,38 @@ async def send_distribution_report(
 
         for goal in settings.goals:
 
-            amount = allocations.get(
-                f"Цели:{goal.name}",
-                Decimal("0"),
-            )
-
-            lines.append(
-                f"{escape(goal.name)}: "
-                f"<b>{rub(amount)}</b>"
+            add_distribution_line(
+                "⭐️",
+                goal.name,
+                allocations.get(
+                    f"Цели:{goal.name}",
+                    ZERO,
+                ),
             )
 
     else:
 
-        amount = allocations.get(
-            "Цели:ЦЕЛИ (всего)",
-            Decimal("0"),
+        add_distribution_line(
+            "⭐️",
+            "Цели",
+            allocations.get(
+                "Цели:ЦЕЛИ (всего)",
+                ZERO,
+            ),
         )
 
-        lines.append(
-            f"Цели: <b>{rub(amount)}</b>"
-        )
+    # ========================================================
+    # ИНВЕСТИЦИИ
+    # ========================================================
+
+    add_distribution_line(
+        "📈",
+        "Инвестиции",
+        allocations.get(
+            "Инвестиции",
+            ZERO,
+        ),
+    )
 
     # ========================================================
     # ТЕКУЩИЙ РЕЖИМ
@@ -930,40 +963,40 @@ async def send_distribution_report(
 
     mode = allocator.active_mode()
 
+    MODE_EMOJI = {
+        1: "🟤",
+        2: "🔴",
+        3: "🟠",
+        4: "🟣",
+        5: "🔵",
+        6: "🟢",
+    }
+
+    mode_emoji = MODE_EMOJI.get(
+        mode,
+        "",
+    )
+
     lines.extend([
         "",
         "<b>ТЕКУЩИЙ РЕЖИМ</b>",
         "",
-        f"<b>{MODE_TITLES[mode]}</b>",
+        f"{mode_emoji} "
+        f"<b>{escape(MODE_TITLES[mode])}</b>",
     ])
-
-    next_info = allocator.next_mode_info()
-
-    if next_info:
-
-        lines.append(
-            f"До следующего режима осталось: "
-            f"<b>{rub(next_info['remaining'])}</b>"
-        )
-
-    else:
-
-        lines.append(
-            "Максимальный режим достигнут."
-        )
 
     # ========================================================
     # БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ
     # ========================================================
 
     life_remaining = max(
-        Decimal("0"),
+        ZERO,
         settings.critical_life
         - state.life_balance,
     )
 
     sustainable_remaining = max(
-        Decimal("0"),
+        ZERO,
         settings.household_life
         - state.life_balance,
     )
@@ -972,9 +1005,9 @@ async def send_distribution_report(
         "",
         "<b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>",
         "",
-        f"Баланс жизни: "
+        f"🔄 Баланс жизни: "
         f"<b>{rub(state.life_balance)}</b>",
-        f"Подушка: "
+        f"🛟 Подушка: "
         f"<b>{rub(state.pillow_balance)}</b>",
         f"До КЖ осталось: "
         f"<b>{rub(life_remaining)}</b>",
@@ -983,10 +1016,10 @@ async def send_distribution_report(
     ])
 
     # ========================================================
-    # ТОЛЬКО РЕЖИМ РАЗРАБОТЧИКА
+    # РЕЖИМ РАЗРАБОТЧИКА
     # ========================================================
 
-    if settings.developer_mode:
+    if developer_mode:
 
         check = result.checks
 
