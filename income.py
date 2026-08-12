@@ -23,6 +23,7 @@ from financial_engine import (
 )
 
 from storage import db
+from ui import main_menu_keyboard
 
 
 router = Router()
@@ -1472,6 +1473,7 @@ async def send_distribution_report(
     await send_long_message(
         message,
         "\n".join(lines),
+        reply_markup=main_menu_keyboard(),
     )
 
 # ============================================================
@@ -1483,20 +1485,26 @@ async def send_long_message(
     message: Message,
     text: str,
     max_length: int = 3800,
+    reply_markup=None,
 ):
 
+    # Если сообщение помещается целиком —
+    # сразу показываем под ним главное меню.
     if len(text) <= max_length:
 
         await message.answer(
-            text
+            text,
+            reply_markup=reply_markup,
         )
 
         return
 
+    # Если отчёт длинный, разбиваем его.
     paragraphs = text.split(
         "\n"
     )
 
+    chunks = []
     current = ""
 
     for paragraph in paragraphs:
@@ -1507,14 +1515,10 @@ async def send_long_message(
             + "\n"
         )
 
-        if (
-            len(candidate)
-            > max_length
-        ):
+        if len(candidate) > max_length:
 
             if current:
-
-                await message.answer(
+                chunks.append(
                     current
                 )
 
@@ -1528,7 +1532,27 @@ async def send_long_message(
             current = candidate
 
     if current:
+        chunks.append(
+            current
+        )
+
+    # Отправляем части отчёта.
+    # Главное меню прикрепляем только
+    # к последней части.
+    for index, chunk in enumerate(
+        chunks
+    ):
+
+        is_last = (
+            index
+            == len(chunks) - 1
+        )
 
         await message.answer(
-            current
+            chunk,
+            reply_markup=(
+                reply_markup
+                if is_last
+                else None
+            ),
         )
