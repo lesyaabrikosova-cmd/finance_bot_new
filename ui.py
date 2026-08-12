@@ -21,7 +21,6 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [("Новый доход", "menu:income")],
         [("Балансы", "menu:analytics"), ("Режим", "menu:state")],
         [("Анализ доходов", "menu:income_analysis")],
-        [("История", "menu:history")],
         [("Кредиты", "menu:credits"), ("Цели", "menu:goals")],
         [("Новый расчетный период", "period:new")],
         [("Настройки", "settings:open")],

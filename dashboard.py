@@ -880,70 +880,126 @@ async def menu_about(
 # АНАЛИЗ ДОХОДОВ
 # ============================================================
 
-def income_operations_current_period(allocator) -> list[dict]:
-    operations = []
-
-    for operation in getattr(
-        allocator.state,
-        "distribution_history",
-        [],
-    ):
-        if operation.get("type") != "income_distribution":
-            continue
-
-        if not operation_is_in_current_period(
-            operation,
-            getattr(
-                allocator.state,
-                "period_started_at",
-                None,
-            ),
-        ):
-            continue
-
-        operations.append(operation)
-
-    return operations
-
-
 async def send_income_analysis(
     message: Message,
     telegram_id: int,
 ):
-    allocator = db.load_allocator(telegram_id)
+    allocator = db.load_allocator(
+        telegram_id
+    )
 
     if allocator is None:
         await message.answer(
-            "Сначала создайте финансовый профиль через /start."
+            "Сначала создайте финансовый профиль "
+            "через /start."
         )
         return
 
-    operations = income_operations_current_period(
-        allocator
+    # Читаем операции напрямую из SQLite.
+    operations = db.load_operations(
+        telegram_id,
+        limit=1000,
     )
 
-    if not operations:
-        await message.answer(
-            "<b>АНАЛИЗ ДОХОДОВ</b>\n\n"
-            "В текущем расчётном периоде пока нет поступлений.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
+    period_started_at = getattr(
+        allocator.state,
+        "period_started_at",
+        None,
+    )
+
+    period_start = None
+
+    if period_started_at:
+        try:
+            period_start = (
+                datetime.fromisoformat(
+                    period_started_at
+                )
+            )
+        except ValueError:
+            period_start = None
 
     totals: dict[str, Decimal] = {}
     total_income = Decimal("0")
 
     for operation in operations:
-        income_type = str(
-            operation.get("income_type")
-            or "Без типа"
+
+        # Нас интересуют только распределения дохода.
+        if (
+            operation.get("type")
+            != "income_distribution"
+        ):
+            continue
+
+        payload = (
+            operation.get("payload")
+            or {}
         )
+
+        # --------------------------------------------
+        # Проверяем расчётный период
+        # --------------------------------------------
+
+        operation_date = None
+
+        raw_date = payload.get("date")
+
+        if raw_date:
+
+            try:
+                operation_date = (
+                    datetime.fromisoformat(
+                        str(raw_date)
+                    )
+                )
+
+            except ValueError:
+
+                try:
+                    operation_date = (
+                        datetime.strptime(
+                            str(raw_date)[:10],
+                            "%Y-%m-%d",
+                        )
+                    )
+
+                except ValueError:
+                    operation_date = None
+
+        # Если дата операции известна и она раньше
+        # текущего периода — не учитываем её.
+        if (
+            period_start is not None
+            and operation_date is not None
+            and operation_date.date()
+            < period_start.date()
+        ):
+            continue
+
+        # --------------------------------------------
+        # Тип дохода
+        # --------------------------------------------
+
+        income_type = str(
+            payload.get(
+                "income_type",
+                "Без типа",
+            )
+        )
+
+        # --------------------------------------------
+        # Сумма
+        # --------------------------------------------
+
         amount = D(
-            operation.get(
+            payload.get(
                 "income",
                 Decimal("0"),
             )
         )
+
+        if amount <= 0:
+            continue
 
         totals[income_type] = (
             totals.get(
@@ -955,6 +1011,25 @@ async def send_income_analysis(
 
         total_income += amount
 
+    # --------------------------------------------
+    # Если доходов пока нет
+    # --------------------------------------------
+
+    if total_income <= 0:
+
+        await message.answer(
+            "<b>АНАЛИЗ ДОХОДОВ</b>\n\n"
+            "В текущем расчётном периоде "
+            "пока нет поступлений.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+        return
+
+    # --------------------------------------------
+    # Сортируем от крупнейшего источника
+    # --------------------------------------------
+
     ordered = sorted(
         totals.items(),
         key=lambda item: item[1],
@@ -964,11 +1039,13 @@ async def send_income_analysis(
     lines = [
         "<b>АНАЛИЗ ДОХОДОВ</b>",
         "",
-        f"👛 Доход итого: <b>{rub(total_income)}</b>",
+        f"👛 Доход итого: "
+        f"<b>{rub(total_income)}</b>",
         "",
     ]
 
     for income_type, amount in ordered:
+
         lines.append(
             f"{escape(income_type)} — "
             f"<b>{rub(amount)}</b> "
@@ -988,161 +1065,12 @@ async def menu_income_analysis(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     await callback.answer()
+
     await state.clear()
 
     await send_income_analysis(
-        callback.message,
-        callback.from_user.id,
-    )
-
-
-# ============================================================
-# ИСТОРИЯ
-# ============================================================
-
-async def send_history(
-    message: Message,
-    telegram_id: int,
-):
-    allocator = db.load_allocator(telegram_id)
-
-    if allocator is None:
-        await message.answer(
-            "Сначала создайте финансовый профиль через /start."
-        )
-        return
-
-    operations = list(
-        getattr(
-            allocator.state,
-            "operation_log",
-            [],
-        )
-    )
-
-    if not operations:
-        await message.answer(
-            "<b>ИСТОРИЯ</b>\n\n"
-            "Операций пока нет.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    lines = [
-        "<b>ИСТОРИЯ</b>",
-        "",
-        "Последние операции:",
-        "",
-    ]
-
-    shown = 0
-
-    for operation in reversed(operations):
-        op_type = operation.get("type")
-
-        if op_type == "income_distribution":
-            raw_date = str(
-                operation.get("date", "")
-            )
-
-            try:
-                formatted_date = date.fromisoformat(
-                    raw_date[:10]
-                ).strftime("%d.%m.%Y")
-            except ValueError:
-                formatted_date = raw_date or "без даты"
-
-            income_type = escape(
-                str(
-                    operation.get(
-                        "income_type",
-                        "Без типа",
-                    )
-                )
-            )
-
-            amount = D(
-                operation.get(
-                    "income",
-                    Decimal("0"),
-                )
-            )
-
-            lines.append(
-                f"{formatted_date} — "
-                f"{income_type} — "
-                f"<b>{rub(amount)}</b>"
-            )
-
-        elif op_type == "minimum_payment":
-            raw_date = str(
-                operation.get("date", "")
-            )
-
-            try:
-                formatted_date = date.fromisoformat(
-                    raw_date[:10]
-                ).strftime("%d.%m.%Y")
-            except ValueError:
-                formatted_date = raw_date or "без даты"
-
-            credit_name = escape(
-                str(
-                    operation.get(
-                        "credit",
-                        "Кредит",
-                    )
-                )
-            )
-
-            lines.append(
-                f"{formatted_date} — "
-                f"минимальный платёж — "
-                f"{credit_name}"
-            )
-
-        elif op_type == "period_reset":
-            lines.append(
-                "Начат новый расчётный период"
-            )
-
-        else:
-            continue
-
-        shown += 1
-
-        if shown >= 20:
-            break
-
-    if shown == 0:
-        lines.append(
-            "Подходящих операций пока нет."
-        )
-
-    if len(operations) > shown:
-        lines.extend([
-            "",
-            "Показаны последние 20 операций.",
-        ])
-
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=main_menu_keyboard(),
-    )
-
-
-@router.callback_query(
-    F.data == "menu:history"
-)
-async def menu_history(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-    await callback.answer()
-    await state.clear()
-
-    await send_history(
         callback.message,
         callback.from_user.id,
     )
