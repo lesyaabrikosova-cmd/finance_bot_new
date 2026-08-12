@@ -53,7 +53,7 @@ class SetupStates(StatesGroup):
     minimum_reserve_months = State()
     force_majeure_months = State()
 
-    # Категории обязательной жизни
+    # Категории Критического минимума
     life_categories_menu = State()
     life_category_name = State()
     life_category_amount = State()
@@ -452,7 +452,7 @@ async def save_employment(
         "🔴 <b>ШАГ 2. ОБЯЗАТЕЛЬНЫЕ РАСХОДЫ</b>\n\n"
 
         "Сколько денег в среднем вам нужно "
-        "<b>каждый месяц на обязательную жизнь</b>?\n\n"
+        "<b>каждый месяц на Критический минимум</b>?\n\n"
 
         "Это расходы, которые нельзя спокойно "
         "отложить на потом:\n"
@@ -996,7 +996,7 @@ async def save_force_months_text(
 
 
 # ============================================================
-# КАТЕГОРИИ КРИТИЧЕСКОЙ ЖИЗНИ
+# КАТЕГОРИИ КРИТИЧЕСКОГО МИНИМУМА
 # ============================================================
 
 
@@ -1216,7 +1216,7 @@ async def life_category_amount(
             "Эта сумма не помещается внутри "
             "ваших обязательных расходов.\n\n"
 
-            f"Общая обязательная жизнь: "
+            f"Критический минимум: "
             f"<b>{rub(critical_life)}</b>\n"
 
             f"Уже распределено по категориям: "
@@ -2955,7 +2955,7 @@ async def show_confirmation(
         f"💳 Долги: "
         f"<b>{'есть' if settings.has_debts else 'нет'}</b>\n\n"
 
-        f"🔴 Обязательная жизнь: "
+        f"🔴 Критический минимум: "
         f"<b>{rub(settings.critical_life)}</b>\n"
 
         f"🟢 Бытовой резерв: "
@@ -2973,7 +2973,7 @@ async def show_confirmation(
         f"Типы дохода для налога: "
         f"<b>{escape(tax_types)}</b>\n\n"
 
-        f"<b>Обязательные категории</b>\n"
+        f"<b>Категории Критического минимума</b>\n"
         f"{category_text}\n"
 
         + credit_text

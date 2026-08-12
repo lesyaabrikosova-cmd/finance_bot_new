@@ -1009,9 +1009,9 @@ async def send_distribution_report(
         f"<b>{rub(state.life_balance)}</b>",
         f"🛟 Подушка: "
         f"<b>{rub(state.pillow_balance)}</b>",
-        f"До КЖ осталось: "
+        f"До Критического минимума осталось: "
         f"<b>{rub(life_remaining)}</b>",
-        f"До УЖ осталось: "
+        f"До Устойчивой жизни осталось: "
         f"<b>{rub(sustainable_remaining)}</b>",
     ])
 

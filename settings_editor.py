@@ -93,21 +93,21 @@ async def show_settings_menu(message: Message, telegram_id: int):
 
     await message.answer(
         "⚙️ <b>РЕДАКТИРОВАНИЕ НАСТРОЕК</b>\n\n"
-        f"🔴 Обязательная жизнь: <b>{rub(s.critical_life)}</b>\n"
-        f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
+        f"🔴 Критический минимум: <b>{rub(s.critical_life)}</b>\n"
+        f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"        f"🟢 Устойчивая жизнь: <b>{rub(s.household_life)}</b> <i>(автоматически)</i>\n"
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
         f"🏛 Налог: <b>{s.tax_rate}%</b>\n"
         f"🛟 Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
-        f"❤️ Категории КЖ: {escape(categories)}\n"
+        f"❤️ Категории Критического минимума: {escape(categories)}\n"
         f"⭐️ Цели: {escape(goals)}\n\n"
         f"Распределение этапа C: ⭐️ цели {s.goals_share_c}% / 🛟 подушка {s.pillow_share_c}%",
         reply_markup=keyboard([
             [("🛟 Изменить Подушку", "settings:pillow")],
-            [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
+            [("🔴 Изменить Критический минимум", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
             [("💰 Средний доход", "settings:income")],
             [("🏛 Налог", "settings:tax")],
-            [("❤️ Категории КЖ", "settings:life_categories")],
+            [("❤️ Категории Критического минимума", "settings:life_categories")],
             [("⭐️ Проценты целей", "settings:goals")],
             [("⚖️ Цели / Подушка этапа C", "settings:c_split")],
             [(dev_button, "settings:developer")],
@@ -201,13 +201,13 @@ async def ask_full_reset(
         "📈 Инвестиции\n"
         "💳 Счётчик досрочного погашения\n"
         "⭐️ Накопления по целям\n"
-        "❤️ Категории КЖ текущего периода\n"
+        "❤️ Категории Критического минимума текущего периода\n"
         "💚 Бытовой резерв текущего периода\n"
         "👛 Доход текущего периода\n"
         "🏛️ Налог текущего периода\n"
         "📜 История распределений\n\n"
         "<b>Настройки профиля сохранятся.</b>\n"
-        "КЖ, Бытовой резерв, категории, проценты, налог, "
+        "Критический минимум, Бытовой резерв, категории, проценты, налог, "
         "тип занятости и данные кредитов останутся без изменений.",
         reply_markup=keyboard([
             [("Да, обнулить учёт", "settings:full_reset_confirm")],
@@ -337,7 +337,7 @@ async def edit_critical(callback: CallbackQuery, state: FSMContext):
     allocator = db.load_allocator(callback.from_user.id)
     await state.set_state(EditSettingsStates.critical_life)
     await callback.message.answer(
-        "🔴 <b>ОБЯЗАТЕЛЬНАЯ ЖИЗНЬ</b>\n\n"
+        "🔴 <b>КРИТИЧЕСКИЙ МИНИМУМ</b>\n\n"
         f"Сейчас: <b>{rub(allocator.settings.critical_life)}</b>\n\n"
         "Введите новую месячную сумму обязательных расходов.\n"
         "Кредитные минимальные платежи сюда не добавляйте — они учитываются отдельно."
@@ -353,15 +353,15 @@ async def save_critical(message: Message, state: FSMContext):
     explicit = sum(allocator.settings.life_categories.values(), Decimal("0"))
     if explicit > value:
         await message.answer(
-            "Новая КЖ меньше суммы ваших отдельных категорий КЖ.\n\n"
+            "Новый Критический минимум меньше суммы ваших отдельных категорий.\n\n"
             f"Категории сейчас составляют {rub(explicit)}.\n"
-            "Сначала уменьшите категории либо введите КЖ не меньше этой суммы."
+            "Сначала уменьшите категории либо введите Критический минимум не меньше этой суммы."
         )
         return
     allocator.settings.critical_life = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(f"✅ Обязательная жизнь обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard())
+    await message.answer(f"✅ Критический минимум обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard())
 
 @router.callback_query(F.data == "settings:household")
 async def edit_household(callback: CallbackQuery, state: FSMContext):
@@ -446,11 +446,11 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         for name, amount in allocator.settings.life_categories.items()
     ) or "Отдельных категорий сейчас нет."
     await callback.message.answer(
-        "❤️ <b>КАТЕГОРИИ ОБЯЗАТЕЛЬНОЙ ЖИЗНИ</b>\n\n"
+        "❤️ <b>КАТЕГОРИИ КРИТИЧЕСКОГО МИНИМУМА</b>\n\n"
         f"{current}\n\n"
         "Отправьте весь новый список одним сообщением в формате:\n"
         "<code>Квартира=43000, Транспорт=5000, Питомец=4000</code>\n\n"
-        "До 4 категорий. Остаток КЖ бот автоматически оставит в «Зарплате».\n"
+        "До 4 категорий. Остаток Критического минимума бот автоматически оставит в «Зарплате».\n"
         "Чтобы удалить все отдельные категории, отправьте: <code>нет</code>"
     )
 
@@ -486,8 +486,8 @@ async def save_life_categories(message: Message, state: FSMContext):
         total = sum(new_categories.values(), Decimal("0"))
         if total > allocator.settings.critical_life:
             await message.answer(
-                f"Категории дают {rub(total)}, а ваша КЖ — {rub(allocator.settings.critical_life)}.\n"
-                "Сумма категорий не может быть больше КЖ."
+                f"Категории дают {rub(total)}, а ваш Критический минимум — {rub(allocator.settings.critical_life)}.\n"
+                "Сумма категорий не может быть больше Критического минимума."
             )
             return
 
@@ -501,7 +501,7 @@ async def save_life_categories(message: Message, state: FSMContext):
     }
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer("✅ Категории обязательной жизни обновлены.", reply_markup=main_menu_keyboard())
+    await message.answer("✅ Категории Критического минимума обновлены.", reply_markup=main_menu_keyboard())
 
 @router.callback_query(F.data == "settings:goals")
 async def edit_goal_percentages(callback: CallbackQuery, state: FSMContext):
