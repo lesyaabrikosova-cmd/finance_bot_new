@@ -895,40 +895,40 @@ async def send_income_analysis(
         )
         return
 
-    # Читаем операции напрямую из SQLite.
+    # Берём операции прямо из SQLite.
+    # Они уже отсортированы:
+    # сначала самые новые.
     operations = db.load_operations(
         telegram_id,
         limit=1000,
     )
 
-    period_started_at = getattr(
-        allocator.state,
-        "period_started_at",
-        None,
-    )
-
-    period_start = None
-
-    if period_started_at:
-        try:
-            period_start = (
-                datetime.fromisoformat(
-                    period_started_at
-                )
-            )
-        except ValueError:
-            period_start = None
-
     totals: dict[str, Decimal] = {}
     total_income = Decimal("0")
 
+    # ========================================================
+    # ВАЖНО
+    #
+    # Идём от самых новых операций назад.
+    # Как только встретили последний period_reset —
+    # останавливаемся.
+    #
+    # Значит учитываются ТОЛЬКО доходы,
+    # сделанные после последнего сброса периода.
+    # ========================================================
+
     for operation in operations:
 
-        # Нас интересуют только распределения дохода.
-        if (
-            operation.get("type")
-            != "income_distribution"
-        ):
+        operation_type = operation.get(
+            "type"
+        )
+
+        # Дошли до начала текущего периода.
+        if operation_type == "period_reset":
+            break
+
+        # Остальные типы операций нам не нужны.
+        if operation_type != "income_distribution":
             continue
 
         payload = (
@@ -936,60 +936,12 @@ async def send_income_analysis(
             or {}
         )
 
-        # --------------------------------------------
-        # Проверяем расчётный период
-        # --------------------------------------------
-
-        operation_date = None
-
-        raw_date = payload.get("date")
-
-        if raw_date:
-
-            try:
-                operation_date = (
-                    datetime.fromisoformat(
-                        str(raw_date)
-                    )
-                )
-
-            except ValueError:
-
-                try:
-                    operation_date = (
-                        datetime.strptime(
-                            str(raw_date)[:10],
-                            "%Y-%m-%d",
-                        )
-                    )
-
-                except ValueError:
-                    operation_date = None
-
-        # Если дата операции известна и она раньше
-        # текущего периода — не учитываем её.
-        if (
-            period_start is not None
-            and operation_date is not None
-            and operation_date.date()
-            < period_start.date()
-        ):
-            continue
-
-        # --------------------------------------------
-        # Тип дохода
-        # --------------------------------------------
-
         income_type = str(
             payload.get(
                 "income_type",
                 "Без типа",
             )
         )
-
-        # --------------------------------------------
-        # Сумма
-        # --------------------------------------------
 
         amount = D(
             payload.get(
@@ -1011,9 +963,9 @@ async def send_income_analysis(
 
         total_income += amount
 
-    # --------------------------------------------
-    # Если доходов пока нет
-    # --------------------------------------------
+    # ========================================================
+    # НЕТ ПОСТУПЛЕНИЙ
+    # ========================================================
 
     if total_income <= 0:
 
@@ -1026,9 +978,9 @@ async def send_income_analysis(
 
         return
 
-    # --------------------------------------------
-    # Сортируем от крупнейшего источника
-    # --------------------------------------------
+    # ========================================================
+    # СОРТИРУЕМ ПО СУММЕ
+    # ========================================================
 
     ordered = sorted(
         totals.items(),
