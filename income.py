@@ -602,43 +602,22 @@ async def show_income_confirmation(
         - tax
     )
 
-    if tax > 0:
-
-        tax_text = (
-            f"🏛 Налог: <b>{rub(tax)}</b>\n"
-            f"Правило: <i>{escape(tax_rule)}</i>\n"
-        )
-
-    else:
-
-        tax_text = (
-            "🏛 Налог: <b>0 ₽</b>\n"
-            f"Правило: <i>{escape(tax_rule)}</i>\n"
-        )
-
     await state.set_state(
         IncomeStates.confirmation
     )
 
     await message.answer(
-        "📋 <b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
+        "<b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
 
-        f"💰 Сумма: "
-        f"<b>{rub(amount)}</b>\n"
+        f"{income_date.strftime('%d.%m.%Y')}\n"
+        f"{escape(income_type)} — {rub(amount)}\n\n"
 
-        f"🏷 Тип: "
-        f"<b>{escape(income_type)}</b>\n"
+        f"🏛 <b>Налог</b> — {fmt_money(tax)}\n"
+        f"💰 <b>За вычетом налога</b> — "
+        f"{fmt_money(after_tax)}\n\n"
 
-        f"📅 Дата: "
-        f"<b>{income_date.strftime('%d.%m.%Y')}</b>\n\n"
+        f"Правило: <i>{escape(tax_rule)}</i>",
 
-        + tax_text +
-
-        f"💵 После налога: "
-        f"<b>{rub(after_tax)}</b>\n\n"
-
-        "После подтверждения бот сразу распределит "
-        "всю сумму по вашему финансовому алгоритму.",
         reply_markup=keyboard([
             [
                 (
