@@ -495,6 +495,12 @@ class AllocatorState:
     period_income: Decimal = ZERO
     period_tax: Decimal = ZERO
 
+    # Все направления распределения
+    # за текущий расчётный период.
+    period_allocations: Dict[str, Decimal] = field(
+        default_factory=dict
+    )
+
     # ----------------------------
     # Журнал операций
     # ----------------------------
@@ -588,6 +594,7 @@ class AllocatorState:
         self.period_tax = ZERO
 
         self.period_life_topups = {}
+        self.period_allocations = {}
 
 
 # ============================================================
@@ -1996,6 +2003,30 @@ class FinancialAllocator:
             mode_after,
         )
 
+        # --------------------------------------------
+        # НАКОПИТЕЛЬНАЯ АНАЛИТИКА ПЕРИОДА
+        # --------------------------------------------
+
+        # Совместимость с профилями,
+        # сохранёнными до появления этого счётчика.
+        if not hasattr(
+            self.state,
+            "period_allocations",
+        ):
+            self.state.period_allocations = {}
+
+        for key, value in allocations.items():
+
+            self.state.period_allocations[
+                key
+            ] = (
+                self.state.period_allocations.get(
+                    key,
+                    ZERO,
+                )
+                + D(value)
+            )
+            
         # --------------------------------------------
         # Журнал
         # --------------------------------------------

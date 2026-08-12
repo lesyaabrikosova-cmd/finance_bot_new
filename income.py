@@ -775,22 +775,23 @@ async def send_distribution_report(
     income_date: date,
 ):
 
-    allocations = (
-        result.allocations
-    )
+    allocations = result.allocations
 
-    income = result.income
+    settings = allocator.settings
+    state = allocator.state
 
     # ========================================================
-    # ЗАГОЛОВОК
+    # ДАНО
     # ========================================================
 
     lines = [
-        "💰 <b>РАСПРЕДЕЛЕНИЕ ПОСТУПЛЕНИЯ</b>",
+        "<b>ДАНО</b>",
         "",
-        f"Поступление: <b>{rub(income)}</b>",
+        f"Поступление: <b>{rub(result.income)}</b>",
         f"Тип: <b>{escape(income_type)}</b>",
         f"Дата: <b>{income_date.strftime('%d.%m.%Y')}</b>",
+        "",
+        "<b>РАСПРЕДЕЛЕНИЕ</b>",
         "",
     ]
 
@@ -798,299 +799,211 @@ async def send_distribution_report(
     # НАЛОГ
     # ========================================================
 
-    if result.tax > 0:
-
-        lines.extend([
-            "🏛 <b>Шаг 1. Налог</b>",
-            f"Ставка: "
-            f"{allocator.settings.tax_rate}%",
-            f"Налог: <b>{rub(result.tax)}</b>",
-            "",
-        ])
-
-    # ========================================================
-    # СУММА ПОСЛЕ НАЛОГА
-    # ========================================================
-
-    lines.extend([
-        "💵 <b>Сумма к распределению</b>",
-        f"Поступление: {rub(result.income)}",
-        f"Налог: {rub(result.tax)}",
-        f"К распределению: "
-        f"<b>{rub(result.amount_to_distribute)}</b>",
-        "",
-    ])
-
-    # ========================================================
-    # РАСПРЕДЕЛЕНИЕ
-    # ========================================================
-
     lines.append(
-        "📦 <b>Куда направить деньги</b>"
+        f"Налог: <b>{rub(result.tax)}</b>"
     )
 
-    lines.append("")
+    # ========================================================
+    # ПОДУШКА
+    # ========================================================
 
-    # Налог
-    if result.tax > 0:
-
-        lines.append(
-            f"🏛 Налог — "
-            f"<b>{rub(result.tax)}</b>"
-        )
-
-    # Инвестиции
-    investment = allocations.get(
-        "Инвестиции",
-        Decimal("0"),
-    )
-
-    if (
-        investment > 0
-        or allocator.settings.developer_mode
-    ):
-
-        lines.append(
-            f"📈 Инвестиции — "
-            f"<b>{rub(investment)}</b>"
-        )
-
-    # Подушка
     pillow = allocations.get(
         "Подушка",
         Decimal("0"),
     )
 
-    if (
-        pillow > 0
-        or allocator.settings.developer_mode
-    ):
+    lines.append(
+        f"Подушка: <b>{rub(pillow)}</b>"
+    )
 
-        lines.append(
-            f"🛟 Подушка — "
-            f"<b>{rub(pillow)}</b>"
-        )
+    # ========================================================
+    # ИНВЕСТИЦИИ
+    # ========================================================
 
-    # КЖ
-    life_items = []
+    investments = allocations.get(
+        "Инвестиции",
+        Decimal("0"),
+    )
 
-    for key, value in allocations.items():
+    lines.append(
+        f"Инвестиции: <b>{rub(investments)}</b>"
+    )
 
-        if key.startswith("КЖ:"):
+    # ========================================================
+    # КАТЕГОРИИ КЖ
+    # ========================================================
 
-            name = key.split(
-                ":",
-                1,
-            )[1]
+    for name in settings.life_categories.keys():
 
-            life_items.append(
-                (
-                    name,
-                    value,
-                )
-            )
-
-    if life_items:
-
-        life_total = sum(
-            (
-                value
-                for _, value
-                in life_items
-            ),
+        amount = allocations.get(
+            f"КЖ:{name}",
             Decimal("0"),
         )
 
         lines.append(
-            f"🔴 Обязательная жизнь — "
-            f"<b>{rub(life_total)}</b>"
+            f"{escape(name)}: "
+            f"<b>{rub(amount)}</b>"
         )
 
-        for name, value in life_items:
-
-            if (
-                value > 0
-                or allocator.settings.developer_mode
-            ):
-
-                lines.append(
-                    f"   ❤️ {escape(name)} — "
-                    f"{rub(value)}"
-                )
-
-    # Минимальный платёж
-    minimum = allocations.get(
-        "Мин. платеж",
+    # Остаточная категория
+    salary_amount = allocations.get(
+        "КЖ:Зарплата",
         Decimal("0"),
     )
 
-    if (
-        minimum > 0
-        or (
-            allocator.settings.developer_mode
-            and allocator.settings.credits
-        )
-    ):
-
-        lines.append(
-            f"💳 Минимальные платежи — "
-            f"<b>{rub(minimum)}</b>"
-        )
-
-    # Досрочное
-    early = allocations.get(
-        "Досрочное",
-        Decimal("0"),
+    lines.append(
+        f"Зарплата: <b>{rub(salary_amount)}</b>"
     )
 
-    if (
-        early > 0
-        or allocator.settings.developer_mode
-    ):
+    # ========================================================
+    # БЫТОВОЙ РЕЗЕРВ
+    # ========================================================
 
-        lines.append(
-            f"💳 Досрочное погашение — "
-            f"<b>{rub(early)}</b>"
-        )
-
-    # Бытовой резерв
     household = allocations.get(
         "Бытовой резерв",
         Decimal("0"),
     )
 
-    if (
-        household > 0
-        or allocator.settings.developer_mode
-    ):
+    lines.append(
+        f"Бытовой резерв: "
+        f"<b>{rub(household)}</b>"
+    )
 
-        lines.append(
-            f"🟢 Бытовой резерв — "
-            f"<b>{rub(household)}</b>"
+    # ========================================================
+    # КРЕДИТЫ
+    # ========================================================
+
+    if settings.credits:
+
+        minimum = allocations.get(
+            "Мин. платеж",
+            Decimal("0"),
         )
 
-    # Цели
-    goal_items = []
-
-    for key, value in allocations.items():
-
-        if key.startswith("Цели:"):
-
-            name = key.split(
-                ":",
-                1,
-            )[1]
-
-            goal_items.append(
-                (
-                    name,
-                    value,
-                )
-            )
-
-    if goal_items:
-
-        goals_total = sum(
-            (
-                value
-                for _, value
-                in goal_items
-            ),
+        early = allocations.get(
+            "Досрочное",
             Decimal("0"),
         )
 
         lines.append(
-            f"⭐️ Цели — "
-            f"<b>{rub(goals_total)}</b>"
+            f"Минимальные платежи: "
+            f"<b>{rub(minimum)}</b>"
         )
-
-        for name, value in goal_items:
-
-            if (
-                value > 0
-                or allocator.settings.developer_mode
-            ):
-
-                lines.append(
-                    f"   ⭐️ {escape(name)} — "
-                    f"{rub(value)}"
-                )
-
-    # ========================================================
-    # ПРОВЕРКА
-    # ========================================================
-
-    check = result.checks
-
-    lines.extend([
-        "",
-        "☑️ <b>ПРОВЕРКА</b>",
-        f"Распределено + налог: "
-        f"<b>{rub(check['total'])}</b>",
-        f"Доход: "
-        f"<b>{rub(check['income'])}</b>",
-    ])
-
-    if check["ok"]:
 
         lines.append(
-            "Статус: ✅ <b>Сходится</b>"
+            f"Досрочное погашение: "
+            f"<b>{rub(early)}</b>"
         )
+
+    # ========================================================
+    # ЦЕЛИ
+    # ========================================================
+
+    if settings.goals:
+
+        for goal in settings.goals:
+
+            amount = allocations.get(
+                f"Цели:{goal.name}",
+                Decimal("0"),
+            )
+
+            lines.append(
+                f"{escape(goal.name)}: "
+                f"<b>{rub(amount)}</b>"
+            )
 
     else:
 
+        amount = allocations.get(
+            "Цели:ЦЕЛИ (всего)",
+            Decimal("0"),
+        )
+
         lines.append(
-            "Статус: ❌ <b>Расхождение</b>"
+            f"Цели: <b>{rub(amount)}</b>"
         )
 
     # ========================================================
-    # РЕЖИМ
+    # ТЕКУЩИЙ РЕЖИМ
     # ========================================================
 
     mode = allocator.active_mode()
 
     lines.extend([
         "",
-        "⚙️ <b>ТЕКУЩИЙ РЕЖИМ</b>",
-        f"{MODE_NAMES[mode]} "
+        "<b>ТЕКУЩИЙ РЕЖИМ</b>",
+        "",
         f"<b>{MODE_TITLES[mode]}</b>",
     ])
 
-    if result.mode_before != result.mode_after:
+    next_info = allocator.next_mode_info()
+
+    if next_info:
 
         lines.append(
-            f"✅ Переход: "
-            f"{MODE_NAMES[result.mode_before]} → "
-            f"{MODE_NAMES[result.mode_after]}"
+            f"До следующего режима осталось: "
+            f"<b>{rub(next_info['remaining'])}</b>"
         )
 
     else:
 
-        next_info = (
-            allocator.next_mode_info()
+        lines.append(
+            "Максимальный режим достигнут."
         )
 
-        if next_info:
-
-            lines.append(
-                f"Режим не изменился."
-            )
-
-            lines.append(
-                f"До {next_info['next_name']} осталось "
-                f"<b>{rub(next_info['remaining'])}</b>"
-            )
-
     # ========================================================
-    # РЕЖИМ РАЗРАБОТЧИКА
+    # БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ
     # ========================================================
 
-    if allocator.settings.developer_mode:
+    life_remaining = max(
+        Decimal("0"),
+        settings.critical_life
+        - state.life_balance,
+    )
+
+    sustainable_remaining = max(
+        Decimal("0"),
+        settings.household_life
+        - state.life_balance,
+    )
+
+    lines.extend([
+        "",
+        "<b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>",
+        "",
+        f"Баланс жизни: "
+        f"<b>{rub(state.life_balance)}</b>",
+        f"Подушка: "
+        f"<b>{rub(state.pillow_balance)}</b>",
+        f"До КЖ осталось: "
+        f"<b>{rub(life_remaining)}</b>",
+        f"До УЖ осталось: "
+        f"<b>{rub(sustainable_remaining)}</b>",
+    ])
+
+    # ========================================================
+    # ТОЛЬКО РЕЖИМ РАЗРАБОТЧИКА
+    # ========================================================
+
+    if settings.developer_mode:
+
+        check = result.checks
 
         lines.extend([
             "",
-            "🛠 <b>ПОШАГОВЫЙ РАСЧЁТ</b>",
+            "<b>РАСЧЁТ — РЕЖИМ РАЗРАБОТЧИКА</b>",
             "",
+            f"Контрольная сумма: "
+            f"{rub(check['total'])}",
+            f"Доход: "
+            f"{rub(check['income'])}",
+            f"Расхождение: "
+            f"{rub(check['difference'])}",
+            f"Проверка: "
+            f"{'сходится' if check['ok'] else 'НЕ сходится'}",
+            "",
+            "<b>ШАГИ РАСЧЁТА</b>",
         ])
 
         for number, step in enumerate(
@@ -1099,32 +1012,14 @@ async def send_distribution_report(
         ):
 
             lines.append(
-                f"<b>{number}.</b>\n"
-                f"<code>{escape(str(step))}</code>"
+                f"{number}. "
+                f"{escape(str(step))}"
             )
 
-    # ========================================================
-    # СОСТОЯНИЕ
-    # ========================================================
-
-    lines.extend([
-        "",
-        "📊 <b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>",
-        f"🔄 Баланс жизни: "
-        f"<b>{rub(allocator.state.life_balance)}</b>",
-        f"🛟 Подушка: "
-        f"<b>{rub(allocator.state.pillow_balance)}</b>",
-        f"📈 Инвестиции: "
-        f"<b>{rub(allocator.state.investments)}</b>",
-    ])
-
-    # Telegram ограничивает длину сообщения.
-    # Поэтому отправляем частями.
     await send_long_message(
         message,
         "\n".join(lines),
     )
-
 
 # ============================================================
 # ДЛИННЫЕ СООБЩЕНИЯ

@@ -63,6 +63,11 @@ from dashboard import (
     router as dashboard_router,
 )
 
+from ui import (
+    keyboard,
+    main_menu_keyboard,
+)
+
 from storage import db
 
 
@@ -100,79 +105,6 @@ router = Router()
 # КНОПКИ
 # ============================================================
 
-
-def keyboard(
-    rows: list[list[tuple[str, str]]]
-) -> InlineKeyboardMarkup:
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=data,
-                )
-                for text, data in row
-            ]
-            for row in rows
-        ]
-    )
-
-
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-
-    return keyboard([
-        [
-            (
-                "Новый доход",
-                "menu:income",
-            )
-        ],
-        [
-            (
-                "Балансы",
-                "menu:analytics",
-            ),
-            (
-                "Режим",
-                "menu:state",
-            ),
-        ],
-        [
-            (
-                "Кредиты",
-                "menu:credits",
-            ),
-            (
-                "Цели",
-                "menu:goals",
-            ),
-        ],
-        [
-            (
-                "Новый расчётный период",
-                "period:new",
-            )
-        ],
-        [
-            (
-                "Настройки",
-                "settings:open",
-            )
-        ],
-        [
-            (
-                "От разработчика",
-                "menu:about",
-            )
-        ],
-        [
-            (
-                "Помощь",
-                "menu:help",
-            )
-        ],
-    ])
 
 # ============================================================
 # ПРОВЕРКА НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ
