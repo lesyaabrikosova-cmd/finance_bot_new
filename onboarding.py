@@ -31,6 +31,15 @@ from ui import main_menu_keyboard
 router = Router()
 
 
+BASE_DIR = Path(__file__).resolve().parent
+INTRO_IMAGES_DIR = BASE_DIR / "images"
+
+INTRO_IMAGE_1 = INTRO_IMAGES_DIR / "intro_1.png"
+INTRO_IMAGE_2 = INTRO_IMAGES_DIR / "intro_2.png"
+INTRO_IMAGE_3 = INTRO_IMAGES_DIR / "intro_3.png"
+INTRO_IMAGE_4 = INTRO_IMAGES_DIR / "intro_4.png"
+
+
 # ============================================================
 # СОСТОЯНИЯ МАСТЕРА НАСТРОЙКИ
 # ============================================================
@@ -274,75 +283,184 @@ async def restart_setup(
     )
 
 
+async def send_intro_photo(
+    message: Message,
+    image_path: Path,
+    caption: str,
+    callback_data: str,
+    button_text: str,
+):
+
+    if not image_path.exists():
+
+        await message.answer(
+            "⚠️ Не найдена приветственная картинка.\n"
+            f"<code>{escape(str(image_path))}</code>"
+        )
+
+        return
+
+    await message.answer_photo(
+        photo=FSInputFile(
+            image_path
+        ),
+        caption=caption,
+        reply_markup=continue_keyboard(
+            callback_data,
+            button_text,
+        ),
+    )
+
+
+async def remove_old_intro_button(
+    callback: CallbackQuery,
+):
+
+    try:
+
+        await callback.message.edit_reply_markup(
+            reply_markup=None
+        )
+
+    except Exception:
+
+        # Если Telegram уже убрал клавиатуру или сообщение
+        # нельзя отредактировать, переход всё равно продолжаем.
+        pass
+
+
 async def show_intro(
     message: Message,
     state: FSMContext,
 ):
 
-    # Приветственная иллюстрация хранится рядом с кодом,
-    # поэтому путь не зависит от того, где запущен бот.
-    welcome_image = (
-        Path(__file__).resolve().parent
-        / "images"
-        / "welcome.png"
-    )
-
-    if welcome_image.exists():
-
-        await message.answer_photo(
-            photo=FSInputFile(
-                welcome_image
-            )
-        )
-
-    await message.answer(
+    caption = (
         "🧪 <b>Богатый Алхимик — это финансовый аллокатор.</b>\n\n"
 
         "Я не буду заставлять вас записывать каждую чашку кофе "
         "и разбирать, куда вчера исчезли деньги. Анализ прошлых "
         "расходов иногда полезен для дисциплины, но сам по себе "
         "он не решает главную задачу: <b>что делать с деньгами, "
-        "когда они только пришли?</b>\n\n"
+        "когда они только пришли?</b>"
+    )
 
-        "Богатый Алхимик работает с будущим.\n\n"
+    await send_intro_photo(
+        message=message,
+        image_path=INTRO_IMAGE_1,
+        caption=caption,
+        callback_data="intro:2",
+        button_text="Что же делать?",
+    )
+
+
+@router.callback_query(
+    F.data == "intro:2"
+)
+async def intro_step_2(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await remove_old_intro_button(
+        callback
+    )
+
+    caption = (
+        "<b>Богатый Алхимик работает с будущим.</b>\n\n"
 
         "Его задача — <b>заранее распределять каждый доход</b> "
-        "по финансовым «конвертам». О некоторых вы наверняка уже "
-        "догадываетесь. Но будут и неочевидные — именно они помогают "
-        "постепенно выстраивать финансовую устойчивость.\n\n"
+        "по финансовым «конвертам». О некоторых вы наверняка "
+        "уже догадываетесь. Но будут и неочевидные — именно они "
+        "помогают постепенно выстраивать финансовую устойчивость."
+    )
 
-        "<b>Секрет философского камня прост: чтобы начать богатеть, "
-        "сначала нужно научиться управлять тем, что уже "
-        "зарабатываешь.</b>\n\n"
+    await send_intro_photo(
+        message=callback.message,
+        image_path=INTRO_IMAGE_2,
+        caption=caption,
+        callback_data="intro:3",
+        button_text="Продолжить",
+    )
 
-        "Если человек зарабатывает миллион и тратит его в тот же "
-        "месяц, его трудно назвать богатым. И это совсем не значит, "
-        "что для богатства ему нужно начать зарабатывать два миллиона. "
-        "Часто проблема не в размере дохода, а в том, <b>как мозг "
-        "принимает решения о деньгах</b>.\n\n"
 
-        "Управление бюджетом — это во многом работа с вероятностями. "
+@router.callback_query(
+    F.data == "intro:3"
+)
+async def intro_step_3(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await remove_old_intro_button(
+        callback
+    )
+
+    caption = (
+        "<b>Секрет философского камня прост: чтобы начать "
+        "богатеть, сначала нужно научиться управлять тем, "
+        "что уже зарабатываешь.</b>\n\n"
+
+        "Если человек зарабатывает миллион и тратит его в тот "
+        "же месяц, его трудно назвать богатым. И это совсем не "
+        "значит, что для богатства ему нужно начать зарабатывать "
+        "два миллиона. Часто проблема не в размере дохода, а в "
+        "том, <b>как мозг принимает решения о деньгах.</b>\n\n"
+
+        "Управление бюджетом — это работа с вероятностями. "
         "Мы не знаем, что произойдёт завтра, но можем заранее "
-        "подготовить деньги к наиболее вероятным сценариям — и создать "
-        "запас на маловероятные, но дорогие неприятности.\n\n"
+        "подготовить деньги на дорогие неприятности."
+    )
+
+    await send_intro_photo(
+        message=callback.message,
+        image_path=INTRO_IMAGE_3,
+        caption=caption,
+        callback_data="intro:4",
+        button_text="Дальше",
+    )
+
+
+@router.callback_query(
+    F.data == "intro:4"
+)
+async def intro_step_4(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await remove_old_intro_button(
+        callback
+    )
+
+    caption = (
+        "<b>Волшебная таблетка существует! Но её нужно приготовить.</b>\n\n"
 
         "Чтобы алгоритм работал именно под вашу жизнь, сначала "
         "создадим <b>финансовый профиль</b>.\n\n"
 
         "Я буду задавать вопросы по одному и объяснять, "
-        "<b>что означает каждая цифра и где её взять</b>. "
-        "Никаких специальных финансовых знаний не потребуется.\n\n"
+        "<b>что означает каждая цифра и где её взять.</b>\n\n"
 
-        "⏱ Настройка состоит из нескольких небольших разделов. "
+        "Настройка состоит из нескольких небольших разделов. "
         "Не торопитесь: лучше один раз вдумчиво настроить систему, "
         "чем потом месяцами исправлять неверные цифры.\n\n"
 
-        "<b>Освободите вечер, заварите ароматный чай и приготовьтесь "
-        "немного поколдовать над своими финансами.</b>",
-        reply_markup=continue_keyboard(
-            "setup:start",
-            "Начать настройку →",
-        ),
+        "Освободите вечер, заварите ароматный чай и приготовьтесь "
+        "немного поколдовать над своими финансами."
+    )
+
+    await send_intro_photo(
+        message=callback.message,
+        image_path=INTRO_IMAGE_4,
+        caption=caption,
+        callback_data="setup:start",
+        button_text="Начать настройку",
     )
 
 
@@ -360,6 +478,10 @@ async def setup_start(
 ):
 
     await callback.answer()
+
+    await remove_old_intro_button(
+        callback
+    )
 
     await state.set_state(
         SetupStates.has_debts
