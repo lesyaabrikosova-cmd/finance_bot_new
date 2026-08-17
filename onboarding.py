@@ -55,6 +55,15 @@ class SetupStates(StatesGroup):
     critical_life = State()
     household_reserve = State()
     average_income = State()
+    income_method = State()
+    income_month_amount = State()
+
+    # Калькулятор Критического минимума
+    km_menu = State()
+    km_item_name = State()
+    km_item_amount = State()
+    km_item_period = State()
+    km_custom_period = State()
 
     # Налог
     tax_rate = State()
@@ -128,8 +137,8 @@ def yes_no_keyboard(
 
     return keyboard([
         [
-            ("✅ Да", f"{prefix}:yes"),
-            ("❌ Нет", f"{prefix}:no"),
+            ("Да", f"{prefix}:yes"),
+            ("Нет", f"{prefix}:no"),
         ]
     ])
 
@@ -250,7 +259,7 @@ async def start(
             reply_markup=keyboard([
                 [
                     (
-                        "⚙️ Настроить заново",
+                        "Настроить заново",
                         "setup:restart",
                     )
                 ]
@@ -465,1457 +474,578 @@ async def intro_step_4(
 
 
 # ============================================================
-# ДОЛГИ
+# ДИНАМИЧЕСКАЯ ПЕРВИЧНАЯ НАСТРОЙКА
 # ============================================================
 
 
-@router.callback_query(
-    F.data == "setup:start"
-)
-async def setup_start(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
+KM_CATEGORIES = {
+    "housing": (
+        "Жильё и помещения",
+        "Аренда квартиры, ЖКХ и другие обязательные расходы на жильё. "
+        "Рабочую студию или офис сюда не включайте: это профессиональный расход, а не стоимость личной жизни.",
+    ),
+    "food": (
+        "Питание",
+        "Продукты, питьевая вода и другое питание, без которого нельзя нормально прожить месяц.",
+    ),
+    "communication": (
+        "Связь",
+        "Мобильная связь, домашний интернет, необходимый VPN и действительно необходимые подписки.",
+    ),
+    "transport": (
+        "Транспорт",
+        "Обязательный общественный транспорт или необходимые расходы на автомобиль.",
+    ),
+    "education": (
+        "Образование",
+        "Колледж, ВУЗ или другой платёж, который нельзя без последствий прекратить. "
+        "Курсы и репетитора для души лучше учитывать в Бытовом резерве.",
+    ),
+    "children": (
+        "Дети",
+        "Детский сад, школа, питание и другие действительно обязательные расходы на детей.",
+    ),
+    "pets": (
+        "Питомцы",
+        "Корм, наполнитель и другие регулярные обязательные расходы на питомцев.",
+    ),
+    "health": (
+        "Здоровье",
+        "Необходимые лекарства и лечение. Плановую стоматологию и другие переносимые расходы лучше учитывать в Бытовом резерве.",
+    ),
+    "other": (
+        "Другое",
+        "Любой обязательный расход, которого нет в списке. Если при резком падении дохода от него можно отказаться на несколько месяцев — это, скорее всего, не Критический минимум.",
+    ),
+}
 
+
+def route_total(data: dict) -> int:
+    return 9 if data.get("has_debts") else 8
+
+
+def progress_bar(done: int, total: int) -> str:
+    done = max(0, min(done, total))
+    return "💎" * done + "➖" * (total - done)
+
+
+def setup_progress(data: dict, done: int) -> str:
+    return progress_bar(done, route_total(data))
+
+
+def money2(value: Decimal) -> Decimal:
+    return Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def round_up_thousand(value: Decimal) -> Decimal:
+    value = Decimal(value)
+    return (
+        (value / Decimal("1000")).to_integral_value(rounding=ROUND_CEILING)
+        * Decimal("1000")
+    )
+
+
+def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
+    result: dict[str, Decimal] = {}
+    for item in items:
+        label = item["category_label"]
+        result[label] = money2(
+            result.get(label, Decimal("0"))
+            + Decimal(item["monthly"])
+        )
+    return result
+
+
+async def remove_setup_button(callback: CallbackQuery):
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "setup:start")
+async def setup_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    await remove_old_intro_button(callback)
 
-    await remove_old_intro_button(
-        callback
-    )
-
-    await state.set_state(
-        SetupStates.has_debts
-    )
-
-    await callback.message.answer(
-        "💳 <b>ШАГ 1. КРЕДИТЫ И ДОЛГИ</b>\n\n"
-
-        "<b>У вас сейчас есть кредиты или другие "
-        "долги с обязательным ежемесячным платежом?</b>\n\n"
-
-        "Сюда относятся, например:\n"
-        "• потребительский кредит;\n"
-        "• ипотека;\n"
-        "• автокредит;\n"
-        "• кредитная карта, если по ней есть долг;\n"
-        "• другой банковский долг с минимальным "
-        "платежом.\n\n"
-
-        "Если кредитная карта полностью погашена "
-        "и задолженности нет — выбирайте «Нет».",
-        reply_markup=yes_no_keyboard(
-            "debts"
-        ),
-    )
-
-
-@router.callback_query(
-    SetupStates.has_debts,
-    F.data.startswith("debts:")
-)
-async def save_debts(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    has_debts = (
-        callback.data == "debts:yes"
-    )
-
+    await state.clear()
     await state.update_data(
-        has_debts=has_debts,
         credits=[],
+        goals=[],
+        debt_strategy="Лавина",
+        calculate_interest_savings=False,
+        developer_mode=False,
+        current_minimum_payments="0",
+        km_items=[],
     )
-
-    await state.set_state(
-        SetupStates.employment
-    )
+    await state.set_state(SetupStates.employment)
 
     await callback.message.answer(
-        "👤 <b>Как вы получаете основной доход?</b>\n\n"
-
-        "Выберите <b>Наёмный</b>, если ваш доход "
-        "в основном представляет собой регулярную "
-        "зарплату от работодателя.\n\n"
-
-        "Выберите <b>Фрилансер</b>, если доход "
-        "нерегулярный: проекты, заказы, самозанятость, "
-        "собственный небольшой бизнес и т. п.\n\n"
-
-        "Это важно: для нерегулярного дохода алгоритм "
-        "создаёт дополнительный стабилизатор, который "
-        "помогает переживать слабые месяцы.",
+        f"{progress_bar(1, 2)}\n\n"
+        "<b>КАК ВЫ ПОЛУЧАЕТЕ ОСНОВНОЙ ДОХОД?</b>\n\n"
+        "Выберите <b>Наёмный</b>, если у вас регулярная зарплата от работодателя.\n\n"
+        "Выберите <b>Фрилансер</b>, если доход заметно меняется от месяца к месяцу: "
+        "проекты, заказы, самозанятость, небольшой бизнес и другие нерегулярные поступления.",
         reply_markup=keyboard([
-            [
-                (
-                    "👔 Наёмный",
-                    "employment:employee",
-                )
-            ],
-            [
-                (
-                    "🧑‍💻 Фрилансер",
-                    "employment:freelancer",
-                )
-            ],
+            [("Наёмный", "employment:employee")],
+            [("Фрилансер", "employment:freelancer")],
         ]),
     )
 
 
-# ============================================================
-# ФОРМА ЗАНЯТОСТИ
-# ============================================================
-
-
-@router.callback_query(
-    SetupStates.employment,
-    F.data.startswith("employment:")
-)
-async def save_employment(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
+@router.callback_query(SetupStates.employment, F.data.startswith("employment:"))
+async def save_employment(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    await remove_setup_button(callback)
 
-    employment = (
-        "Наёмный"
-        if callback.data
-        == "employment:employee"
-        else "Фрилансер"
-    )
-
-    await state.update_data(
-        employment_type=employment
-    )
-
-    await state.set_state(
-        SetupStates.critical_life
-    )
-
-    data = await state.get_data()
-
-    debt_note = ""
-
-    if data.get("has_debts"):
-
-        debt_note = (
-            "\n\n⚠️ <b>Платежи по кредитам сейчас "
-            "сюда не добавляйте.</b> Мы введём каждый "
-            "кредит отдельно, и бот сам добавит "
-            "минимальные платежи к обязательствам. "
-            "Так мы не посчитаем их дважды."
-        )
+    employment = "Наёмный" if callback.data == "employment:employee" else "Фрилансер"
+    await state.update_data(employment_type=employment)
+    await state.set_state(SetupStates.has_debts)
 
     await callback.message.answer(
-        "🔴 <b>ШАГ 2. ОБЯЗАТЕЛЬНЫЕ РАСХОДЫ</b>\n\n"
-
-        "Сколько денег в среднем вам нужно "
-        "<b>каждый месяц на обязательную жизнь</b>?\n\n"
-
-        "Это расходы, которые нельзя спокойно "
-        "отложить на потом:\n"
-        "• жильё и коммунальные услуги;\n"
-        "• продукты;\n"
-        "• связь и интернет;\n"
-        "• обязательный транспорт;\n"
-        "• лекарства;\n"
-        "• содержание питомца;\n"
-        "• другие необходимые платежи.\n\n"
-
-        "💡 <b>Лучше не оценивать эту сумму на глаз.</b>\n"
-        "Откройте банковскую аналитику за последние "
-        "3–6 месяцев, сложите такие расходы и "
-        "разделите на число месяцев.\n\n"
-
-        "Пример:\n"
-        "за 6 месяцев обязательные расходы составили "
-        "480 000 ₽ → 480 000 ÷ 6 = <b>80 000 ₽</b>."
-        + debt_note
-        + "\n\n"
-        "Отправьте сумму одним сообщением.\n"
-        "Например: <code>80000</code>",
+        f"{progress_bar(2, 2)}\n\n"
+        "<b>ЕСТЬ КРЕДИТЫ ИЛИ ДОЛГИ?</b>\n\n"
+        "Сейчас учитываем банковские обязательства: ипотеку, потребительские и автокредиты, "
+        "рассрочки и задолженность по кредитным картам.\n\n"
+        "Кредитная карта без задолженности долгом не считается.",
+        reply_markup=keyboard([
+            [("Есть", "debts:yes")],
+            [("Нет", "debts:no")],
+        ]),
     )
 
 
-# ============================================================
-# КРИТИЧЕСКАЯ ЖИЗНЬ
-# ============================================================
+@router.callback_query(SetupStates.has_debts, F.data.startswith("debts:"))
+async def save_debts(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await remove_setup_button(callback)
+
+    has_debts = callback.data == "debts:yes"
+    await state.update_data(has_debts=has_debts, credits=[])
+    await ask_income(callback.message, state)
 
 
-@router.message(
-    SetupStates.critical_life
-)
-async def save_critical_life(
-    message: Message,
-    state: FSMContext,
-):
+async def ask_income(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(SetupStates.average_income)
+    bar = setup_progress(data, 3)
 
-    value = parse_decimal(
-        message.text
-    )
+    if data["employment_type"] == "Наёмный":
+        text = (
+            f"{bar}\n\n"
+            "<b>КАКОЙ ДОХОД ВЫ СТАБИЛЬНО ПОЛУЧАЕТЕ КАЖДЫЙ МЕСЯЦ?</b>\n\n"
+            "Нужен <b>минимальный регулярный доход</b>, на который вы с большой вероятностью можете рассчитывать каждый месяц.\n\n"
+            "Постоянный оклад и регулярные ежемесячные надбавки учитывайте. "
+            "Премии, годовые бонусы, гранты, случайные подработки и другие нерегулярные поступления — нет. "
+            "Для Аллокатора это сверхдоход.\n\n"
+            "Не оценивайте сумму по памяти. Откройте историю поступлений за последние 6–12 месяцев и найдите устойчивую месячную базу.\n\n"
+            "Введите сумму."
+        )
+    else:
+        text = (
+            f"{bar}\n\n"
+            "<b>КАКОЙ У ВАС СРЕДНИЙ ДОХОД?</b>\n\n"
+            "Для нерегулярного дохода нужна реальная средняя за последние 6–12 месяцев. "
+            "Лучший месяц не считается вашей новой нормой.\n\n"
+            "Откройте историю поступлений и посчитайте среднее. Если хотите, можете отправить готовую сумму одним сообщением.\n\n"
+            "Введите среднемесячный доход."
+        )
 
+    await message.answer(text)
+
+
+@router.message(SetupStates.average_income)
+async def save_average_income(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
     if value is None or value <= 0:
-
-        await message.answer(
-            "Не получилось распознать сумму.\n\n"
-            "Отправьте положительное число, например:\n"
-            "<code>80000</code>"
-        )
-
+        await message.answer("Введите положительную сумму. Например: <code>180000</code>")
         return
 
-    await state.update_data(
-        critical_life=str(value)
-    )
+    await state.update_data(average_income=str(money2(value)))
+    await ask_tax(message, state)
 
-    await state.set_state(
-        SetupStates.household_reserve
-    )
 
+async def ask_tax(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(SetupStates.tax_rate)
     await message.answer(
-        "🟢 <b>Теперь — нерегулярные бытовые расходы.</b>\n\n"
-
-        "Они не происходят строго каждый месяц, "
-        "но регулярно появляются в жизни:\n\n"
-
-        "• одежда и обувь;\n"
-        "• стрижка и уход;\n"
-        "• кафе и развлечения;\n"
-        "• такси;\n"
-        "• подарки;\n"
-        "• бытовая химия;\n"
-        "• мелкий ремонт;\n"
-        "• необязательная аптека;\n"
-        "• другие бытовые покупки.\n\n"
-
-        "Аллокатор создаёт для этого отдельный "
-        "<b>Бытовой резерв</b>, чтобы такие траты "
-        "не приходилось оплачивать кредиткой "
-        "или забирать из финансовой подушки.\n\n"
-
-        "Посчитайте среднюю сумму за месяц так же "
-        "по банковской аналитике.\n\n"
-
-        "Например: <code>25000</code>",
+        f"{setup_progress(data, 4)}\n\n"
+        "<b>НУЖНО ЛИ ВАМ САМОСТОЯТЕЛЬНО ОТКЛАДЫВАТЬ НАЛОГ С КАКИХ-ТО ДОХОДОВ?</b>\n\n"
+        "С зарплаты налог обычно удерживает работодатель. Но подработки, частные заказы, самозанятость "
+        "или другие поступления могут требовать отдельного резерва.\n\n"
+        "Налог конкретного поступления потом можно будет изменить перед распределением.",
+        reply_markup=keyboard([
+            [("Да", "taxsetup:yes")],
+            [("Нет", "taxsetup:no")],
+        ]),
     )
 
 
-# ============================================================
-# БЫТОВОЙ РЕЗЕРВ
-# ============================================================
+@router.callback_query(SetupStates.tax_rate, F.data.startswith("taxsetup:"))
+async def tax_setup_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await remove_setup_button(callback)
 
-
-@router.message(
-    SetupStates.household_reserve
-)
-async def save_household_reserve(
-    message: Message,
-    state: FSMContext,
-):
-
-    value = parse_decimal(
-        message.text
-    )
-
-    if value is None or value < 0:
-
-        await message.answer(
-            "Введите сумму от 0 ₽ и выше.\n\n"
-            "Например: <code>25000</code>"
-        )
-
+    if callback.data == "taxsetup:no":
+        await state.update_data(tax_rate="0", taxable_income_types=[])
+        await start_critical_minimum(callback.message, state)
         return
 
-    await state.update_data(
-        household_reserve=str(value)
-    )
-
-    await state.set_state(
-        SetupStates.average_income
-    )
-
-    await message.answer(
-        "💰 <b>Среднемесячный доход</b>\n\n"
-
-        "Теперь укажите, сколько денег вы "
-        "<b>в среднем получаете за месяц</b>.\n\n"
-
-        "Если доход меняется, особенно у фрилансера, "
-        "лучше взять поступления за 6–12 месяцев "
-        "и разделить на количество месяцев.\n\n"
-
-        "Это не означает, что бот будет каждый месяц "
-        "ждать именно такую сумму. Реальные поступления "
-        "вы будете добавлять по мере их получения.\n\n"
-
-        "Средний доход нужен для понимания вашей "
-        "финансовой картины.\n\n"
-
-        "Например: <code>180000</code>",
+    data = await state.get_data()
+    await callback.message.answer(
+        f"{setup_progress(data, 4)}\n\n"
+        "<b>КАКУЮ СТАВКУ ИСПОЛЬЗОВАТЬ ПО УМОЛЧАНИЮ?</b>\n\n"
+        "Введите число без знака %. Например: <code>6</code>."
     )
 
 
-# ============================================================
-# СРЕДНИЙ ДОХОД
-# ============================================================
-
-
-@router.message(
-    SetupStates.average_income
-)
-async def save_average_income(
-    message: Message,
-    state: FSMContext,
-):
-
-    value = parse_decimal(
-        message.text
-    )
-
-    if value is None or value < 0:
-
-        await message.answer(
-            "Введите корректную сумму дохода.\n\n"
-            "Например: <code>180000</code>"
-        )
-
+@router.message(SetupStates.tax_rate)
+async def save_tax_rate(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0 or value > 100:
+        await message.answer("Введите ставку от 0 до 100. Например: <code>6</code>")
         return
 
-    await state.update_data(
-        average_income=str(value)
-    )
-
-    await state.set_state(
-        SetupStates.tax_rate
-    )
-
-    await message.answer(
-        "🏛️ <b>ШАГ 3. НАЛОГ</b>\n\n"
-
-        "Если с некоторых поступлений вам нужно "
-        "самостоятельно откладывать деньги на налог, "
-        "бот может делать это автоматически "
-        "при каждом распределении.\n\n"
-
-        "Например, самозанятый или предприниматель "
-        "может указать свою ставку.\n\n"
-
-        "Если вам не нужно самостоятельно "
-        "резервировать налог — отправьте <code>0</code>.\n\n"
-
-        "Если ставка, например, 6% — отправьте:\n"
-        "<code>6</code>",
-    )
-
-
-# ============================================================
-# НАЛОГ
-# ============================================================
-
-
-@router.message(
-    SetupStates.tax_rate
-)
-async def save_tax_rate(
-    message: Message,
-    state: FSMContext,
-):
-
-    value = parse_decimal(
-        message.text
-    )
-
-    if (
-        value is None
-        or value < 0
-        or value > 100
-    ):
-
-        await message.answer(
-            "Введите ставку от 0 до 100.\n\n"
-            "Например:\n"
-            "<code>6</code>"
-        )
-
-        return
-
-    await state.update_data(
-        tax_rate=str(value)
-    )
-
+    await state.update_data(tax_rate=str(value))
     if value == 0:
-
-        await state.update_data(
-            taxable_income_types=[]
-        )
-
-        await go_to_pillow_question(
-            message,
-            state,
-        )
-
+        await state.update_data(taxable_income_types=[])
+        await start_critical_minimum(message, state)
         return
 
-    await state.set_state(
-        SetupStates.taxable_types
-    )
-
+    await state.set_state(SetupStates.taxable_types)
+    data = await state.get_data()
     await message.answer(
-        "🏷 <b>С каких поступлений удерживать налог?</b>\n\n"
-
-        "У одного человека разные виды дохода могут "
-        "облагаться по-разному.\n\n"
-
-        "Например, налог нужно резервировать с "
-        "«Работы» и «Заказов», но не нужно "
-        "с подарков или кэшбэка.\n\n"
-
-        "Напишите названия через запятую.\n\n"
-
-        "Пример:\n"
-        "<code>Зарплата, Заказы, Фриланс</code>\n\n"
-
-        "Позже при добавлении дохода бот сверит "
-        "его тип с этим списком.",
+        f"{setup_progress(data, 4)}\n\n"
+        "<b>С КАКИХ ПОСТУПЛЕНИЙ ОБЫЧНО НУЖНО РЕЗЕРВИРОВАТЬ НАЛОГ?</b>\n\n"
+        "Введите названия через запятую. Например:\n"
+        "<code>Халтура, Частник, Фриланс</code>\n\n"
+        "Это правило по умолчанию: налог отдельного поступления можно будет изменить вручную."
     )
 
 
-@router.message(
-    SetupStates.taxable_types
-)
-async def save_taxable_types(
-    message: Message,
-    state: FSMContext,
-):
-
-    types = [
-        item.strip()
-        for item in message.text.split(",")
-        if item.strip()
-    ]
-
+@router.message(SetupStates.taxable_types)
+async def save_taxable_types(message: Message, state: FSMContext):
+    types = [item.strip() for item in message.text.split(",") if item.strip()]
     if not types:
-
-        await message.answer(
-            "Укажите хотя бы один тип дохода.\n\n"
-            "Например:\n"
-            "<code>Зарплата, Фриланс</code>"
-        )
-
+        await message.answer("Укажите хотя бы один тип дохода.")
         return
-
-    await state.update_data(
-        taxable_income_types=types
-    )
-
-    await go_to_pillow_question(
-        message,
-        state,
-    )
+    await state.update_data(taxable_income_types=types)
+    await start_critical_minimum(message, state)
 
 
-# ============================================================
-# ПОДУШКА
-# ============================================================
-
-
-async def go_to_pillow_question(
-    message: Message,
-    state: FSMContext,
-):
-
+async def start_critical_minimum(message: Message, state: FSMContext):
     data = await state.get_data()
-
-    if data["has_debts"]:
-
-        await state.set_state(
-            SetupStates.minimum_reserve_months
-        )
-
-        await message.answer(
-            "🛟 <b>ШАГ 4. МИНИМАЛЬНАЯ ПОДУШКА</b>\n\n"
-
-            "Пока есть долги, система сначала создаёт "
-            "небольшой аварийный запас.\n\n"
-
-            "Он нужен, чтобы при внезапной проблеме "
-            "не брать новый кредит и не пропускать "
-            "обязательные платежи.\n\n"
-
-            "Выберите, на сколько месяцев обязательной "
-            "жизни сформировать такую подушку.\n\n"
-
-            "<b>1 месяц</b> — быстрее перейти "
-            "к досрочному погашению.\n\n"
-
-            "<b>2 месяца</b> — больше безопасности "
-            "до начала агрессивного погашения долгов.",
-            reply_markup=keyboard([
-                [
-                    (
-                        "1 месяц",
-                        "minmonths:1",
-                    ),
-                    (
-                        "2 месяца",
-                        "minmonths:2",
-                    ),
-                ]
-            ]),
-        )
-
-    else:
-
-        await state.update_data(
-            minimum_reserve_months="0"
-        )
-
-        await state.set_state(
-            SetupStates.force_majeure_months
-        )
-
-        await show_force_majeure_question(
-            message,
-            state,
-        )
+    await state.update_data(km_items=[])
+    await state.set_state(SetupStates.km_menu)
+    await show_km_menu(message, state, intro=True)
 
 
-@router.callback_query(
-    SetupStates.minimum_reserve_months,
-    F.data.startswith("minmonths:")
-)
-async def save_minimum_months(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    months = (
-        callback.data.split(":")[1]
-    )
-
-    await state.update_data(
-        minimum_reserve_months=months
-    )
-
-    # Форс-мажорная подушка потребуется
-    # после закрытия долгов.
-    await state.set_state(
-        SetupStates.force_majeure_months
-    )
-
-    await show_force_majeure_question(
-        callback.message,
-        state,
-    )
-
-
-async def show_force_majeure_question(
-    message: Message,
-    state: FSMContext,
-):
-
+async def show_km_menu(message: Message, state: FSMContext, intro: bool = False):
     data = await state.get_data()
-
-    employment = data[
-        "employment_type"
-    ]
-
-    if employment == "Фрилансер":
-
-        recommendation = (
-            "Для нерегулярного дохода в вашей системе "
-            "предусмотрен более осторожный подход. "
-            "Обычно разумно рассматривать диапазон "
-            "<b>6–12 месяцев</b>."
-        )
-
-        buttons = [
-            [
-                ("6 мес.", "fmmonths:6"),
-                ("9 мес.", "fmmonths:9"),
-                ("12 мес.", "fmmonths:12"),
-            ],
-            [
-                (
-                    "Ввести своё число",
-                    "fmmonths:custom",
-                )
-            ],
-        ]
-
-    else:
-
-        recommendation = (
-            "Для регулярного дохода ориентир "
-            "системы — примерно <b>3–6 месяцев</b> "
-            "обязательных расходов."
-        )
-
-        buttons = [
-            [
-                ("3 мес.", "fmmonths:3"),
-                ("4 мес.", "fmmonths:4"),
-                ("6 мес.", "fmmonths:6"),
-            ],
-            [
-                (
-                    "Ввести своё число",
-                    "fmmonths:custom",
-                )
-            ],
-        ]
-
-    await message.answer(
-        "🛡 <b>ФОРС-МАЖОРНАЯ ПОДУШКА</b>\n\n"
-
-        "Это деньги не на отпуск и не на покупки.\n\n"
-
-        "Это резерв на действительно серьёзные "
-        "ситуации: потеря дохода, болезнь, авария, "
-        "вынужденный переезд и другие события, "
-        "которые резко нарушают обычную жизнь.\n\n"
-
-        + recommendation
-        + "\n\n"
-
-        "Выберите количество месяцев.",
-        reply_markup=keyboard(
-            buttons
-        ),
-    )
-
-
-@router.callback_query(
-    SetupStates.force_majeure_months,
-    F.data.startswith("fmmonths:")
-)
-async def save_force_months_callback(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    value = (
-        callback.data.split(":")[1]
-    )
-
-    if value == "custom":
-
-        await callback.message.answer(
-            "Введите количество месяцев числом.\n\n"
-            "Например: <code>5</code>"
-        )
-
-        return
-
-    await state.update_data(
-        force_majeure_months=value
-    )
-
-    await start_life_categories(
-        callback.message,
-        state,
-    )
-
-
-@router.message(
-    SetupStates.force_majeure_months
-)
-async def save_force_months_text(
-    message: Message,
-    state: FSMContext,
-):
-
-    value = parse_decimal(
-        message.text
-    )
-
-    if value is None or value <= 0:
-
-        await message.answer(
-            "Количество месяцев должно быть "
-            "больше нуля.\n\n"
-            "Например: <code>6</code>"
-        )
-
-        return
-
-    await state.update_data(
-        force_majeure_months=str(value)
-    )
-
-    await start_life_categories(
-        message,
-        state,
-    )
-
-
-# ============================================================
-# КАТЕГОРИИ КРИТИЧЕСКОЙ ЖИЗНИ
-# ============================================================
-
-
-async def start_life_categories(
-    message: Message,
-    state: FSMContext,
-):
-
-    await state.update_data(
-        life_categories={}
-    )
-
-    await state.set_state(
-        SetupStates.life_categories_menu
-    )
-
-    await message.answer(
-        "❤️ <b>ШАГ 5. КРУПНЫЕ ОБЯЗАТЕЛЬНЫЕ КАТЕГОРИИ</b>\n\n"
-
-        "Теперь можно разделить обязательные расходы "
-        "на несколько отдельных «конвертов».\n\n"
-
-        "Например:\n"
-        "• Квартира — 43 000 ₽;\n"
-        "• Транспорт — 5 000 ₽;\n"
-        "• Питомец — 4 000 ₽.\n\n"
-
-        "Алгоритм будет наполнять эти категории "
-        "<b>одновременно и пропорционально</b>.\n\n"
-
-        "Не нужно создавать десятки категорий. "
-        "Лучше выделить до <b>4 самых крупных "
-        "и важных</b>.\n\n"
-
-        "Продукты, телефон, небольшие подписки "
-        "и другую мелочь можно не перечислять: "
-        "остаток бот автоматически оставит "
-        "в категории ❤️ <b>Зарплата</b>.\n\n"
-
-        "Категории необязательны.",
-        reply_markup=keyboard([
-            [
-                (
-                    "➕ Добавить категорию",
-                    "lifecat:add",
-                )
-            ],
-            [
-                (
-                    "Пропустить →",
-                    "lifecat:done",
-                )
-            ],
-        ]),
-    )
-
-
-@router.callback_query(
-    SetupStates.life_categories_menu,
-    F.data == "lifecat:add"
-)
-async def add_life_category(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    data = await state.get_data()
-
-    categories = data.get(
-        "life_categories",
-        {},
-    )
-
-    if len(categories) >= 4:
-
-        await callback.message.answer(
-            "Уже добавлено 4 категории.\n\n"
-            "Этого достаточно для системы. "
-            "Остальные расходы останутся "
-            "в автоматической категории «Зарплата».",
-            reply_markup=continue_keyboard(
-                "lifecat:done"
-            ),
-        )
-
-        return
-
-    await state.set_state(
-        SetupStates.life_category_name
-    )
-
-    await callback.message.answer(
-        "Введите название категории.\n\n"
-        "Например:\n"
-        "<code>Квартира</code>\n"
-        "или\n"
-        "<code>Транспорт</code>"
-    )
-
-
-@router.message(
-    SetupStates.life_category_name
-)
-async def life_category_name(
-    message: Message,
-    state: FSMContext,
-):
-
-    name = message.text.strip()
-
-    if len(name) < 2:
-
-        await message.answer(
-            "Название слишком короткое."
-        )
-
-        return
-
-    if name.lower() in {
-        "зарплата",
-        "мин. платеж",
-        "мин платеж",
-        "минимальный платеж",
-    }:
-
-        await message.answer(
-            "Это название зарезервировано системой.\n\n"
-            "Введите другое название категории."
-        )
-
-        return
-
-    data = await state.get_data()
-
-    categories = data.get(
-        "life_categories",
-        {},
-    )
-
-    if any(
-        existing.lower() == name.lower()
-        for existing in categories
-    ):
-
-        await message.answer(
-            "Такая категория уже существует."
-        )
-
-        return
-
-    await state.update_data(
-        pending_life_category=name
-    )
-
-    await state.set_state(
-        SetupStates.life_category_amount
-    )
-
-    await message.answer(
-        f"Сколько в среднем нужно в месяц "
-        f"на ❤️ <b>{escape(name)}</b>?\n\n"
-        f"Например: <code>43000</code>"
-    )
-
-
-@router.message(
-    SetupStates.life_category_amount
-)
-async def life_category_amount(
-    message: Message,
-    state: FSMContext,
-):
-
-    amount = parse_decimal(
-        message.text
-    )
-
-    if amount is None or amount <= 0:
-
-        await message.answer(
-            "Введите положительную сумму."
-        )
-
-        return
-
-    data = await state.get_data()
-
-    critical_life = Decimal(
-        data["critical_life"]
-    )
-
-    categories = dict(
-        data.get(
-            "life_categories",
-            {},
-        )
-    )
-
-    current_total = sum(
-        (
-            Decimal(str(value))
-            for value in categories.values()
-        ),
-        Decimal("0"),
-    )
-
-    if current_total + amount > critical_life:
-
-        remaining = (
-            critical_life
-            - current_total
-        )
-
-        await message.answer(
-            "Эта сумма не помещается внутри "
-            "ваших обязательных расходов.\n\n"
-
-            f"Общая обязательная жизнь: "
-            f"<b>{rub(critical_life)}</b>\n"
-
-            f"Уже распределено по категориям: "
-            f"<b>{rub(current_total)}</b>\n"
-
-            f"Можно добавить максимум: "
-            f"<b>{rub(remaining)}</b>\n\n"
-
-            "Введите меньшую сумму."
-        )
-
-        return
-
-    name = data[
-        "pending_life_category"
-    ]
-
-    categories[name] = str(
-        amount
-    )
-
-    await state.update_data(
-        life_categories=categories
-    )
-
-    await state.set_state(
-        SetupStates.life_categories_menu
-    )
+    items = data.get("km_items", [])
+    groups = km_group_totals(items)
+    exact = money2(sum(groups.values(), Decimal("0")))
 
     lines = []
+    for name, value in groups.items():
+        lines.append(f"• {escape(name)} — {rub(value)} / мес.")
 
-    for category, value in categories.items():
+    summary = ""
+    if lines:
+        summary = "\n\n" + "\n".join(lines) + f"\n\nСейчас найдено: <b>{rub(exact)}</b> / мес."
 
-        lines.append(
-            f"❤️ {escape(category)} — "
-            f"{rub(Decimal(value))}"
+    intro_text = ""
+    if intro:
+        intro_text = (
+            "\n\nКритический минимум — обязательная стоимость вашей жизни. "
+            "Не угадывайте суммы: открывайте банковскую аналитику, договоры и тарифы.\n\n"
+            "Если при резком падении дохода от расхода можно без серьёзных последствий отказаться на несколько месяцев, "
+            "скорее всего, ему место в Бытовом резерве, а не здесь."
         )
 
-    salary = (
-        critical_life
-        - sum(
-            Decimal(v)
-            for v in categories.values()
-        )
-    )
-
-    lines.append(
-        f"❤️ Зарплата — "
-        f"{rub(salary)} "
-        f"<i>(автоматически)</i>"
-    )
-
-    text = "\n".join(lines)
-
-    buttons = []
-
-    if len(categories) < 4:
-
-        buttons.append([
-            (
-                "➕ Ещё категория",
-                "lifecat:add",
-            )
-        ])
-
-    buttons.append([
-        (
-            "Готово →",
-            "lifecat:done",
-        )
-    ])
+    rows = [
+        [("Жильё и помещения", "kmcat:housing"), ("Питание", "kmcat:food")],
+        [("Связь", "kmcat:communication"), ("Транспорт", "kmcat:transport")],
+        [("Образование", "kmcat:education"), ("Дети", "kmcat:children")],
+        [("Питомцы", "kmcat:pets"), ("Здоровье", "kmcat:health")],
+        [("Другое", "kmcat:other")],
+        [("Рассчитать минимум", "km:finish")],
+    ]
 
     await message.answer(
-        "Категория добавлена.\n\n"
-        f"{text}",
-        reply_markup=keyboard(
-            buttons
-        ),
+        f"{setup_progress(data, 5)}\n\n"
+        "<b>ПОСЧИТАЕМ ВАШ КРИТИЧЕСКИЙ МИНИМУМ</b>"
+        + intro_text
+        + summary,
+        reply_markup=keyboard(rows),
     )
 
 
-@router.callback_query(
-    F.data == "lifecat:done"
-)
-async def finish_life_categories(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmcat:"))
+async def choose_km_category(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-
-    await start_goals(
-        callback.message,
-        state,
-    )
-
-
-# ============================================================
-# ЦЕЛИ — НАЧАЛО
-# ============================================================
-
-
-async def start_goals(
-    message: Message,
-    state: FSMContext,
-):
-
-    await state.update_data(
-        goals=[]
-    )
-
-    await state.set_state(
-        SetupStates.goals_menu
-    )
-
-    await message.answer(
-        "⭐️ <b>ШАГ 6. ФИНАНСОВЫЕ ЦЕЛИ</b>\n\n"
-
-        "Цели — это деньги, которые вы хотите "
-        "откладывать на конкретные будущие расходы.\n\n"
-
-        "Например:\n"
-        "• отпуск;\n"
-        "• подарки;\n"
-        "• новая техника;\n"
-        "• образование;\n"
-        "• ремонт;\n"
-        "• продвижение проекта.\n\n"
-
-        "Когда ваш финансовый режим разрешит "
-        "накопление целей, бот будет автоматически "
-        "делить предназначенную для них сумму "
-        "по указанным вами долям.\n\n"
-
-        "Например:\n"
-        "Отпуск — 50%\n"
-        "Техника — 30%\n"
-        "Подарки — 20%\n\n"
-
-        "В сумме должно получиться <b>100%</b>.\n\n"
-
-        "Если пока не хотите создавать категории, "
-        "можно пропустить этот шаг. Тогда деньги "
-        "будут показываться как ⭐️ «Цели (всего)».",
-        reply_markup=keyboard([
-            [
-                (
-                    "➕ Добавить цель",
-                    "goal:add",
-                )
-            ],
-            [
-                (
-                    "Пока без категорий →",
-                    "goal:skip",
-                )
-            ],
-        ]),
-    )
-    # ============================================================
-# ЦЕЛИ — ДОБАВЛЕНИЕ
-# ============================================================
-
-
-@router.callback_query(
-    SetupStates.goals_menu,
-    F.data == "goal:add"
-)
-async def add_goal(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    data = await state.get_data()
-
-    goals = data.get(
-        "goals",
-        []
-    )
-
-    if len(goals) >= 6:
-        await callback.message.answer(
-            "Уже добавлено 6 целей.\n\n"
-            "Этого достаточно для удобного распределения.",
-            reply_markup=continue_keyboard(
-                "goal:done"
-            ),
-        )
+    key = callback.data.split(":", 1)[1]
+    if key not in KM_CATEGORIES:
         return
 
-    await state.set_state(
-        SetupStates.goal_name
+    label, hint = KM_CATEGORIES[key]
+    await state.update_data(pending_km_category=key, pending_km_category_label=label)
+    await state.set_state(SetupStates.km_item_name)
+    data = await state.get_data()
+    await callback.message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        f"<b>{escape(label.upper())}</b>\n\n"
+        f"{escape(hint)}\n\n"
+        "Введите короткое название расхода. Например: <code>Аренда квартиры</code> или <code>ЖКХ</code>."
+    )
+
+
+@router.message(SetupStates.km_item_name)
+async def km_item_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if len(name) < 2:
+        await message.answer("Введите понятное название расхода.")
+        return
+    await state.update_data(pending_km_item_name=name)
+    await state.set_state(SetupStates.km_item_amount)
+    data = await state.get_data()
+    await message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        f"<b>{escape(name.upper())}</b>\n\n"
+        "Сколько вы тратите? Введите сумму. Период укажем следующим сообщением."
+    )
+
+
+@router.message(SetupStates.km_item_amount)
+async def km_item_amount(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value <= 0:
+        await message.answer("Введите положительную сумму.")
+        return
+    await state.update_data(pending_km_item_amount=str(value))
+    await state.set_state(SetupStates.km_item_period)
+    data = await state.get_data()
+    await message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        "<b>ЗА КАКОЙ ПЕРИОД ЭТА СУММА?</b>",
+        reply_markup=keyboard([
+            [("В месяц", "kmperiod:1"), ("За 3 месяца", "kmperiod:3")],
+            [("За 6 месяцев", "kmperiod:6"), ("В год", "kmperiod:12")],
+            [("Другой период", "kmperiod:custom")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.km_item_period, F.data.startswith("kmperiod:"))
+async def km_item_period(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.split(":", 1)[1]
+    if value == "custom":
+        await state.set_state(SetupStates.km_custom_period)
+        data = await state.get_data()
+        await callback.message.answer(
+            f"{setup_progress(data, 5)}\n\n"
+            "<b>ЗА СКОЛЬКО МЕСЯЦЕВ?</b>\n\n"
+            "Введите число месяцев. Например: <code>2</code> или <code>18</code>."
+        )
+        return
+    await save_km_item(callback.message, state, Decimal(value))
+
+
+@router.message(SetupStates.km_custom_period)
+async def km_custom_period(message: Message, state: FSMContext):
+    months = parse_decimal(message.text)
+    if months is None or months <= 0:
+        await message.answer("Введите число месяцев больше нуля.")
+        return
+    await save_km_item(message, state, months)
+
+
+async def save_km_item(message: Message, state: FSMContext, months: Decimal):
+    data = await state.get_data()
+    amount = Decimal(data["pending_km_item_amount"])
+    monthly = money2(amount / months)
+    item = {
+        "category": data["pending_km_category"],
+        "category_label": data["pending_km_category_label"],
+        "name": data["pending_km_item_name"],
+        "amount": str(amount),
+        "months": str(months),
+        "monthly": str(monthly),
+    }
+    items = list(data.get("km_items", []))
+    items.append(item)
+    await state.update_data(km_items=items)
+    await state.set_state(SetupStates.km_menu)
+
+    await message.answer(
+        f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес."
+    )
+    await show_km_menu(message, state)
+
+
+@router.callback_query(SetupStates.km_menu, F.data == "km:finish")
+async def finish_km(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    items = data.get("km_items", [])
+    groups = km_group_totals(items)
+    exact = money2(sum(groups.values(), Decimal("0")))
+    if exact <= 0:
+        await callback.message.answer("Добавьте хотя бы один обязательный расход.")
+        return
+
+    rounded = round_up_thousand(exact)
+    await state.update_data(
+        critical_life=str(rounded),
+        critical_life_exact=str(exact),
+        life_categories={name: str(value) for name, value in groups.items()},
+    )
+    await state.set_state(SetupStates.household_reserve)
+    data = await state.get_data()
+
+    lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
+    await callback.message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        "<b>КРИТИЧЕСКИЙ МИНИМУМ РАССЧИТАН</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\nПо категориям — <b>{rub(exact)}</b>\n"
+        + f"Критический минимум — <b>{rub(rounded)}</b>\n\n"
+        "Сумма округлена вверх до ближайшей 1 000 ₽, чтобы обычные колебания расходов не оставляли бюджет без запаса."
     )
 
     await callback.message.answer(
-        "Введите название цели.\n\n"
-        "Например:\n"
-        "<code>Отпуск</code>\n"
-        "или\n"
-        "<code>Новый ноутбук</code>"
+        f"{setup_progress(data, 6)}\n\n"
+        "<b>СКОЛЬКО НУЖНО НА БЫТОВОЙ РЕЗЕРВ?</b>\n\n"
+        "Сюда относятся расходы нормальной жизни, которые возникают регулярно, но при серьёзном падении дохода их можно временно сократить или перенести:\n\n"
+        "• одежда и обувь\n"
+        "• стоматология и плановые врачи\n"
+        "• стрижка и уход\n"
+        "• бытовая химия\n"
+        "• такси, кафе, небольшие развлечения\n"
+        "• необязательные курсы и репетитор\n"
+        "• мелкий ремонт и другие бытовые траты\n\n"
+        "Откройте банковскую аналитику за последние 3–6 месяцев и введите среднемесячную сумму. Если такого резерва не нужно — введите 0."
     )
 
 
-@router.message(
-    SetupStates.goal_name
-)
-async def save_goal_name(
-    message: Message,
-    state: FSMContext,
-):
-
-    name = message.text.strip()
-
-    if len(name) < 2:
-        await message.answer(
-            "Название слишком короткое."
-        )
+@router.message(SetupStates.household_reserve)
+async def save_household_reserve(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
         return
 
+    await state.update_data(household_reserve=str(money2(value)))
     data = await state.get_data()
-
-    goals = data.get(
-        "goals",
-        []
-    )
-
-    if any(
-        item["name"].lower() == name.lower()
-        for item in goals
-    ):
-        await message.answer(
-            "Такая цель уже есть."
-        )
-        return
-
-    await state.update_data(
-        pending_goal_name=name
-    )
-
-    await state.set_state(
-        SetupStates.goal_percentage
-    )
-
-    used = sum(
-        Decimal(item["percentage"])
-        for item in goals
-    )
-
-    remaining = Decimal("100") - used
+    critical = Decimal(data["critical_life"])
+    sustainable = money2(critical + value)
 
     await message.answer(
-        f"Какую долю от всех денег, "
-        f"предназначенных для целей, "
-        f"направлять на ⭐️ <b>{escape(name)}</b>?\n\n"
-        f"Уже распределено: <b>{used}%</b>\n"
-        f"Осталось: <b>{remaining}%</b>\n\n"
-        f"Введите число от 0 до {remaining}.\n"
-        f"Например: <code>20</code>"
+        f"<b>Критический минимум</b> — {rub(critical)}\n"
+        f"<b>Бытовой резерв</b> — {rub(value)}\n"
+        f"<b>Устойчивая жизнь</b> — {rub(sustainable)}"
     )
+    await ask_pillow_policy(message, state)
 
 
-@router.message(
-    SetupStates.goal_percentage
-)
-async def save_goal_percentage(
-    message: Message,
-    state: FSMContext,
-):
-
-    value = parse_decimal(
-        message.text
-    )
-
-    if value is None or value <= 0:
-        await message.answer(
-            "Введите процент больше нуля."
-        )
-        return
-
+async def ask_pillow_policy(message: Message, state: FSMContext):
     data = await state.get_data()
+    step = 7
+    bar = setup_progress(data, step)
 
-    goals = list(
-        data.get(
-            "goals",
-            []
-        )
-    )
-
-    used = sum(
-        Decimal(item["percentage"])
-        for item in goals
-    )
-
-    remaining = Decimal("100") - used
-
-    if value > remaining:
+    if data.get("has_debts"):
+        await state.set_state(SetupStates.minimum_reserve_months)
         await message.answer(
-            f"Можно указать максимум {remaining}%."
-        )
-        return
-
-    goals.append({
-        "name": data["pending_goal_name"],
-        "percentage": str(value),
-    })
-
-    await state.update_data(
-        goals=goals
-    )
-
-    used = sum(
-        Decimal(item["percentage"])
-        for item in goals
-    )
-
-    remaining = Decimal("100") - used
-
-    lines = [
-        f"⭐️ {escape(item['name'])} — "
-        f"{item['percentage']}%"
-        for item in goals
-    ]
-
-    if remaining == 0:
-
-        await state.set_state(
-            SetupStates.goals_menu
-        )
-
-        await message.answer(
-            "Цели распределены полностью.\n\n"
-            + "\n".join(lines),
-            reply_markup=continue_keyboard(
-                "goal:done",
-                "Продолжить →",
-            ),
-        )
-
-        return
-
-    await state.set_state(
-        SetupStates.goals_menu
-    )
-
-    await message.answer(
-        "Цель добавлена.\n\n"
-        + "\n".join(lines)
-        + f"\n\nОсталось распределить: "
-          f"<b>{remaining}%</b>",
-        reply_markup=keyboard([
-            [
-                (
-                    "➕ Добавить ещё",
-                    "goal:add",
-                )
-            ],
-            [
-                (
-                    "Закончить автоматически",
-                    "goal:auto",
-                )
-            ],
-        ]),
-    )
-
-
-@router.callback_query(
-    SetupStates.goals_menu,
-    F.data == "goal:auto"
-)
-async def finish_goals_automatically(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    data = await state.get_data()
-
-    goals = list(
-        data.get(
-            "goals",
-            []
-        )
-    )
-
-    used = sum(
-        Decimal(item["percentage"])
-        for item in goals
-    )
-
-    remaining = Decimal("100") - used
-
-    if remaining > 0:
-        goals.append({
-            "name": "Остальные цели",
-            "percentage": str(remaining),
-        })
-
-    await state.update_data(
-        goals=goals
-    )
-
-    await after_goals(
-        callback.message,
-        state,
-    )
-
-
-@router.callback_query(
-    F.data == "goal:skip"
-)
-async def skip_goals(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    await state.update_data(
-        goals=[]
-    )
-
-    await after_goals(
-        callback.message,
-        state,
-    )
-
-
-@router.callback_query(
-    F.data == "goal:done"
-)
-async def finish_goals(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-
-    await callback.answer()
-
-    data = await state.get_data()
-
-    goals = data.get(
-        "goals",
-        []
-    )
-
-    if goals:
-        total = sum(
-            Decimal(item["percentage"])
-            for item in goals
-        )
-
-        if total != Decimal("100"):
-            await callback.message.answer(
-                "Сумма целей пока не равна 100%.\n\n"
-                "Добавьте ещё цель или используйте "
-                "«Закончить автоматически»."
-            )
-            return
-
-    await after_goals(
-        callback.message,
-        state,
-    )
-
-
-# ============================================================
-# ПЕРЕХОД К КРЕДИТАМ ИЛИ СОСТОЯНИЮ
-# ============================================================
-
-
-async def after_goals(
-    message: Message,
-    state: FSMContext,
-):
-
-    data = await state.get_data()
-
-    if data["has_debts"]:
-
-        await state.set_state(
-            SetupStates.debt_strategy
-        )
-
-        await message.answer(
-            "💳 <b>ШАГ 7. СТРАТЕГИЯ ПОГАШЕНИЯ ДОЛГОВ</b>\n\n"
-
-            "Если после обязательных расходов появляются "
-            "деньги на досрочное погашение, бот должен "
-            "понимать, какой кредит гасить первым.\n\n"
-
-            "<b>Лавина</b>\n"
-            "Сначала кредит с самой высокой ставкой. "
-            "Обычно это уменьшает общую переплату.\n\n"
-
-            "<b>Снежный ком</b>\n"
-            "Сначала кредит с самым маленьким остатком. "
-            "Так быстрее исчезают отдельные долги.\n\n"
-
-            "<b>Ручной выбор</b>\n"
-            "Приоритет задаётся вашим порядком кредитов.\n\n"
-
-            "Если не уверены — выбирайте «Лавина».",
+            f"{bar}\n\n"
+            "<b>КАКОЙ МИНИМАЛЬНЫЙ ЗАПАС СОЗДАТЬ ДО АКТИВНОГО ПОГАШЕНИЯ ДОЛГОВ?</b>\n\n"
+            "Один месяц — быстрее перейти к досрочному погашению. Два месяца — больше защиты от нового долга.",
             reply_markup=keyboard([
-                [
-                    (
-                        "🏔 Лавина",
-                        "strategy:avalanche",
-                    )
-                ],
-                [
-                    (
-                        "❄️ Снежный ком",
-                        "strategy:snowball",
-                    )
-                ],
-                [
-                    (
-                        "✋ Ручной выбор",
-                        "strategy:manual",
-                    )
-                ],
+                [("1 месяц", "minmonths:1"), ("2 месяца", "minmonths:2")],
             ]),
         )
-
     else:
+        await state.update_data(minimum_reserve_months="0")
+        await state.set_state(SetupStates.force_majeure_months)
+        await show_force_majeure_question_new(message, state)
 
-        await state.update_data(
-            debt_strategy="Лавина",
-            credits=[],
-        )
 
-        await start_current_state(
-            message,
-            state,
+@router.callback_query(SetupStates.minimum_reserve_months, F.data.startswith("minmonths:"))
+async def save_minimum_months(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(minimum_reserve_months=callback.data.split(":", 1)[1])
+    await state.set_state(SetupStates.force_majeure_months)
+    await show_force_majeure_question_new(callback.message, state)
+
+
+async def show_force_majeure_question_new(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data["employment_type"] == "Фрилансер":
+        buttons = [[("6 месяцев", "fmmonths:6"), ("9 месяцев", "fmmonths:9")], [("12 месяцев", "fmmonths:12"), ("Свой вариант", "fmmonths:custom")]]
+        hint = "Для нерегулярного дохода разумный ориентир — 6–12 месяцев Критического минимума."
+    else:
+        buttons = [[("3 месяца", "fmmonths:3"), ("4 месяца", "fmmonths:4")], [("6 месяцев", "fmmonths:6"), ("Свой вариант", "fmmonths:custom")]]
+        hint = "Для регулярной зарплаты ориентир — 3–6 месяцев Критического минимума."
+
+    await message.answer(
+        f"{setup_progress(data, 7)}\n\n"
+        "<b>КАКОЙ ДОЛЖНА БЫТЬ ФОРС-МАЖОРНАЯ ПОДУШКА?</b>\n\n"
+        "Это резерв на потерю дохода, серьёзную болезнь, аварийный переезд и другие события, которые невозможно нормально запланировать.\n\n"
+        + hint,
+        reply_markup=keyboard(buttons),
+    )
+
+
+@router.callback_query(SetupStates.force_majeure_months, F.data.startswith("fmmonths:"))
+async def save_force_months_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.split(":", 1)[1]
+    if value == "custom":
+        data = await state.get_data()
+        await callback.message.answer(
+            f"{setup_progress(data, 7)}\n\nВведите количество месяцев числом."
         )
+        return
+    await state.update_data(force_majeure_months=value)
+    await after_pillow_policy(callback.message, state)
+
+
+@router.message(SetupStates.force_majeure_months)
+async def save_force_months_text(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value <= 0:
+        await message.answer("Введите количество месяцев больше нуля.")
+        return
+    await state.update_data(force_majeure_months=str(value))
+    await after_pillow_policy(message, state)
+
+
+async def after_pillow_policy(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(goals=[])
+
+    if data.get("has_debts"):
+        await start_credit_block(message, state)
+    else:
+        await state.update_data(debt_strategy="Лавина", credits=[])
+        await start_current_state(message, state)
+
+
+async def start_credit_block(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(SetupStates.debt_strategy)
+    await message.answer(
+        f"{setup_progress(data, 8)}\n\n"
+        "<b>КАК ГАСИТЬ КРЕДИТЫ ДОСРОЧНО?</b>\n\n"
+        "<b>Лавина</b> — сначала долг с самой высокой ставкой. Обычно это минимизирует переплату.\n\n"
+        "<b>Снежный ком</b> — сначала самый маленький остаток. Так быстрее исчезают отдельные долги.\n\n"
+        "Если не уверены — выбирайте «Лавина».",
+        reply_markup=keyboard([
+            [("Лавина", "strategy:avalanche")],
+            [("Снежный ком", "strategy:snowball")],
+            [("Ручной выбор", "strategy:manual")],
+        ]),
+    )
 
 
 # ============================================================
@@ -1952,7 +1082,7 @@ async def save_debt_strategy(
     )
 
     await callback.message.answer(
-        "💳 <b>Добавим первый кредит.</b>\n\n"
+        "<b>ДОБАВИМ ПЕРВЫЙ КРЕДИТ</b>\n\n"
 
         "Введите короткое понятное название.\n\n"
 
@@ -2011,7 +1141,7 @@ async def save_credit_name(
     )
 
     await message.answer(
-        f"💳 <b>{escape(name)}</b>\n\n"
+        f"<b>{escape(name).upper()}</b>\n\n"
 
         "Какой сейчас <b>остаток основного долга</b>?\n\n"
 
@@ -2072,7 +1202,7 @@ async def save_credit_principal(
 
         "Если не знаете — отправьте <code>0</code>.\n\n"
 
-        "⚠️ В этом случае бот не будет сам утверждать, "
+        "В этом случае бот не будет сам утверждать, "
         "что кредит полностью закрыт только по этой цифре."
     )
 
@@ -2301,13 +1431,13 @@ async def save_credit_payment_type(
         reply_markup=keyboard([
             [
                 (
-                    "⏳ Уменьшать срок",
+                    "Уменьшать срок",
                     "early:term",
                 )
             ],
             [
                 (
-                    "💸 Уменьшать платёж",
+                    "Уменьшать платёж",
                     "early:payment",
                 )
             ],
@@ -2367,7 +1497,7 @@ async def save_credit_early_action(
     )
 
     await callback.message.answer(
-        f"✅ Кредит <b>{escape(credit['name'])}</b> добавлен.\n\n"
+        f"Кредит <b>{escape(credit['name'])}</b> добавлен.\n\n"
         f"Остаток: <b>{rub(Decimal(credit['principal_balance']))}</b>\n"
         f"Минимальный платёж: "
         f"<b>{rub(Decimal(credit['minimum_payment']))}</b>\n"
@@ -2418,25 +1548,16 @@ async def start_current_state(
     state: FSMContext,
 ):
 
-    await state.set_state(
-        SetupStates.current_pillow
-    )
+    await state.set_state(SetupStates.current_pillow)
+    data = await state.get_data()
+    step = 9 if data.get("has_debts") else 8
 
     await message.answer(
-        "🧭 <b>ШАГ 8. ГДЕ ВЫ НАХОДИТЕСЬ СЕЙЧАС</b>\n\n"
-
-        "Мы настроили правила. Теперь нужно определить "
-        "вашу стартовую точку.\n\n"
-
-        "Сколько денег <b>уже сейчас лежит в вашей "
-        "финансовой подушке</b>?\n\n"
-
-        "Если подушки пока нет — отправьте <code>0</code>.\n\n"
-
-        "Если деньги лежат на нескольких резервных "
-        "счетах, сложите их.\n\n"
-
-        "Например: <code>150000</code>"
+        f"{setup_progress(data, step)}\n\n"
+        "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В ПОДУШКЕ?</b>\n\n"
+        "Укажите деньги, которые действительно считаете финансовым резервом. "
+        "Не отпуск, не новый телефон и не сумму, которую вы просто стараетесь не трогать.\n\n"
+        "Если Подушки пока нет — отправьте <code>0</code>."
     )
 
 
@@ -2466,17 +1587,13 @@ async def save_current_pillow(
         SetupStates.current_life_balance
     )
 
+    data = await state.get_data()
+    step = 9 if data.get("has_debts") else 8
     await message.answer(
-        "Сколько денег уже отложено "
-        "<b>на расходы текущего расчётного периода</b>?\n\n"
-
-        "То есть сколько сейчас находится в вашем "
-        "«балансе жизни» — деньги на обязательные "
-        "и бытовые расходы текущего месяца.\n\n"
-
-        "Если начинаете работу с ботом с нового месяца "
-        "или ничего ещё не распределяли — отправьте "
-        "<code>0</code>."
+        f"{setup_progress(data, step)}\n\n"
+        "<b>СКОЛЬКО УЖЕ ОТЛОЖЕНО НА ТЕКУЩУЮ ЖИЗНЬ?</b>\n\n"
+        "Это деньги на Критический минимум и Бытовой резерв текущего расчётного периода.\n\n"
+        "Если начинаете с чистого листа — отправьте <code>0</code>."
     )
 
 
@@ -2516,7 +1633,7 @@ async def save_current_life_balance(
     if value > max_life:
         await message.answer(
             "Баланс жизни не должен превышать "
-            "сумму обязательных расходов и "
+            "сумму Критического минимума и "
             "бытового резерва.\n\n"
             f"Максимум по вашим настройкам: "
             f"<b>{rub(max_life)}</b>"
@@ -2540,8 +1657,10 @@ async def save_current_life_balance(
             for item in data["credits"]
         )
 
+        step = 9 if data.get("has_debts") else 8
         await message.answer(
-            "💳 <b>Минимальные платежи текущего месяца</b>\n\n"
+            f"{setup_progress(data, step)}\n\n"
+            "<b>СКОЛЬКО УЖЕ ОТЛОЖЕНО НА МИНИМАЛЬНЫЕ ПЛАТЕЖИ?</b>\n\n"
 
             "Сколько денег уже зарезервировано "
             "на обязательные платежи по кредитам "
@@ -2560,10 +1679,11 @@ async def save_current_life_balance(
             current_minimum_payments="0"
         )
 
-        await ask_interest_savings(
-            message,
-            state,
+        await state.update_data(
+            calculate_interest_savings=False,
+            developer_mode=False,
         )
+        await show_confirmation(message, state)
 
 
 @router.message(
@@ -2604,10 +1724,11 @@ async def save_current_minimum_payments(
         current_minimum_payments=str(value)
     )
 
-    await ask_interest_savings(
-        message,
-        state,
+    await state.update_data(
+        calculate_interest_savings=False,
+        developer_mode=False,
     )
+    await show_confirmation(message, state)
 
 
 # ============================================================
@@ -3008,164 +2129,65 @@ async def show_confirmation(
     message: Message,
     state: FSMContext,
 ):
-
     data = await state.get_data()
-
-    settings = build_settings_from_data(
-        data
-    )
-
-    state_object = build_state_from_data(
-        data,
-        settings,
-    )
+    settings = build_settings_from_data(data)
+    state_object = build_state_from_data(data, settings)
 
     try:
-        allocator = FinancialAllocator(
-            settings=settings,
-            state=state_object,
-        )
-
+        allocator = FinancialAllocator(settings=settings, state=state_object)
     except ValueError as error:
-
         await message.answer(
-            "⚠️ В настройках обнаружена ошибка:\n\n"
-            f"<code>{escape(str(error))}</code>\n\n"
-            "Настройка не сохранена."
+            "<b>В НАСТРОЙКАХ ЕСТЬ ОШИБКА</b>\n\n"
+            f"<code>{escape(str(error))}</code>"
         )
-
         return
 
     mode = allocator.active_mode()
-
     mode_name = {
-        1: "🟤 1",
-        2: "🔴 2",
-        3: "🟠 3",
-        4: "🟣 4",
-        5: "🔵 5",
-        6: "🟢 6",
+        1: "1 — Говно-жопа, авось пронесёт",
+        2: "2 — Ланистеры всегда платят свои долги",
+        3: "3 — Подготовка к апокалипсису",
+        4: "4 — Хорошо, но недостаточно",
+        5: "5 — Вижу цель, не вижу препятствий",
+        6: "6 — Бронепоезд мчится в светлое будущее",
     }[mode]
 
     categories = allocator.life_category_targets()
-
     category_text = "\n".join(
-        f"❤️ {escape(name)} — {rub(amount)}"
+        f"• {escape(name)} — {rub(amount)}"
         for name, amount in categories.items()
         if name != "Мин. платеж"
     )
 
-    credit_total = (
-        settings.minimum_payment_total
-    )
-
-    goals_text = ""
-
-    if settings.goals:
-
-        goals_text = "\n".join(
-            f"⭐️ {escape(goal.name)} — "
-            f"{goal.percentage}%"
-            for goal in settings.goals
-        )
-
-    else:
-
-        goals_text = (
-            "⭐️ Цели (всего) — автоматически"
-        )
-
+    tax_types = ", ".join(settings.taxable_income_types) if settings.taxable_income_types else "нет"
     credit_text = ""
-
     if settings.credits:
-
         credit_lines = [
-            f"💳 {escape(credit.name)} — "
-            f"{rub(credit.principal_balance)}, "
-            f"мин. платёж {rub(credit.minimum_payment)}"
-            for credit in settings.credits
+            f"• {escape(c.name)} — остаток {rub(c.principal_balance)}, минимум {rub(c.minimum_payment)}"
+            for c in settings.credits
         ]
+        credit_text = "\n\n<b>Кредиты</b>\n" + "\n".join(credit_lines)
 
-        credit_text = (
-            "\n\n<b>Кредиты</b>\n"
-            + "\n".join(
-                credit_lines
-            )
-            + f"\n\nМинимальные платежи всего: "
-              f"<b>{rub(credit_total)}</b>"
-        )
-
-    tax_types = (
-        ", ".join(
-            settings.taxable_income_types
-        )
-        if settings.taxable_income_types
-        else "не используются"
-    )
-
-    await state.set_state(
-        SetupStates.confirmation
-    )
-
+    income_label = "Стабильный доход" if settings.employment_type == "Наёмный" else "Средний доход"
+    await state.set_state(SetupStates.confirmation)
     await message.answer(
-        "📋 <b>ПРОВЕРЬТЕ НАСТРОЙКИ</b>\n\n"
-
-        f"👤 Профиль: "
-        f"<b>{escape(settings.employment_type)}</b>\n"
-
-        f"💳 Долги: "
-        f"<b>{'есть' if settings.has_debts else 'нет'}</b>\n\n"
-
-        f"🔴 Обязательная жизнь: "
-        f"<b>{rub(settings.critical_life)}</b>\n"
-
-        f"🟢 Бытовой резерв: "
-        f"<b>{rub(settings.household_reserve)}</b>\n"
-
-        f"🔄 Устойчивая жизнь: "
-        f"<b>{rub(settings.household_life)}</b>\n"
-
-        f"💰 Средний доход: "
-        f"<b>{rub(settings.average_income)}</b>\n\n"
-
-        f"🏛 Налог: "
-        f"<b>{settings.tax_rate}%</b>\n"
-
-        f"Типы дохода для налога: "
-        f"<b>{escape(tax_types)}</b>\n\n"
-
-        f"<b>Обязательные категории</b>\n"
-        f"{category_text}\n"
-
+        "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
+        f"Профиль — <b>{escape(settings.employment_type)}</b>\n"
+        f"{income_label} — <b>{rub(settings.average_income)}</b>\n"
+        f"Критический минимум — <b>{rub(settings.critical_life)}</b>\n"
+        f"Бытовой резерв — <b>{rub(settings.household_reserve)}</b>\n"
+        f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>\n\n"
+        f"Налог с дохода — <b>{settings.tax_rate}%</b>\n"
+        f"Типы дохода для налога — <b>{escape(tax_types)}</b>\n\n"
+        f"<b>Конверты Критического минимума</b>\n{category_text}"
         + credit_text
-        +
-
-        f"\n\n<b>Цели</b>\n"
-        f"{goals_text}\n\n"
-
-        f"🛟 Подушка сейчас: "
-        f"<b>{rub(state_object.pillow_balance)}</b>\n"
-
-        f"🔄 Баланс жизни сейчас: "
-        f"<b>{rub(state_object.life_balance)}</b>\n\n"
-
-        f"⚙️ Стартовый финансовый режим: "
-        f"<b>{mode_name}</b>\n\n"
-
-        "Если всё верно — сохраните профиль.",
+        + f"\n\nПодушка сейчас — <b>{rub(state_object.pillow_balance)}</b>\n"
+        f"Баланс жизни сейчас — <b>{rub(state_object.life_balance)}</b>\n\n"
+        f"Стартовый режим — <b>{escape(mode_name)}</b>\n\n"
+        "Цели и инвестиционные настройки появятся тогда, когда ваш финансовый режим действительно будет готов направлять туда деньги.",
         reply_markup=keyboard([
-            [
-                (
-                    "✅ Сохранить",
-                    "confirm:save",
-                )
-            ],
-            [
-                (
-                    "🔄 Начать заново",
-                    "confirm:restart",
-                )
-            ],
+            [("Сохранить профиль", "confirm:save")],
+            [("Начать заново", "confirm:restart")],
         ]),
     )
 
@@ -3230,17 +2252,17 @@ async def confirm_save(
     if next_info:
 
         next_text = (
-            f"\n🏆 До следующего режима "
+            f"\nДо следующего режима "
             f"{next_info['next_name']} осталось: "
             f"<b>{rub(next_info['remaining'])}</b>"
         )
 
     await callback.message.answer(
-        "✅ <b>ФИНАНСОВЫЙ ПРОФИЛЬ СОХРАНЁН</b>\n\n"
+        "<b>ФИНАНСОВЫЙ ПРОФИЛЬ СОХРАНЁН</b>\n\n"
 
         "Аллокатор готов к работе.\n\n"
 
-        f"⚙️ Текущий режим: <b>{mode}</b>"
+        f"Текущий режим: <b>{mode}</b>"
         f"{next_text}\n\n"
 
         "Теперь можно добавить первое поступление денег "
