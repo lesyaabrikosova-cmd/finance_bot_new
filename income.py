@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from html import escape
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -13,6 +14,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    FSInputFile,
 )
 
 from financial_engine import (
@@ -27,6 +29,17 @@ from ui import main_menu_keyboard
 
 
 router = Router()
+
+
+MODE_IMAGE_PATHS = {2: Path(__file__).resolve().parent / "assets" / "modes" / "mode_2.png", 3: Path(__file__).resolve().parent / "assets" / "modes" / "mode_3.png", 4: Path(__file__).resolve().parent / "assets" / "modes" / "mode_4.png", 5: Path(__file__).resolve().parent / "assets" / "modes" / "mode_5.png", 6: Path(__file__).resolve().parent / "assets" / "modes" / "mode_6.png"}
+
+async def send_mode_unlock_image(message: Message, result) -> None:
+    if result.mode_after <= result.mode_before:
+        return
+    image_path = MODE_IMAGE_PATHS.get(result.mode_after)
+    if image_path is None or not image_path.exists():
+        return
+    await message.answer_photo(photo=FSInputFile(image_path), caption=f"<b>РЕЖИМ {result.mode_after}</b>\n{escape(MODE_TITLES[result.mode_after])}")
 
 
 # ============================================================
@@ -1341,34 +1354,6 @@ async def send_distribution_report(
             6: "🏆🏆🏆🏆🏆🏆",
         }
 
-        reward_messages = {
-            1: (
-                "Отложи на Подушку ещё {amount} ₽ "
-                "и защити себя от новых долгов!"
-            ),
-            2: (
-                "Погаси ещё {amount} ₽ долгов "
-                "и начни формировать надёжную "
-                "Подушку безопасности!"
-            ),
-            3: (
-                "Отложи на Подушку ещё {amount} ₽ "
-                "и начни строить защиту "
-                "от сезонных просадок!"
-            ),
-            4: (
-                "Отложи на Подушку ещё {amount} ₽ "
-                "и будь спокоен в голодный месяц!"
-            ),
-            5: (
-                "Отложи на Подушку ещё {amount} ₽ "
-                "и копи на цели ещё быстрее!"
-            ),
-            6: (
-                "Ты чемпион финансовой грамотности!"
-            ),
-        }
-
     else:
 
         reward_map = {
@@ -1376,25 +1361,6 @@ async def send_distribution_report(
             2: "🏆🏆➖➖",
             3: "🏆🏆🏆➖",
             6: "🏆🏆🏆🏆",
-        }
-
-        reward_messages = {
-            1: (
-                "Отложи на Подушку ещё {amount} ₽ "
-                "и защити себя от новых долгов!"
-            ),
-            2: (
-                "Погаси ещё {amount} ₽ долгов "
-                "и начни формировать надёжную "
-                "Подушку безопасности!"
-            ),
-            3: (
-                "Отложи на Подушку ещё {amount} ₽ "
-                "и начни инвестировать и копить на цели!"
-            ),
-            6: (
-                "Ты чемпион финансовой грамотности!"
-            ),
         }
 
     reward = reward_map.get(
@@ -1416,24 +1382,26 @@ async def send_distribution_report(
             next_info["remaining"]
         )
 
-        template = reward_messages.get(
-            mode,
-            "До следующего режима осталось {amount} ₽.",
-        )
+        if mode == 2:
 
-        lines.append(
-            template.format(
-                amount=remaining
+            lines.append(
+                "Погаси еще "
+                f"{remaining} ₽ долгов "
+                "и получи следующий кубок!"
             )
-        )
+
+        else:
+
+            lines.append(
+                "Отложи на Подушку еще "
+                f"{remaining} ₽ "
+                "и получи следующий кубок!"
+            )
 
     else:
 
         lines.append(
-            reward_messages.get(
-                mode,
-                "Все уровни финансовой защиты достигнуты!",
-            )
+            "Все кубки этого профиля уже получены!"
         )
 
     lines.extend([

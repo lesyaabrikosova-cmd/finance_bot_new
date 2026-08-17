@@ -82,12 +82,12 @@ MODE_NAMES = {
 
 
 MODE_TITLES = {
-    MODE_1: "Говно-жопа, авось пронесёт",
-    MODE_2: "Ланистеры всегда платят свои долги",
-    MODE_3: "Подготовка к апокалипсису",
-    MODE_4: "Хорошо, но недостаточно",
-    MODE_5: "Вижу цель, не вижу препятствий",
-    MODE_6: "Бронепоезд мчится в светлое будущее",
+    MODE_1: "Небо помогает тому, кто помогает себе.",
+    MODE_2: "Ланистеры всегда платят свои долги.",
+    MODE_3: "Подготовка к Апокалипсису.",
+    MODE_4: "Заказов нет. Паники тоже.",
+    MODE_5: "Защита есть. Пора расти.",
+    MODE_6: "Философский камень найден.",
 }
 
 
@@ -774,7 +774,7 @@ class FinancialAllocator:
         ):
             return ZERO
 
-        return money(
+        return (
             income
             * self.settings.tax_rate
             / HUNDRED
@@ -826,27 +826,23 @@ class FinancialAllocator:
         amount: Decimal,
     ) -> Decimal:
         """
-        Денежная проводка в конкретный слой Подушки.
-        Все фактически зачисляемые суммы фиксируются до копейки.
+        Добавляет сумму в конкретный слой Подушки.
+
+        Возвращает переполнение, которое не удалось
+        разместить в этом слое.
         """
-        amount = money(
-            D(amount)
-        )
+
+        amount = D(amount)
 
         if amount <= ZERO:
             return ZERO
 
-        limit = money(
-            self.pillow_layer_limit(layer)
-        )
-
-        current = money(
-            self.pillow_layer_balance(layer)
-        )
+        limit = self.pillow_layer_limit(layer)
+        current = self.pillow_layer_balance(layer)
 
         free_space = max(
             ZERO,
-            money(limit - current),
+            limit - current,
         )
 
         actual = min(
@@ -854,24 +850,16 @@ class FinancialAllocator:
             free_space,
         )
 
-        overflow = money(
-            amount - actual
-        )
+        overflow = amount - actual
 
         if layer == "МП":
-            self.state.pillow_minimum = money(
-                current + actual
-            )
+            self.state.pillow_minimum += actual
 
         elif layer == "ФМ":
-            self.state.pillow_force_majeure = money(
-                current + actual
-            )
+            self.state.pillow_force_majeure += actual
 
         elif layer == "СтабД":
-            self.state.pillow_stabilizer = money(
-                current + actual
-            )
+            self.state.pillow_stabilizer += actual
 
         else:
             raise ValueError(
@@ -893,9 +881,7 @@ class FinancialAllocator:
         Возвращает остаток, если вся Подушка заполнена.
         """
 
-        amount = money(
-            D(amount)
-        )
+        amount = D(amount)
 
         if amount <= ZERO:
             return ZERO
@@ -941,16 +927,16 @@ class FinancialAllocator:
 
         if has_debts:
             if (
-                money(self.state.pillow_minimum)
-                < money(self.settings.minimum_reserve_limit)
+                self.state.pillow_minimum
+                < self.settings.minimum_reserve_limit
             ):
                 return MODE_1
 
             return MODE_2
 
         if (
-            money(self.state.pillow_force_majeure)
-            < money(self.settings.force_majeure_limit)
+            self.state.pillow_force_majeure
+            < self.settings.force_majeure_limit
         ):
             return MODE_3
 
@@ -958,14 +944,14 @@ class FinancialAllocator:
             return MODE_6
 
         if (
-            money(self.state.pillow_stabilizer)
-            < money(self.settings.stabilizer_life_limit)
+            self.state.pillow_stabilizer
+            < self.settings.stabilizer_life_limit
         ):
             return MODE_4
 
         if (
-            money(self.state.pillow_stabilizer)
-            < money(self.settings.stabilizer_full_limit)
+            self.state.pillow_stabilizer
+            < self.settings.stabilizer_full_limit
         ):
             return MODE_5
 
@@ -986,10 +972,8 @@ class FinancialAllocator:
         if current_mode == MODE_1:
             remaining = max(
                 ZERO,
-                money(
-                    s.minimum_reserve_limit
-                    - st.pillow_minimum
-                ),
+                s.minimum_reserve_limit
+                - st.pillow_minimum,
             )
 
             if remaining > ZERO:
@@ -1005,20 +989,14 @@ class FinancialAllocator:
                 ZERO,
             )
 
-            total_debt = money(
-                total_debt
-            )
-
             if total_debt > ZERO:
                 candidates.append((MODE_3, total_debt))
 
         elif current_mode == MODE_3:
             remaining = max(
                 ZERO,
-                money(
-                    s.force_majeure_limit
-                    - st.pillow_force_majeure
-                ),
+                s.force_majeure_limit
+                - st.pillow_force_majeure,
             )
 
             if remaining > ZERO:
@@ -1030,10 +1008,8 @@ class FinancialAllocator:
         elif current_mode == MODE_4:
             remaining = max(
                 ZERO,
-                money(
-                    s.stabilizer_life_limit
-                    - st.pillow_stabilizer
-                ),
+                s.stabilizer_life_limit
+                - st.pillow_stabilizer,
             )
 
             if remaining > ZERO:
@@ -1042,10 +1018,8 @@ class FinancialAllocator:
         elif current_mode == MODE_5:
             remaining = max(
                 ZERO,
-                money(
-                    s.stabilizer_full_limit
-                    - st.pillow_stabilizer
-                ),
+                s.stabilizer_full_limit
+                - st.pillow_stabilizer,
             )
 
             if remaining > ZERO:
@@ -1123,47 +1097,6 @@ class FinancialAllocator:
         return mapping[mode]
 
     # ========================================================
-    # ГРАНИЦА РЕЖИМА ВНУТРИ ТЕКУЩЕГО ЭТАПА
-    # ========================================================
-
-    def _mode_base_limit_for_bracket(
-        self,
-        mode: int,
-        bracket: Decimal,
-    ) -> Optional[Decimal]:
-        """
-        Сколько базы можно обработать на этапе A/B по текущему
-        режиму, прежде чем будет достигнут ближайший порог режима.
-
-        На режимах 1–4 переход зависит от направления "вверх":
-        Подушка / долги / Подушка / Стабилизатор.
-        На режимах 5–6 этапы A/B сами по себе режим не меняют.
-        """
-        if mode not in {
-            MODE_1,
-            MODE_2,
-            MODE_3,
-            MODE_4,
-        }:
-            return None
-
-        candidate = self.nearest_next_mode(
-            mode
-        )
-
-        if not candidate:
-            return None
-
-        _, remaining = candidate
-
-        rate = D(bracket) / HUNDRED
-
-        if rate <= ZERO:
-            return None
-
-        return remaining / rate
-
-    # ========================================================
     # ЭТАП A
     # ========================================================
 
@@ -1174,247 +1107,100 @@ class FinancialAllocator:
         steps: List[str],
         allocations: Dict[str, Decimal],
     ) -> Decimal:
-        """
-        Этап A может пересечь несколько режимов внутри одного
-        поступления. Этап меняется только после заполнения
-        Критического минимума.
-        """
         s = self.settings
         st = self.state
 
-        remaining_amount = money(
-            D(amount)
+        target = s.total_critical_life
+        accumulated_kzh = (
+            st.life_balance
+            + st.accumulated_minimum_payments
         )
 
-        guard = 0
+        if accumulated_kzh >= target:
+            return amount
 
-        while remaining_amount > ZERO:
+        missing = target - accumulated_kzh
+        bracket = s.bracket_a
+        required_base = (
+            missing
+            / (ONE - bracket / HUNDRED)
+        )
+        part_a = min(amount, required_base)
 
-            guard += 1
+        if part_a <= ZERO:
+            return amount
 
-            if guard > 50:
-                raise RuntimeError(
-                    "Слишком много переходов режима на этапе A."
-                )
+        up_calculated = (
+            part_a
+            * bracket
+            / HUNDRED
+        )
+        up_target = self.bracket_up_target(mode)
+        final_overflow = ZERO
 
-            target = money(
-                s.total_critical_life
+        if up_target in {"МП", "ФМ", "СтабД"}:
+            final_overflow = self.waterfall_pillow(
+                up_calculated,
+                up_target,
             )
+            actual_up = up_calculated - final_overflow
+            allocations["Подушка"] += actual_up
 
-            accumulated_kzh = money(
-                st.life_balance
-                + st.accumulated_minimum_payments
+        elif up_target == "Инвест":
+            st.investments += up_calculated
+            allocations["Инвестиции"] += up_calculated
+
+        elif up_target == "Досрочное":
+            applied = self.apply_early_repayment(
+                up_calculated,
+                steps,
             )
-
-            if accumulated_kzh >= target:
-                break
-
-            current_mode = self.active_mode()
-
-            missing = money(
-                target - accumulated_kzh
-            )
-
-            bracket = s.bracket_a
-            rate = bracket / HUNDRED
-
-            required_base = (
-                missing
-                / (ONE - rate)
-            )
-
-            candidate = (
-                self.nearest_next_mode(
-                    current_mode
-                )
-            )
-
-            mode_remaining = None
-            mode_base = None
+            allocations["Досрочное"] += applied
+            final_overflow = up_calculated - applied
 
             if (
-                candidate
-                and current_mode in {
-                    MODE_1,
-                    MODE_2,
-                    MODE_3,
-                    MODE_4,
-                }
-                and rate > ZERO
+                final_overflow > ZERO
+                and not any(
+                    credit.active
+                    for credit in s.credits
+                )
             ):
-                _, mode_remaining = candidate
-                mode_remaining = money(
-                    mode_remaining
+                pillow_overflow = self.waterfall_pillow(
+                    final_overflow,
+                    "ФМ",
                 )
-                mode_base = (
-                    mode_remaining
-                    / rate
+                allocations["Подушка"] += (
+                    final_overflow - pillow_overflow
                 )
+                final_overflow = pillow_overflow
 
-            # Определяем, какая граница встретится первой:
-            # конец этапа, переход режима или конец денег.
-            raw_part = min(
-                remaining_amount,
-                required_base,
-                mode_base
-                if mode_base is not None
-                else remaining_amount,
+        else:
+            raise ValueError(
+                f"Неизвестное направление Бракет_A: {up_target}"
             )
 
-            part_a = min(
-                remaining_amount,
-                money(raw_part),
-            )
+        life_part = part_a - up_calculated
+        self._allocate_to_life(
+            life_part,
+            allocations,
+        )
 
-            if part_a <= ZERO:
-                break
-
-            stage_hits = (
-                required_base
-                <= remaining_amount
-                and (
-                    mode_base is None
-                    or required_base <= mode_base
-                )
-            )
-
-            mode_hits = (
-                mode_base is not None
-                and mode_base <= remaining_amount
-                and mode_base <= required_base
-            )
-
-            # Если обе границы почти совпали, закрываем обе
-            # денежными суммами до копейки.
-            if (
-                stage_hits
-                and mode_hits
-                and mode_remaining is not None
-                and abs(required_base - mode_base) <= CENT
-            ):
-                life_part = missing
-                up_calculated = mode_remaining
-                part_a = money(
-                    life_part
-                    + up_calculated
-                )
-
-            elif mode_hits and mode_remaining is not None:
-                up_calculated = mode_remaining
-                life_part = money(
-                    part_a
-                    - up_calculated
-                )
-
-            elif stage_hits:
-                life_part = missing
-                up_calculated = money(
-                    part_a
-                    - life_part
-                )
-
-            else:
-                up_calculated = money(
-                    part_a * rate
-                )
-                life_part = money(
-                    part_a
-                    - up_calculated
-                )
-
-            up_target = self.bracket_up_target(
-                current_mode
-            )
-
-            final_overflow = ZERO
-
-            if up_target in {
-                "МП",
-                "ФМ",
-                "СтабД",
-            }:
-                final_overflow = (
-                    self.add_to_pillow_layer(
-                        up_target,
-                        up_calculated,
-                    )
-                )
-
-                actual_up = money(
-                    up_calculated
-                    - final_overflow
-                )
-
-                allocations["Подушка"] = money(
-                    allocations["Подушка"]
-                    + actual_up
-                )
-
-            elif up_target == "Инвест":
-                st.investments = money(
-                    st.investments
-                    + up_calculated
-                )
-
-                allocations["Инвестиции"] = money(
-                    allocations["Инвестиции"]
-                    + up_calculated
-                )
-
-            elif up_target == "Досрочное":
-                applied = (
-                    self.apply_early_repayment(
-                        up_calculated,
-                        steps,
-                    )
-                )
-
-                allocations["Досрочное"] = money(
-                    allocations["Досрочное"]
-                    + applied
-                )
-
-                final_overflow = money(
-                    up_calculated
-                    - applied
-                )
-
-            else:
-                raise ValueError(
-                    "Неизвестное направление "
-                    f"Бракет_A: {up_target}"
-                )
-
-            self._allocate_to_life(
-                life_part,
-                allocations,
-            )
-
-            steps.append(
-                f"""ЭТАП A — Критический минимум
-Режим: {MODE_NAMES[current_mode]}
+        steps.append(
+            f"""ЭТАП A — Критический минимум
 Недостаёт: {missing}
-Обработано базы: {part_a}
-Бракет A: {up_calculated}
+Необходимая база: {required_base}
+Часть A: {part_a}
+Бракет A ({bracket}%): {up_calculated}
 Направление вверх: {up_target}
 В Критический минимум: {life_part}
 Переполнение: {final_overflow}"""
-            )
+        )
 
-            new_remaining = money(
-                remaining_amount
-                - part_a
-                + final_overflow
-            )
-
-            if new_remaining >= remaining_amount:
-                raise RuntimeError(
-                    "Этап A не уменьшил остаток."
-                )
-
-            remaining_amount = new_remaining
-
-        return remaining_amount
+        return (
+            amount
+            - part_a
+            + final_overflow
+        )
 
     def _allocate_to_life(
         self,
@@ -1422,86 +1208,48 @@ class FinancialAllocator:
         allocations: Dict[str, Decimal],
     ):
         """
-        Распределяет денежную часть Этапа A между категориями.
-        Каждая проводка округляется до копейки; последняя категория
-        получает остаток, чтобы сумма сошлась ровно.
+        Распределяет часть Этапа A между категориями КЖ.
+        Минимальные платежи учитываются отдельно от Баланса жизни.
         """
-        amount = money(
-            D(amount)
-        )
-
         if amount <= ZERO:
             return
 
         shares = self.life_category_shares()
-        category_names = list(
-            shares.keys()
-        )
-
+        category_names = list(shares.keys())
         distributed = ZERO
         life_added = ZERO
 
-        for index, name in enumerate(
-            category_names
-        ):
+        for index, name in enumerate(category_names):
             share = shares[name]
 
             if index == len(category_names) - 1:
-                part = money(
-                    amount - distributed
-                )
+                part = amount - distributed
             else:
-                part = money(
-                    amount * share
-                )
+                part = amount * share
 
-            distributed = money(
-                distributed + part
-            )
+            distributed += part
 
             if name == "Мин. платеж":
-
-                self.state.accumulated_minimum_payments = money(
-                    self.state.accumulated_minimum_payments
+                self.state.accumulated_minimum_payments += part
+                allocations["Мин. платеж"] = (
+                    allocations.get("Мин. платеж", ZERO)
                     + part
                 )
-
-                allocations["Мин. платеж"] = money(
-                    allocations.get(
-                        "Мин. платеж",
-                        ZERO,
-                    )
-                    + part
-                )
-
                 continue
 
-            self.state.period_life_topups[name] = money(
-                self.state.period_life_topups.get(
-                    name,
-                    ZERO,
-                )
+            self.state.period_life_topups[name] = (
+                self.state.period_life_topups.get(name, ZERO)
                 + part
             )
 
-            key = f"КЖ:{name}"
-
-            allocations[key] = money(
-                allocations.get(
-                    key,
-                    ZERO,
-                )
+            allocations[f"КЖ:{name}"] = (
+                allocations.get(f"КЖ:{name}", ZERO)
                 + part
             )
 
-            life_added = money(
-                life_added + part
-            )
+            life_added += part
 
-        self.state.life_balance = money(
-            self.state.life_balance
-            + life_added
-        )
+        self.state.life_balance += life_added
 
     def stage_b(
         self,
@@ -1510,258 +1258,99 @@ class FinancialAllocator:
         steps: List[str],
         allocations: Dict[str, Decimal],
     ) -> Decimal:
-        """
-        Этап B сохраняется при смене режима внутри поступления.
-        Режим пересчитывается после каждого денежного куска.
-        """
         s = self.settings
         st = self.state
 
-        remaining_amount = money(
-            D(amount)
+        if not (
+            s.critical_life
+            <= st.life_balance
+            < s.household_life
+        ):
+            return amount
+
+        missing = s.household_life - st.life_balance
+        bracket = s.bracket_b
+        required_base = (
+            missing
+            / (ONE - bracket / HUNDRED)
+        )
+        part_b = min(amount, required_base)
+
+        if part_b <= ZERO:
+            return amount
+
+        up_calculated = (
+            part_b
+            * bracket
+            / HUNDRED
+        )
+        up_target = self.bracket_up_target(mode)
+        final_overflow = ZERO
+
+        if up_target in {"МП", "ФМ", "СтабД"}:
+            final_overflow = self.waterfall_pillow(
+                up_calculated,
+                up_target,
+            )
+            actual_up = up_calculated - final_overflow
+            allocations["Подушка"] += actual_up
+
+        elif up_target == "Инвест":
+            st.investments += up_calculated
+            allocations["Инвестиции"] += up_calculated
+
+        elif up_target == "Досрочное":
+            applied = self.apply_early_repayment(
+                up_calculated,
+                steps,
+            )
+            allocations["Досрочное"] += applied
+            final_overflow = up_calculated - applied
+
+            if (
+                final_overflow > ZERO
+                and not any(
+                    credit.active
+                    for credit in s.credits
+                )
+            ):
+                pillow_overflow = self.waterfall_pillow(
+                    final_overflow,
+                    "ФМ",
+                )
+                allocations["Подушка"] += (
+                    final_overflow - pillow_overflow
+                )
+                final_overflow = pillow_overflow
+
+        else:
+            raise ValueError(
+                f"Неизвестное направление Бракет_B: {up_target}"
+            )
+
+        reserve_part = part_b - up_calculated
+        st.life_balance += reserve_part
+        allocations["Бытовой резерв"] = (
+            allocations.get("Бытовой резерв", ZERO)
+            + reserve_part
         )
 
-        guard = 0
-
-        while remaining_amount > ZERO:
-
-            guard += 1
-
-            if guard > 50:
-                raise RuntimeError(
-                    "Слишком много переходов режима на этапе B."
-                )
-
-            critical = money(
-                s.critical_life
-            )
-            household = money(
-                s.household_life
-            )
-            life_balance = money(
-                st.life_balance
-            )
-
-            if not (
-                critical
-                <= life_balance
-                < household
-            ):
-                break
-
-            current_mode = self.active_mode()
-
-            missing = money(
-                household
-                - life_balance
-            )
-
-            bracket = s.bracket_b
-            rate = bracket / HUNDRED
-
-            required_base = (
-                missing
-                / (ONE - rate)
-            )
-
-            candidate = (
-                self.nearest_next_mode(
-                    current_mode
-                )
-            )
-
-            mode_remaining = None
-            mode_base = None
-
-            if (
-                candidate
-                and current_mode in {
-                    MODE_1,
-                    MODE_2,
-                    MODE_3,
-                    MODE_4,
-                }
-                and rate > ZERO
-            ):
-                _, mode_remaining = candidate
-                mode_remaining = money(
-                    mode_remaining
-                )
-                mode_base = (
-                    mode_remaining
-                    / rate
-                )
-
-            raw_part = min(
-                remaining_amount,
-                required_base,
-                mode_base
-                if mode_base is not None
-                else remaining_amount,
-            )
-
-            part_b = min(
-                remaining_amount,
-                money(raw_part),
-            )
-
-            if part_b <= ZERO:
-                break
-
-            stage_hits = (
-                required_base
-                <= remaining_amount
-                and (
-                    mode_base is None
-                    or required_base <= mode_base
-                )
-            )
-
-            mode_hits = (
-                mode_base is not None
-                and mode_base <= remaining_amount
-                and mode_base <= required_base
-            )
-
-            if (
-                stage_hits
-                and mode_hits
-                and mode_remaining is not None
-                and abs(required_base - mode_base) <= CENT
-            ):
-                reserve_part = missing
-                up_calculated = mode_remaining
-                part_b = money(
-                    reserve_part
-                    + up_calculated
-                )
-
-            elif mode_hits and mode_remaining is not None:
-                up_calculated = mode_remaining
-                reserve_part = money(
-                    part_b
-                    - up_calculated
-                )
-
-            elif stage_hits:
-                reserve_part = missing
-                up_calculated = money(
-                    part_b
-                    - reserve_part
-                )
-
-            else:
-                up_calculated = money(
-                    part_b * rate
-                )
-                reserve_part = money(
-                    part_b
-                    - up_calculated
-                )
-
-            up_target = self.bracket_up_target(
-                current_mode
-            )
-
-            final_overflow = ZERO
-
-            if up_target in {
-                "МП",
-                "ФМ",
-                "СтабД",
-            }:
-                final_overflow = (
-                    self.add_to_pillow_layer(
-                        up_target,
-                        up_calculated,
-                    )
-                )
-
-                actual_up = money(
-                    up_calculated
-                    - final_overflow
-                )
-
-                allocations["Подушка"] = money(
-                    allocations["Подушка"]
-                    + actual_up
-                )
-
-            elif up_target == "Инвест":
-                st.investments = money(
-                    st.investments
-                    + up_calculated
-                )
-
-                allocations["Инвестиции"] = money(
-                    allocations["Инвестиции"]
-                    + up_calculated
-                )
-
-            elif up_target == "Досрочное":
-                applied = (
-                    self.apply_early_repayment(
-                        up_calculated,
-                        steps,
-                    )
-                )
-
-                allocations["Досрочное"] = money(
-                    allocations["Досрочное"]
-                    + applied
-                )
-
-                final_overflow = money(
-                    up_calculated
-                    - applied
-                )
-
-            else:
-                raise ValueError(
-                    "Неизвестное направление "
-                    f"Бракет_B: {up_target}"
-                )
-
-            st.life_balance = money(
-                st.life_balance
-                + reserve_part
-            )
-
-            allocations[
-                "Бытовой резерв"
-            ] = money(
-                allocations.get(
-                    "Бытовой резерв",
-                    ZERO,
-                )
-                + reserve_part
-            )
-
-            steps.append(
-                f"""ЭТАП B — Бытовой резерв
-Режим: {MODE_NAMES[current_mode]}
+        steps.append(
+            f"""ЭТАП B — бытовой резерв
 Недостаёт: {missing}
-Обработано базы: {part_b}
-Бракет B: {up_calculated}
+Необходимая база: {required_base}
+Часть B: {part_b}
+Бракет B ({bracket}%): {up_calculated}
 Направление вверх: {up_target}
-В Бытовой резерв: {reserve_part}
+В бытовой резерв: {reserve_part}
 Переполнение: {final_overflow}"""
-            )
+        )
 
-            new_remaining = money(
-                remaining_amount
-                - part_b
-                + final_overflow
-            )
-
-            if new_remaining >= remaining_amount:
-                raise RuntimeError(
-                    "Этап B не уменьшил остаток."
-                )
-
-            remaining_amount = new_remaining
-
-        return remaining_amount
+        return (
+            amount
+            - part_b
+            + final_overflow
+        )
 
     def stage_c(
         self,
@@ -1770,284 +1359,152 @@ class FinancialAllocator:
         steps: List[str],
         allocations: Dict[str, Decimal],
     ) -> Decimal:
-        """
-        Этап C остаётся этапом C даже если одно крупное поступление
-        переводит пользователя через несколько режимов.
-        """
+
         if amount <= ZERO:
             return ZERO
 
-        if money(self.state.life_balance) < money(
+        if self.state.life_balance < (
             self.settings.household_life
         ):
-            return money(amount)
+            return amount
 
         s = self.settings
         st = self.state
 
-        remaining_amount = money(
-            D(amount)
-        )
-
-        guard = 0
-
-        while remaining_amount > ZERO:
-
-            guard += 1
-
-            if guard > 50:
-                raise RuntimeError(
-                    "Слишком много переходов режима на этапе C."
-                )
-
-            current_mode = self.active_mode()
-            before_amount = remaining_amount
-
-            if current_mode in {
-                MODE_1,
-                MODE_2,
-                MODE_3,
-                MODE_4,
-            }:
-
-                candidate = self.nearest_next_mode(
-                    current_mode
-                )
-
-                if not candidate:
-                    break
-
-                _, until_transition = candidate
-                until_transition = money(
-                    until_transition
-                )
-
-                chunk = min(
-                    remaining_amount,
-                    until_transition,
-                )
-
-                if current_mode == MODE_1:
-                    overflow = self.add_to_pillow_layer(
-                        "МП",
-                        chunk,
-                    )
-                    actual = money(
-                        chunk - overflow
-                    )
-                    allocations["Подушка"] = money(
-                        allocations["Подушка"]
-                        + actual
-                    )
-
-                elif current_mode == MODE_2:
-                    applied = self.apply_early_repayment(
-                        chunk,
-                        steps,
-                    )
-                    overflow = money(
-                        chunk - applied
-                    )
-                    allocations["Досрочное"] = money(
-                        allocations["Досрочное"]
-                        + applied
-                    )
-
-                elif current_mode == MODE_3:
-                    overflow = self.add_to_pillow_layer(
-                        "ФМ",
-                        chunk,
-                    )
-                    actual = money(
-                        chunk - overflow
-                    )
-                    allocations["Подушка"] = money(
-                        allocations["Подушка"]
-                        + actual
-                    )
-
-                else:
-                    overflow = self.add_to_pillow_layer(
-                        "СтабД",
-                        chunk,
-                    )
-                    actual = money(
-                        chunk - overflow
-                    )
-                    allocations["Подушка"] = money(
-                        allocations["Подушка"]
-                        + actual
-                    )
-
-                remaining_amount = money(
-                    remaining_amount
-                    - chunk
-                    + overflow
-                )
-
-            elif current_mode == MODE_5:
-
-                candidate = self.nearest_next_mode(
-                    current_mode
-                )
-
-                pillow_fraction = (
-                    (
-                        ONE
-                        - s.bracket_c / HUNDRED
-                    )
-                    * s.pillow_share_c
-                    / HUNDRED
-                )
-
-                until_transition = None
-                transition_base = None
-
-                if (
-                    candidate
-                    and pillow_fraction > ZERO
-                ):
-                    _, until_transition = candidate
-                    until_transition = money(
-                        until_transition
-                    )
-                    transition_base = (
-                        until_transition
-                        / pillow_fraction
-                    )
-
-                hits_transition = (
-                    transition_base is not None
-                    and transition_base <= remaining_amount
-                )
-
-                if hits_transition:
-                    chunk = min(
-                        remaining_amount,
-                        money(transition_base),
-                    )
-                else:
-                    chunk = remaining_amount
-
-                investment_part = money(
-                    chunk
-                    * s.bracket_c
-                    / HUNDRED
-                )
-
-                after_invest = money(
-                    chunk - investment_part
-                )
-
-                if (
-                    hits_transition
-                    and until_transition is not None
-                ):
-                    # Закрываем Стабилизатор ровно до порога.
-                    pillow_part = until_transition
-                    goal_part = money(
-                        after_invest
-                        - pillow_part
-                    )
-                else:
-                    # Половины/доли считаем до копейки.
-                    # Подушка округляется первой, цели получают остаток.
-                    pillow_part = money(
-                        after_invest
-                        * s.pillow_share_c
-                        / HUNDRED
-                    )
-                    goal_part = money(
-                        after_invest
-                        - pillow_part
-                    )
-
-                st.investments = money(
-                    st.investments
-                    + investment_part
-                )
-                allocations["Инвестиции"] = money(
-                    allocations["Инвестиции"]
-                    + investment_part
-                )
-
-                self._allocate_goals(
-                    goal_part,
-                    allocations,
-                )
-
-                pillow_overflow = self.add_to_pillow_layer(
-                    "СтабД",
-                    pillow_part,
-                )
-
-                pillow_actual = money(
-                    pillow_part
-                    - pillow_overflow
-                )
-
-                allocations["Подушка"] = money(
-                    allocations["Подушка"]
-                    + pillow_actual
-                )
-
-                remaining_amount = money(
-                    remaining_amount
-                    - chunk
-                    + pillow_overflow
-                )
-
-            elif current_mode == MODE_6:
-
-                investment_part = money(
-                    remaining_amount
-                    * s.bracket_c
-                    / HUNDRED
-                )
-
-                goals_part = money(
-                    remaining_amount
-                    - investment_part
-                )
-
-                st.investments = money(
-                    st.investments
-                    + investment_part
-                )
-
-                allocations["Инвестиции"] = money(
-                    allocations["Инвестиции"]
-                    + investment_part
-                )
-
-                self._allocate_goals(
-                    goals_part,
-                    allocations,
-                )
-
-                remaining_amount = ZERO
-
-            else:
-                raise ValueError(
-                    f"Неизвестный режим: {current_mode}"
-                )
-
-            steps.append(
-                "ЭТАП C — "
-                f"режим {MODE_NAMES[current_mode]}, "
-                f"остаток после куска: {remaining_amount}"
+        if mode == MODE_1:
+            overflow = self.waterfall_pillow(
+                amount,
+                "МП",
             )
 
-            if (
-                remaining_amount >= before_amount
-                and remaining_amount > ZERO
-            ):
-                raise RuntimeError(
-                    "Этап C не уменьшил остаток."
-                )
+            actual = amount - overflow
 
-        return money(
-            remaining_amount
+            allocations["Подушка"] += actual
+
+            return overflow
+
+        if mode == MODE_2:
+            applied = self.apply_early_repayment(
+                amount,
+                steps,
+            )
+
+            allocations[
+                "Досрочное"
+            ] += applied
+
+            return amount - applied
+
+        if mode == MODE_3:
+            overflow = self.waterfall_pillow(
+                amount,
+                "ФМ",
+            )
+
+            actual = amount - overflow
+
+            allocations["Подушка"] += actual
+
+            return overflow
+
+        if mode == MODE_4:
+            overflow = self.waterfall_pillow(
+                amount,
+                "СтабД",
+            )
+
+            actual = amount - overflow
+
+            allocations["Подушка"] += actual
+
+            return overflow
+
+        if mode == MODE_5:
+            investment_part = (
+                amount
+                * s.bracket_c
+                / HUNDRED
+            )
+
+            remaining = (
+                amount
+                - investment_part
+            )
+
+            st.investments += investment_part
+
+            allocations[
+                "Инвестиции"
+            ] += investment_part
+
+            goal_part = (
+                remaining
+                * s.goals_share_c
+                / HUNDRED
+            )
+
+            pillow_part = (
+                remaining
+                * s.pillow_share_c
+                / HUNDRED
+            )
+
+            self._allocate_goals(
+                goal_part,
+                allocations,
+            )
+
+            pillow_overflow = (
+                self.waterfall_pillow(
+                    pillow_part,
+                    "СтабД",
+                )
+            )
+
+            pillow_actual = (
+                pillow_part
+                - pillow_overflow
+            )
+
+            allocations[
+                "Подушка"
+            ] += pillow_actual
+
+            st.investments += pillow_overflow
+
+            allocations[
+                "Инвестиции"
+            ] += pillow_overflow
+
+            return ZERO
+
+        if mode == MODE_6:
+            investment_part = (
+                amount
+                * s.bracket_c
+                / HUNDRED
+            )
+
+            remaining = (
+                amount
+                - investment_part
+            )
+
+            st.investments += investment_part
+
+            allocations[
+                "Инвестиции"
+            ] += investment_part
+
+            self._allocate_goals(
+                remaining,
+                allocations,
+            )
+
+            return ZERO
+
+        raise ValueError(
+            f"Неизвестный режим: {mode}"
         )
 
     # ========================================================
@@ -2060,10 +1517,6 @@ class FinancialAllocator:
         allocations: Dict[str, Decimal],
     ):
 
-        amount = money(
-            D(amount)
-        )
-
         if amount <= ZERO:
             return
 
@@ -2072,7 +1525,7 @@ class FinancialAllocator:
         if not goals:
             allocations[
                 "Цели:ЦЕЛИ (всего)"
-            ] = money(
+            ] = (
                 allocations.get(
                     "Цели:ЦЕЛИ (всего)",
                     ZERO,
@@ -2083,28 +1536,25 @@ class FinancialAllocator:
 
         distributed = ZERO
 
-        for index, goal in enumerate(
-            goals
-        ):
+        for index, goal in enumerate(goals):
 
             if index == len(goals) - 1:
-                part = money(
-                    amount - distributed
+                part = (
+                    amount
+                    - distributed
                 )
             else:
-                part = money(
+                part = (
                     amount
                     * goal.percentage
                     / HUNDRED
                 )
 
-            distributed = money(
-                distributed + part
-            )
+            distributed += part
 
             self.state.goal_balances[
                 goal.name
-            ] = money(
+            ] = (
                 self.state.goal_balances.get(
                     goal.name,
                     ZERO,
@@ -2114,7 +1564,7 @@ class FinancialAllocator:
 
             key = f"Цели:{goal.name}"
 
-            allocations[key] = money(
+            allocations[key] = (
                 allocations.get(
                     key,
                     ZERO,
@@ -2162,9 +1612,7 @@ class FinancialAllocator:
         steps: List[str],
     ) -> Decimal:
 
-        amount = money(
-            D(amount)
-        )
+        amount = D(amount)
 
         if amount <= ZERO:
             return ZERO
@@ -2182,40 +1630,28 @@ class FinancialAllocator:
             if not credit.active:
                 continue
 
-            balance = money(
-                credit.principal_balance
-            )
-
+            # В спецификации досрочное погашение уменьшает
+            # основной долг.
             applied = min(
                 remaining,
-                balance,
+                credit.principal_balance,
             )
 
-            credit.principal_balance = money(
-                balance - applied
-            )
+            credit.principal_balance -= applied
 
             if credit.principal_balance <= ZERO:
                 credit.principal_balance = ZERO
                 credit.status = "Погашен"
 
-            applied_total = money(
-                applied_total + applied
-            )
-
-            remaining = money(
-                remaining - applied
-            )
+            applied_total += applied
+            remaining -= applied
 
             steps.append(
                 f"Досрочное погашение: "
                 f"{credit.name} = {applied}"
             )
 
-        self.state.early_repayment = money(
-            self.state.early_repayment
-            + applied_total
-        )
+        self.state.early_repayment += applied_total
 
         return applied_total
 
@@ -2229,245 +1665,127 @@ class FinancialAllocator:
         mode: int,
         allocations: Dict[str, Decimal],
     ) -> Decimal:
-        """
-        Сверхдоход тоже сохраняет этап при смене режима.
-        """
+
         if amount <= ZERO:
             return ZERO
 
         s = self.settings
 
-        remaining_amount = money(
-            D(amount)
-        )
+        if mode == MODE_1:
+            overflow = self.waterfall_pillow(
+                amount,
+                "МП",
+            )
 
-        guard = 0
+            allocations[
+                "Подушка"
+            ] += amount - overflow
 
-        while remaining_amount > ZERO:
+            return overflow
 
-            guard += 1
+        if mode == MODE_2:
+            applied = self.apply_early_repayment(
+                amount,
+                [],
+            )
 
-            if guard > 50:
-                raise RuntimeError(
-                    "Слишком много переходов режима "
-                    "на этапе сверхдохода."
-                )
+            allocations[
+                "Досрочное"
+            ] += applied
 
-            current_mode = self.active_mode()
-            before_amount = remaining_amount
+            return amount - applied
 
-            if current_mode in {
-                MODE_1,
-                MODE_2,
-                MODE_3,
-                MODE_4,
-            }:
+        if mode == MODE_3:
+            overflow = self.waterfall_pillow(
+                amount,
+                "ФМ",
+            )
 
-                candidate = self.nearest_next_mode(
-                    current_mode
-                )
+            allocations[
+                "Подушка"
+            ] += amount - overflow
 
-                if not candidate:
-                    break
+            return overflow
 
-                _, until_transition = candidate
-                until_transition = money(
-                    until_transition
-                )
+        if mode == MODE_4:
+            overflow = self.waterfall_pillow(
+                amount,
+                "СтабД",
+            )
 
-                chunk = min(
-                    remaining_amount,
-                    until_transition,
-                )
+            allocations[
+                "Подушка"
+            ] += amount - overflow
 
-                if current_mode == MODE_1:
-                    overflow = self.add_to_pillow_layer(
-                        "МП",
-                        chunk,
-                    )
-                    actual = money(
-                        chunk - overflow
-                    )
-                    allocations["Подушка"] = money(
-                        allocations["Подушка"]
-                        + actual
-                    )
+            return overflow
 
-                elif current_mode == MODE_2:
-                    applied = self.apply_early_repayment(
-                        chunk,
-                        [],
-                    )
-                    overflow = money(
-                        chunk - applied
-                    )
-                    allocations["Досрочное"] = money(
-                        allocations["Досрочное"]
-                        + applied
-                    )
+        if mode == MODE_5:
+            invest = (
+                amount
+                * s.bracket_d
+                / HUNDRED
+            )
 
-                elif current_mode == MODE_3:
-                    overflow = self.add_to_pillow_layer(
-                        "ФМ",
-                        chunk,
-                    )
-                    actual = money(
-                        chunk - overflow
-                    )
-                    allocations["Подушка"] = money(
-                        allocations["Подушка"]
-                        + actual
-                    )
+            remainder = (
+                amount
+                - invest
+            )
 
-                else:
-                    overflow = self.add_to_pillow_layer(
-                        "СтабД",
-                        chunk,
-                    )
-                    actual = money(
-                        chunk - overflow
-                    )
-                    allocations["Подушка"] = money(
-                        allocations["Подушка"]
-                        + actual
-                    )
+            self.state.investments += invest
 
-                remaining_amount = money(
-                    remaining_amount
-                    - chunk
-                    + overflow
-                )
+            allocations[
+                "Инвестиции"
+            ] += invest
 
-            elif current_mode == MODE_5:
+            overflow = self.waterfall_pillow(
+                remainder,
+                "СтабД",
+            )
 
-                candidate = self.nearest_next_mode(
-                    current_mode
-                )
+            actual_pillow = (
+                remainder
+                - overflow
+            )
 
-                pillow_fraction = (
-                    ONE
-                    - s.bracket_d / HUNDRED
-                )
+            allocations[
+                "Подушка"
+            ] += actual_pillow
 
-                until_transition = None
-                transition_base = None
+            if overflow:
+                self.state.investments += overflow
+                allocations[
+                    "Инвестиции"
+                ] += overflow
 
-                if (
-                    candidate
-                    and pillow_fraction > ZERO
-                ):
-                    _, until_transition = candidate
-                    until_transition = money(
-                        until_transition
-                    )
-                    transition_base = (
-                        until_transition
-                        / pillow_fraction
-                    )
+            return ZERO
 
-                hits_transition = (
-                    transition_base is not None
-                    and transition_base <= remaining_amount
-                )
+        if mode == MODE_6:
+            invest = (
+                amount
+                * s.bracket_e
+                / HUNDRED
+            )
 
-                if hits_transition:
-                    chunk = min(
-                        remaining_amount,
-                        money(transition_base),
-                    )
-                else:
-                    chunk = remaining_amount
+            goals = (
+                amount
+                - invest
+            )
 
-                if (
-                    hits_transition
-                    and until_transition is not None
-                ):
-                    pillow_part = until_transition
-                    invest = money(
-                        chunk - pillow_part
-                    )
-                else:
-                    invest = money(
-                        chunk
-                        * s.bracket_d
-                        / HUNDRED
-                    )
-                    pillow_part = money(
-                        chunk - invest
-                    )
+            self.state.investments += invest
 
-                self.state.investments = money(
-                    self.state.investments
-                    + invest
-                )
+            allocations[
+                "Инвестиции"
+            ] += invest
 
-                allocations["Инвестиции"] = money(
-                    allocations["Инвестиции"]
-                    + invest
-                )
+            self._allocate_goals(
+                goals,
+                allocations,
+            )
 
-                overflow = self.add_to_pillow_layer(
-                    "СтабД",
-                    pillow_part,
-                )
+            return ZERO
 
-                allocations["Подушка"] = money(
-                    allocations["Подушка"]
-                    + pillow_part
-                    - overflow
-                )
-
-                remaining_amount = money(
-                    remaining_amount
-                    - chunk
-                    + overflow
-                )
-
-            elif current_mode == MODE_6:
-
-                invest = money(
-                    remaining_amount
-                    * s.bracket_e
-                    / HUNDRED
-                )
-
-                goals = money(
-                    remaining_amount
-                    - invest
-                )
-
-                self.state.investments = money(
-                    self.state.investments
-                    + invest
-                )
-
-                allocations["Инвестиции"] = money(
-                    allocations["Инвестиции"]
-                    + invest
-                )
-
-                self._allocate_goals(
-                    goals,
-                    allocations,
-                )
-
-                remaining_amount = ZERO
-
-            else:
-                raise ValueError(
-                    f"Неизвестный режим: {current_mode}"
-                )
-
-            if (
-                remaining_amount >= before_amount
-                and remaining_amount > ZERO
-            ):
-                raise RuntimeError(
-                    "Сверхдоход не уменьшил остаток."
-                )
-
-        return money(
-            remaining_amount
+        raise ValueError(
+            f"Неизвестный режим: {mode}"
         )
 
     # ========================================================
@@ -2531,9 +1849,7 @@ class FinancialAllocator:
         tax_override: Optional[Decimal] = None,
     ) -> DistributionResult:
 
-        income = money(
-            D(income)
-        )
+        income = D(income)
 
         if income <= ZERO:
             raise ValueError(
@@ -2553,17 +1869,15 @@ class FinancialAllocator:
 
         if tax_override is None:
 
-            tax = money(
-                self.calculate_tax(
-                    income,
-                    income_type,
-                )
+            tax = self.calculate_tax(
+                income,
+                income_type,
             )
 
         else:
 
-            tax = money(
-                D(tax_override)
+            tax = D(
+                tax_override
             )
 
             if tax < ZERO:
@@ -2577,7 +1891,7 @@ class FinancialAllocator:
                     "суммы поступления."
                 )
 
-        amount = money(
+        amount = (
             income
             - tax
         )
@@ -2665,14 +1979,8 @@ class FinancialAllocator:
         # Периодическая аналитика
         # --------------------------------------------
 
-        self.state.period_income = money(
-            self.state.period_income
-            + income
-        )
-        self.state.period_tax = money(
-            self.state.period_tax
-            + tax
-        )
+        self.state.period_income += income
+        self.state.period_tax += tax
 
         # --------------------------------------------
         # Глобальная проверка
@@ -2736,7 +2044,7 @@ class FinancialAllocator:
 
             self.state.period_allocations[
                 key
-            ] = money(
+            ] = (
                 self.state.period_allocations.get(
                     key,
                     ZERO,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING, ROUND_HALF_UP, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING
 from html import escape
 from pathlib import Path
 
@@ -64,6 +64,10 @@ class SetupStates(StatesGroup):
     km_item_amount = State()
     km_item_period = State()
     km_custom_period = State()
+
+    # Как физически хранить деньги Критического минимума
+    km_envelopes_menu = State()
+    km_envelope_name = State()
 
     # Калькулятор Бытового резерва
     br_menu = State()
@@ -487,9 +491,10 @@ async def intro_step_4(
 
 KM_CATEGORIES = {
     "housing": (
-        "Жильё и помещения",
-        "Аренда квартиры, ЖКХ и другие обязательные расходы на жильё. "
-        "Рабочую студию или офис сюда не включайте: это профессиональный расход, а не стоимость личной жизни.",
+        "Жильё, Аренда, ЖКХ",
+        "Сюда относятся аренда квартиры или дома, обязательный платёж по ипотеке, ЖКХ, "
+        "аренда студии, кабинета или рабочего места, без которых невозможно получать основной доход, "
+        "и другие обязательные расходы на помещение.",
     ),
     "food": (
         "Питание",
@@ -578,6 +583,105 @@ def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
     return result
 
 
+def default_km_storage(item: dict) -> dict:
+    """
+    Рекомендует способ хранения конкретного расхода Критического минимума.
+
+    salary   — деньги остаются на операционном счёте «Зарплата»;
+    separate — деньги физически изолируются в отдельном конверте/накопительном счёте.
+    """
+    category = item.get("category")
+    name = (item.get("name") or item.get("category_label") or "Расход").strip()
+    lowered = name.lower()
+    months = Decimal(str(item.get("months", "1")))
+
+    storage = "salary"
+    envelope_name = None
+
+    # Эти деньги не должны конкурировать с обычным потреблением.
+    if category == "health":
+        storage = "separate"
+        envelope_name = "Здоровье"
+    elif category == "pets":
+        storage = "separate"
+        envelope_name = "Питомцы"
+
+    # Аренда жилья — отдельный конверт независимо от периодичности.
+    elif category == "housing":
+        if "аренд" in lowered or "квартир" in lowered and "жкх" not in lowered:
+            storage = "separate"
+            envelope_name = "Квартира"
+        elif any(token in lowered for token in ("жкх", "коммун", "свет", "электр", "вода", "газ")):
+            storage = "salary"
+        elif months > 1:
+            storage = "separate"
+            envelope_name = name
+
+    # Продукты и связь обычно тратятся прямо в течение месяца.
+    elif category in {"food", "communication"}:
+        storage = "salary"
+
+    # Для транспорта, детей, образования и прочих расходов периодичность
+    # даёт хорошую рекомендацию: крупный будущий платёж лучше копить отдельно.
+    elif category in {"transport", "children", "education", "other"}:
+        if months > 1:
+            storage = "separate"
+            defaults = {
+                "transport": "Транспорт",
+                "children": "Дети",
+                "education": "Образование",
+            }
+            envelope_name = defaults.get(category, name)
+
+    return {
+        "item_name": name,
+        "category": category,
+        "category_label": item.get("category_label", name),
+        "monthly": str(money2(Decimal(item["monthly"]))),
+        "storage": storage,
+        "envelope_name": envelope_name,
+    }
+
+
+def build_default_km_storage(items: list[dict]) -> list[dict]:
+    return [default_km_storage(item) for item in items]
+
+
+def life_categories_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
+    result: dict[str, Decimal] = {}
+    for item in storage_items:
+        if item.get("storage") != "separate":
+            continue
+        envelope = (item.get("envelope_name") or item.get("item_name") or "Конверт").strip()
+        amount = Decimal(item["monthly"])
+        result[envelope] = money2(result.get(envelope, Decimal("0")) + amount)
+    return result
+
+
+def km_storage_summary(storage_items: list[dict], critical_life: Decimal) -> str:
+    separate = life_categories_from_storage(storage_items)
+    separate_sum = sum(separate.values(), Decimal("0"))
+    salary = money2(critical_life - separate_sum)
+
+    separate_lines = [
+        f"• {escape(name)} — {rub(amount)}"
+        for name, amount in separate.items()
+    ]
+
+    salary_items = [
+        item["item_name"]
+        for item in storage_items
+        if item.get("storage") == "salary"
+    ]
+
+    text = "<b>Отдельные конверты</b>\n"
+    text += "\n".join(separate_lines) if separate_lines else "• нет"
+    text += "\n\n<b>Зарплата</b> — " + rub(salary)
+    if salary_items:
+        text += "\n" + "• " + "\n• ".join(escape(name) for name in salary_items)
+    return text
+
+
 def br_group_totals(items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in items:
@@ -607,6 +711,7 @@ async def setup_start(callback: CallbackQuery, state: FSMContext):
         developer_mode=False,
         current_minimum_payments="0",
         km_items=[],
+        km_storage_items=[],
         br_items=[],
     )
     await state.set_state(SetupStates.employment)
@@ -636,8 +741,7 @@ async def save_employment(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"{progress_bar(2, 2)}\n\n"
         "<b>ЕСТЬ КРЕДИТЫ ИЛИ ДОЛГИ?</b>\n\n"
-        "Сейчас учитываем банковские обязательства: ипотеку, потребительские и автокредиты, "
-        "рассрочки и задолженность по кредитным картам.\n\n"
+        "Сейчас учитываем потребительские и автокредиты, рассрочки и задолженность по кредитным картам.\n\n"
         "Кредитная карта без задолженности долгом не считается.",
         reply_markup=keyboard([
             [("Есть", "debts:yes")],
@@ -797,7 +901,7 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
         )
 
     rows = [
-        [("Жильё и помещения", "kmcat:housing"), ("Питание", "kmcat:food")],
+        [("Жильё, Аренда, ЖКХ", "kmcat:housing"), ("Питание", "kmcat:food")],
         [("Связь", "kmcat:communication"), ("Транспорт", "kmcat:transport")],
         [("Образование", "kmcat:education"), ("Дети", "kmcat:children")],
         [("Питомцы", "kmcat:pets"), ("Здоровье", "kmcat:health")],
@@ -829,7 +933,7 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(label.upper())}</b>\n\n"
         f"{escape(hint)}\n\n"
-        "Введите короткое название расхода. Например: <code>Аренда квартиры</code> или <code>ЖКХ</code>."
+        "Введите короткое название расхода. Например: <code>Аренда квартиры</code>, <code>Ипотека</code>, <code>Студия</code> или <code>ЖКХ</code>."
     )
 
 
@@ -930,10 +1034,12 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         return
 
     rounded = round_up_thousand(exact)
+    storage_items = build_default_km_storage(items)
+
     await state.update_data(
         critical_life=str(rounded),
         critical_life_exact=str(exact),
-        life_categories={name: str(value) for name, value in groups.items()},
+        km_storage_items=storage_items,
     )
 
     data = await state.get_data()
@@ -948,7 +1054,188 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         "Сумма округлена вверх до ближайшей 1 000 ₽, чтобы обычные колебания расходов не оставляли бюджет без запаса."
     )
 
+    await show_km_storage_review(callback.message, state)
+
+
+async def show_km_storage_review(message: Message, state: FSMContext):
+    data = await state.get_data()
+    storage_items = data.get("km_storage_items", [])
+    critical = Decimal(data["critical_life"])
+    await state.set_state(SetupStates.km_envelopes_menu)
+
+    await message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        "<b>КАК ХРАНИТЬ ДЕНЬГИ НА КРИТИЧЕСКИЙ МИНИМУМ</b>\n\n"
+        "Аллокатор отделяет деньги, которые важно не смешивать с повседневными расходами. "
+        "Остальное остаётся на операционном счёте «Зарплата».\n\n"
+        + km_storage_summary(storage_items, critical)
+        + "\n\nЭто рекомендуемая структура. Её можно изменить под ваши банковские счета и привычки.",
+        reply_markup=keyboard([
+            [("Всё устраивает", "kmstorage:accept")],
+            [("Изменить", "kmstorage:edit")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data == "kmstorage:accept")
+async def accept_km_storage(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    categories = life_categories_from_storage(data.get("km_storage_items", []))
+    await state.update_data(
+        life_categories={name: str(value) for name, value in categories.items()}
+    )
     await start_household_reserve(callback.message, state)
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data == "kmstorage:edit")
+async def edit_km_storage(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_km_storage_edit_menu(callback.message, state)
+
+
+async def show_km_storage_edit_menu(message: Message, state: FSMContext):
+    data = await state.get_data()
+    items = data.get("km_storage_items", [])
+    await state.set_state(SetupStates.km_envelopes_menu)
+
+    rows = []
+    for index, item in enumerate(items):
+        if item.get("storage") == "separate":
+            destination = item.get("envelope_name") or "Отдельно"
+        else:
+            destination = "Зарплата"
+        label = f"{item['item_name']} → {destination}"
+        if len(label) > 50:
+            label = label[:47] + "…"
+        rows.append([(label, f"kmstorage:item:{index}")])
+
+    rows.append([("Готово", "kmstorage:review")])
+
+    await message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        "<b>ИЗМЕНИТЬ СПОСОБ ХРАНЕНИЯ</b>\n\n"
+        "Нажмите на расход, чтобы оставить его на «Зарплате», вынести в отдельный конверт или изменить название конверта.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data.startswith("kmstorage:item:"))
+async def km_storage_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    items = data.get("km_storage_items", [])
+    if index < 0 or index >= len(items):
+        return
+
+    item = items[index]
+    current = (
+        f"отдельный конверт «{escape(item.get('envelope_name') or item['item_name'])}»"
+        if item.get("storage") == "separate"
+        else "счёт «Зарплата»"
+    )
+
+    rows = []
+    if item.get("storage") == "separate":
+        rows.append([("Оставить на Зарплате", f"kmstorage:salary:{index}")])
+        rows.append([("Изменить название конверта", f"kmstorage:rename:{index}")])
+    else:
+        rows.append([("Создать отдельный конверт", f"kmstorage:separate:{index}")])
+    rows.append([("Назад", "kmstorage:edit")])
+
+    await callback.message.answer(
+        f"<b>{escape(item['item_name'].upper())}</b>\n\n"
+        f"Среднемесячно — <b>{rub(Decimal(item['monthly']))}</b>\n"
+        f"Сейчас: <b>{current}</b>.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data.startswith("kmstorage:salary:"))
+async def km_storage_to_salary(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    items = list(data.get("km_storage_items", []))
+    if 0 <= index < len(items):
+        items[index] = dict(items[index])
+        items[index]["storage"] = "salary"
+        items[index]["envelope_name"] = None
+        await state.update_data(km_storage_items=items)
+    await show_km_storage_edit_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data.startswith("kmstorage:separate:"))
+async def km_storage_to_separate(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    items = list(data.get("km_storage_items", []))
+    if 0 <= index < len(items):
+        item = dict(items[index])
+        item["storage"] = "separate"
+        if not item.get("envelope_name"):
+            defaults = {
+                "housing": "Квартира",
+                "transport": "Транспорт",
+                "health": "Здоровье",
+                "pets": "Питомцы",
+                "children": "Дети",
+                "education": "Образование",
+            }
+            item["envelope_name"] = defaults.get(item.get("category"), item["item_name"])
+        items[index] = item
+        await state.update_data(km_storage_items=items)
+    await show_km_storage_edit_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data.startswith("kmstorage:rename:"))
+async def km_storage_rename(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    await state.update_data(pending_km_storage_index=index)
+    await state.set_state(SetupStates.km_envelope_name)
+    await callback.message.answer(
+        "<b>КАК НАЗВАТЬ КОНВЕРТ?</b>\n\n"
+        "Например: <code>Кот</code>, <code>Безлимит</code> или <code>Квартира</code>."
+    )
+
+
+@router.message(SetupStates.km_envelope_name)
+async def save_km_envelope_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if len(name) < 2 or len(name) > 40:
+        await message.answer("Введите название длиной от 2 до 40 символов.")
+        return
+
+    data = await state.get_data()
+    index = int(data.get("pending_km_storage_index", -1))
+    items = list(data.get("km_storage_items", []))
+    if not (0 <= index < len(items)):
+        await show_km_storage_review(message, state)
+        return
+
+    old_name = items[index].get("envelope_name")
+    # Если несколько расходов уже объединены в один рекомендуемый конверт
+    # (например корм + ветеринар = «Питомцы»), переименовываем весь конверт целиком.
+    for i, raw in enumerate(items):
+        item = dict(raw)
+        if item.get("storage") == "separate" and item.get("envelope_name") == old_name:
+            item["envelope_name"] = name
+            items[i] = item
+
+    await state.update_data(
+        km_storage_items=items,
+        pending_km_storage_index=None,
+    )
+    await show_km_storage_edit_menu(message, state)
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data == "kmstorage:review")
+async def review_km_storage(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_km_storage_review(callback.message, state)
 
 
 async def start_household_reserve(message: Message, state: FSMContext):
@@ -1193,15 +1480,15 @@ async def show_force_majeure_question_new(message: Message, state: FSMContext):
     data = await state.get_data()
     if data["employment_type"] == "Фрилансер":
         buttons = [[("6 месяцев", "fmmonths:6"), ("9 месяцев", "fmmonths:9")], [("12 месяцев", "fmmonths:12"), ("Свой вариант", "fmmonths:custom")]]
-        hint = "Для нерегулярного дохода разумный ориентир — 6–12 месяцев Критического минимума."
+        hint = "Для фрилансера рекомендуется накопить <b>6–12 месяцев Критического минимума</b>."
     else:
         buttons = [[("3 месяца", "fmmonths:3"), ("4 месяца", "fmmonths:4")], [("6 месяцев", "fmmonths:6"), ("Свой вариант", "fmmonths:custom")]]
-        hint = "Для регулярной зарплаты ориентир — 3–6 месяцев Критического минимума."
+        hint = "Ориентир для финансовой подушки — <b>3–6 месяцев Критического минимума</b>."
 
     await message.answer(
         f"{setup_progress(data, 7)}\n\n"
-        "<b>КАКОЙ ДОЛЖНА БЫТЬ ФОРС-МАЖОРНАЯ ПОДУШКА?</b>\n\n"
-        "Это резерв на потерю дохода, серьёзную болезнь, аварийный переезд и другие события, которые невозможно нормально запланировать.\n\n"
+        "<b>РАЗМЕР ФОРС-МАЖОРНОЙ ПОДУШКИ</b>\n\n"
+        "Это резерв на случай событий, которые действительно переворачивают жизнь с ног на голову: потеря жилья, серьёзная болезнь, аварийный переезд, смерть близкого человека и другие крупные форс-мажоры.\n\n"
         + hint,
         reply_markup=keyboard(buttons),
     )
@@ -1298,9 +1585,9 @@ async def save_debt_strategy(
         "Введите короткое понятное название.\n\n"
 
         "Например:\n"
-        "<code>Ипотека</code>\n"
         "<code>Кредитка Т-Банк</code>\n"
-        "<code>Автокредит</code>"
+        "<code>Автокредит</code>\n"
+        "<code>Потребительский кредит</code>"
     )
 
 
@@ -2355,20 +2642,31 @@ async def show_confirmation(
 
     mode = allocator.active_mode()
     mode_name = {
-        1: "1 — Говно-жопа, авось пронесёт",
-        2: "2 — Ланистеры всегда платят свои долги",
-        3: "3 — Подготовка к апокалипсису",
-        4: "4 — Хорошо, но недостаточно",
-        5: "5 — Вижу цель, не вижу препятствий",
-        6: "6 — Бронепоезд мчится в светлое будущее",
+        1: "1 — Небо помогает тому, кто помогает себе.",
+        2: "2 — Ланистеры всегда платят свои долги.",
+        3: "3 — Подготовка к Апокалипсису.",
+        4: "4 — Заказов нет. Паники тоже.",
+        5: "5 — Защита есть. Пора расти.",
+        6: "6 — Философский камень найден.",
     }[mode]
 
     categories = allocator.life_category_targets()
-    category_text = "\n".join(
+    separate_categories = {
+        name: amount
+        for name, amount in settings.life_categories.items()
+    }
+    salary_amount = categories.get("Зарплата", Decimal("0"))
+    separate_text = "\n".join(
         f"• {escape(name)} — {rub(amount)}"
-        for name, amount in categories.items()
-        if name != "Мин. платеж"
+        for name, amount in separate_categories.items()
+    ) or "• нет"
+    storage_text = (
+        "<b>Отдельные конверты</b>\n"
+        + separate_text
+        + f"\n\n<b>Зарплата</b> — {rub(salary_amount)}"
     )
+    if settings.tax_rate > 0:
+        storage_text += "\n\n<b>Налог с дохода</b> — отдельный налоговый конверт"
 
     tax_types = ", ".join(settings.taxable_income_types) if settings.taxable_income_types else "нет"
     credit_text = ""
@@ -2390,7 +2688,7 @@ async def show_confirmation(
         f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>\n\n"
         f"Налог с дохода — <b>{settings.tax_rate}%</b>\n"
         f"Типы дохода для налога — <b>{escape(tax_types)}</b>\n\n"
-        f"<b>Конверты Критического минимума</b>\n{category_text}"
+        f"<b>КАК ХРАНИТЬ КРИТИЧЕСКИЙ МИНИМУМ</b>\n{storage_text}"
         + credit_text
         + f"\n\nПодушка сейчас — <b>{rub(state_object.pillow_balance)}</b>\n"
         f"Баланс жизни сейчас — <b>{rub(state_object.life_balance)}</b>\n\n"
