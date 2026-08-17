@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING
 from html import escape
 from pathlib import Path
 
@@ -639,7 +639,8 @@ async def ask_income(message: Message, state: FSMContext):
             "Премии, годовые бонусы, гранты, случайные подработки и другие нерегулярные поступления — нет. "
             "Для Аллокатора это сверхдоход.\n\n"
             "Не оценивайте сумму по памяти. Откройте историю поступлений за последние 6–12 месяцев и найдите устойчивую месячную базу.\n\n"
-            "Введите сумму."
+            "Введите сумму.\n\n"
+            "Например: <code>180000</code>"
         )
     else:
         text = (
@@ -648,7 +649,8 @@ async def ask_income(message: Message, state: FSMContext):
             "Для нерегулярного дохода нужна реальная средняя за последние 6–12 месяцев. "
             "Лучший месяц не считается вашей новой нормой.\n\n"
             "Откройте историю поступлений и посчитайте среднее. Если хотите, можете отправить готовую сумму одним сообщением.\n\n"
-            "Введите среднемесячный доход."
+            "Введите среднемесячный доход.\n\n"
+            "Например: <code>180000</code>"
         )
 
     await message.answer(text)
