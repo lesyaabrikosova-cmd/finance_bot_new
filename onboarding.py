@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING, ROUND_HALF_UP, ROUND_CEILING
 from html import escape
 from pathlib import Path
 
@@ -64,6 +64,13 @@ class SetupStates(StatesGroup):
     km_item_amount = State()
     km_item_period = State()
     km_custom_period = State()
+
+    # Калькулятор Бытового резерва
+    br_menu = State()
+    br_item_name = State()
+    br_item_amount = State()
+    br_item_period = State()
+    br_custom_period = State()
 
     # Налог
     tax_rate = State()
@@ -511,12 +518,27 @@ KM_CATEGORIES = {
     ),
     "health": (
         "Здоровье",
-        "Необходимые лекарства и лечение. Плановую стоматологию и другие переносимые расходы лучше учитывать в Бытовом резерве.",
+        "Сюда относятся лекарства при простуде и других заболеваниях, стоматолог, "
+        "плановые врачи, анализы, необходимые товары из аптеки, витамины и другие "
+        "расходы на здоровье. Если трата повторяется нерегулярно, укажите сумму за "
+        "несколько месяцев или за год — Аллокатор сам приведёт её к среднемесячной.",
     ),
     "other": (
         "Другое",
         "Любой обязательный расход, которого нет в списке. Если при резком падении дохода от него можно отказаться на несколько месяцев — это, скорее всего, не Критический минимум.",
     ),
+}
+
+
+BR_CATEGORIES = {
+    "clothes": ("Одежда, обувь и аксессуары", "Одежда, обувь, сезонные вещи, сумки и другие покупки, которые нужны в обычной жизни, но возникают не каждый месяц."),
+    "care": ("Стрижка и уход", "Парикмахерская, базовый уход и другие периодические траты на внешний вид."),
+    "gym": ("Спортзал", "Абонемент в спортзал, бассейн, секции и другие регулярные расходы на физическую активность."),
+    "leisure": ("Такси, кафе, развлечения", "Такси, кафе, кино, встречи и другие расходы обычной жизни, которые при серьёзном падении дохода можно временно сократить."),
+    "courses": ("Образовательные курсы для души", "Необязательные курсы, хобби и занятия, которые полезны или приятны, но не являются обязательной частью Критического минимума."),
+    "repairs": ("Мелкий ремонт и бытовые траты", "Мелкий ремонт, расходники, бытовые покупки и другие нерегулярные траты по дому."),
+    "comfort": ("Домашний уют", "Текстиль, посуда, декор, растения и другие покупки, которые делают дом удобнее и приятнее."),
+    "other": ("Другое", "Любой нерегулярный расход нормальной жизни, который не относится к Критическому минимуму, но периодически требует денег."),
 }
 
 
@@ -556,6 +578,14 @@ def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
     return result
 
 
+def br_group_totals(items: list[dict]) -> dict[str, Decimal]:
+    result: dict[str, Decimal] = {}
+    for item in items:
+        label = item["category_label"]
+        result[label] = money2(result.get(label, Decimal("0")) + Decimal(item["monthly"]))
+    return result
+
+
 async def remove_setup_button(callback: CallbackQuery):
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -577,6 +607,7 @@ async def setup_start(callback: CallbackQuery, state: FSMContext):
         developer_mode=False,
         current_minimum_payments="0",
         km_items=[],
+        br_items=[],
     )
     await state.set_state(SetupStates.employment)
 
@@ -893,6 +924,7 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
     items = data.get("km_items", [])
     groups = km_group_totals(items)
     exact = money2(sum(groups.values(), Decimal("0")))
+
     if exact <= 0:
         await callback.message.answer("Добавьте хотя бы один обязательный расход.")
         return
@@ -903,10 +935,10 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         critical_life_exact=str(exact),
         life_categories={name: str(value) for name, value in groups.items()},
     )
-    await state.set_state(SetupStates.household_reserve)
-    data = await state.get_data()
 
+    data = await state.get_data()
     lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
+
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n"
         "<b>КРИТИЧЕСКИЙ МИНИМУМ РАССЧИТАН</b>\n\n"
@@ -916,39 +948,216 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         "Сумма округлена вверх до ближайшей 1 000 ₽, чтобы обычные колебания расходов не оставляли бюджет без запаса."
     )
 
-    await callback.message.answer(
-        f"{setup_progress(data, 6)}\n\n"
-        "<b>СКОЛЬКО НУЖНО НА БЫТОВОЙ РЕЗЕРВ?</b>\n\n"
-        "Сюда относятся расходы нормальной жизни, которые возникают регулярно, но при серьёзном падении дохода их можно временно сократить или перенести:\n\n"
-        "• одежда и обувь\n"
-        "• стоматология и плановые врачи\n"
-        "• стрижка и уход\n"
-        "• бытовая химия\n"
-        "• такси, кафе, небольшие развлечения\n"
-        "• необязательные курсы и репетитор\n"
-        "• мелкий ремонт и другие бытовые траты\n\n"
-        "Откройте банковскую аналитику за последние 3–6 месяцев и введите среднемесячную сумму. Если такого резерва не нужно — введите 0."
-    )
+    await start_household_reserve(callback.message, state)
 
 
-@router.message(SetupStates.household_reserve)
-async def save_household_reserve(message: Message, state: FSMContext):
-    value = parse_decimal(message.text)
-    if value is None or value < 0:
-        await message.answer("Введите сумму от 0 ₽ и выше.")
-        return
+async def start_household_reserve(message: Message, state: FSMContext):
+    await state.update_data(br_items=[])
+    await state.set_state(SetupStates.br_menu)
+    await show_br_menu(message, state, intro=True)
 
-    await state.update_data(household_reserve=str(money2(value)))
+
+async def show_br_menu(message: Message, state: FSMContext, intro: bool = False):
     data = await state.get_data()
-    critical = Decimal(data["critical_life"])
-    sustainable = money2(critical + value)
+    items = data.get("br_items", [])
+    groups = br_group_totals(items)
+    exact = money2(sum(groups.values(), Decimal("0")))
+
+    lines = [f"• {escape(name)} — {rub(value)} / мес." for name, value in groups.items()]
+    summary = ""
+    if lines:
+        summary = "\n\n" + "\n".join(lines) + f"\n\nСейчас найдено: <b>{rub(exact)}</b> / мес."
+
+    intro_text = ""
+    if intro:
+        intro_text = (
+            "\n\nБытовой Резерв — это расходы нормальной жизни, которые трудно прогнозировать. "
+            "Они возникают регулярно, но не каждый месяц. При серьёзном падении дохода их можно "
+            "временно сократить или перенести.\n\n"
+            "Откройте банковскую аналитику и введите суммы."
+        )
 
     await message.answer(
+        f"{setup_progress(data, 6)}\n\n"
+        "<b>ПОСЧИТАЕМ ВАШ БЫТОВОЙ РЕЗЕРВ</b>"
+        + intro_text
+        + summary,
+        reply_markup=keyboard([
+            [("Одежда, обувь и аксессуары", "brcat:clothes")],
+            [("Стрижка и уход", "brcat:care"), ("Спортзал", "brcat:gym")],
+            [("Такси, кафе, развлечения", "brcat:leisure")],
+            [("Образовательные курсы для души", "brcat:courses")],
+            [("Мелкий ремонт и бытовые траты", "brcat:repairs")],
+            [("Домашний уют", "brcat:comfort")],
+            [("Другое", "brcat:other")],
+            [("Рассчитать Бытовой резерв", "br:finish")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.br_menu, F.data.startswith("brcat:"))
+async def choose_br_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    key = callback.data.split(":", 1)[1]
+    if key not in BR_CATEGORIES:
+        return
+
+    label, hint = BR_CATEGORIES[key]
+    await state.update_data(
+        pending_br_category=key,
+        pending_br_category_label=label,
+    )
+    await state.set_state(SetupStates.br_item_name)
+    data = await state.get_data()
+
+    await callback.message.answer(
+        f"{setup_progress(data, 6)}\n\n"
+        f"<b>{escape(label.upper())}</b>\n\n"
+        f"{escape(hint)}\n\n"
+        "Введите короткое название расхода.\n\n"
+        "Например: <code>Зимняя обувь</code> или <code>Абонемент</code>."
+    )
+
+
+@router.message(SetupStates.br_item_name)
+async def br_item_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if len(name) < 2:
+        await message.answer("Введите понятное название расхода.")
+        return
+
+    await state.update_data(pending_br_item_name=name)
+    await state.set_state(SetupStates.br_item_amount)
+    data = await state.get_data()
+
+    await message.answer(
+        f"{setup_progress(data, 6)}\n\n"
+        f"<b>{escape(name.upper())}</b>\n\n"
+        "Сколько вы тратите? Введите сумму. Период укажем следующим сообщением.\n\n"
+        "Например: <code>12000</code>."
+    )
+
+
+@router.message(SetupStates.br_item_amount)
+async def br_item_amount(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value <= 0:
+        await message.answer("Введите положительную сумму.")
+        return
+
+    await state.update_data(pending_br_item_amount=str(value))
+    await state.set_state(SetupStates.br_item_period)
+    data = await state.get_data()
+
+    await message.answer(
+        f"{setup_progress(data, 6)}\n\n"
+        "<b>ЗА КАКОЙ ПЕРИОД ЭТА СУММА?</b>",
+        reply_markup=keyboard([
+            [("В месяц", "brperiod:1"), ("За 3 месяца", "brperiod:3")],
+            [("За 6 месяцев", "brperiod:6"), ("В год", "brperiod:12")],
+            [("Другой период", "brperiod:custom")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.br_item_period, F.data.startswith("brperiod:"))
+async def br_item_period(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.split(":", 1)[1]
+
+    if value == "custom":
+        await state.set_state(SetupStates.br_custom_period)
+        data = await state.get_data()
+        await callback.message.answer(
+            f"{setup_progress(data, 6)}\n\n"
+            "<b>ЗА СКОЛЬКО МЕСЯЦЕВ?</b>\n\n"
+            "Введите число месяцев. Например: <code>2</code> или <code>18</code>."
+        )
+        return
+
+    await save_br_item(callback.message, state, Decimal(value))
+
+
+@router.message(SetupStates.br_custom_period)
+async def br_custom_period(message: Message, state: FSMContext):
+    months = parse_decimal(message.text)
+    if months is None or months <= 0:
+        await message.answer("Введите число месяцев больше нуля.")
+        return
+
+    await save_br_item(message, state, months)
+
+
+async def save_br_item(message: Message, state: FSMContext, months: Decimal):
+    data = await state.get_data()
+    amount = Decimal(data["pending_br_item_amount"])
+    monthly = money2(amount / months)
+
+    item = {
+        "category": data["pending_br_category"],
+        "category_label": data["pending_br_category_label"],
+        "name": data["pending_br_item_name"],
+        "amount": str(amount),
+        "months": str(months),
+        "monthly": str(monthly),
+    }
+
+    items = list(data.get("br_items", []))
+    items.append(item)
+
+    await state.update_data(br_items=items)
+    await state.set_state(SetupStates.br_menu)
+
+    await message.answer(
+        f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес."
+    )
+    await show_br_menu(message, state)
+
+
+@router.callback_query(SetupStates.br_menu, F.data == "br:finish")
+async def finish_br(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    data = await state.get_data()
+    items = data.get("br_items", [])
+    groups = br_group_totals(items)
+    exact = money2(sum(groups.values(), Decimal("0")))
+
+    if exact <= 0:
+        await callback.message.answer(
+            "Добавьте хотя бы один расход Бытового резерва."
+        )
+        return
+
+    rounded = round_up_thousand(exact)
+
+    await state.update_data(
+        household_reserve=str(rounded),
+        household_reserve_exact=str(exact),
+        household_reserve_categories={name: str(value) for name, value in groups.items()},
+    )
+
+    data = await state.get_data()
+    critical = Decimal(data["critical_life"])
+    sustainable = money2(critical + rounded)
+    lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
+
+    await callback.message.answer(
+        f"{setup_progress(data, 6)}\n\n"
+        "<b>БЫТОВОЙ РЕЗЕРВ РАССЧИТАН</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\nПо категориям — <b>{rub(exact)}</b>\n"
+        + f"Бытовой резерв — <b>{rub(rounded)}</b>\n\n"
+        "Сумма округлена вверх до ближайшей 1 000 ₽."
+    )
+
+    await callback.message.answer(
         f"<b>Критический минимум</b> — {rub(critical)}\n"
-        f"<b>Бытовой резерв</b> — {rub(value)}\n"
+        f"<b>Бытовой резерв</b> — {rub(rounded)}\n"
         f"<b>Устойчивая жизнь</b> — {rub(sustainable)}"
     )
-    await ask_pillow_policy(message, state)
+
+    await ask_pillow_policy(callback.message, state)
 
 
 async def ask_pillow_policy(message: Message, state: FSMContext):
