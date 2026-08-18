@@ -3091,7 +3091,7 @@ async def confirm_save(
 
         "Теперь можно добавить первое поступление денег "
         "или посмотреть текущее финансовое состояние.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 

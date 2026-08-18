@@ -1509,7 +1509,7 @@ async def send_distribution_report(
     await send_long_message(
         message,
         "\n".join(lines),
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 

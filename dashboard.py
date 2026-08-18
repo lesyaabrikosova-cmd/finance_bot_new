@@ -366,7 +366,7 @@ async def show_menu(
 
     await message.answer(
         "<b>ГЛАВНОЕ МЕНЮ</b>",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -398,7 +398,7 @@ async def menu_back(
 
     await callback.message.answer(
         "<b>ГЛАВНОЕ МЕНЮ</b>",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -477,7 +477,7 @@ async def send_mode(
         f"<b>{escape(MODE_TITLES[mode])}</b>\n\n"
         f"{escape(description)}"
         f"{next_text}",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(telegram_id),
     )
 
 
@@ -832,7 +832,7 @@ async def send_balances(
 
     await message.answer(
         "\n".join(lines),
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(telegram_id),
     )
 
 
@@ -870,7 +870,7 @@ async def command_help(
 
     await message.answer(
         HELP_TEXT,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -888,13 +888,29 @@ async def menu_help(
 
     await callback.message.answer(
         HELP_TEXT,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
 # ============================================================
 # ОТ РАЗРАБОТЧИКА
 # ============================================================
+
+@router.message(
+    Command("about")
+)
+async def command_about(
+    message: Message,
+    state: FSMContext,
+):
+
+    await state.clear()
+
+    await message.answer(
+        ABOUT_TEXT,
+        reply_markup=main_menu_keyboard(message.from_user.id),
+    )
+
 
 @router.callback_query(
     F.data == "menu:about"
@@ -910,7 +926,7 @@ async def menu_about(
 
     await callback.message.answer(
         ABOUT_TEXT,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
     
@@ -1015,7 +1031,7 @@ async def send_income_analysis(
         await message.answer(
             "В текущем расчётном периоде "
             "пока нет поступлений.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(telegram_id),
         )
 
         return
@@ -1046,7 +1062,7 @@ async def send_income_analysis(
 
     await message.answer(
         "\n".join(lines),
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(telegram_id),
     )
 
 

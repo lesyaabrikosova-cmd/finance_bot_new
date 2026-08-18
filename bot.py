@@ -160,7 +160,7 @@ async def command_menu(
     await message.answer(
         "🧪 <b>ФИНАНСОВЫЙ АЛЛОКАТОР</b>\n\n"
         "Что хотите сделать?",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -303,7 +303,7 @@ async def send_state(
 
     await message.answer(
         text,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -366,7 +366,7 @@ async def command_help(
 
     await message.answer(
         HELP_TEXT,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -381,7 +381,7 @@ async def menu_help(
 
     await callback.message.answer(
         HELP_TEXT,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -414,7 +414,7 @@ async def menu_credits(
             "💳 <b>КРЕДИТЫ</b>\n\n"
             "У вас нет активных кредитов "
             "в финансовом профиле.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(callback.from_user.id),
         )
 
         return
@@ -457,7 +457,7 @@ async def menu_credits(
 
     await callback.message.answer(
         "\n".join(lines),
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -493,7 +493,7 @@ async def menu_goals(
             "Когда алгоритм начнёт направлять "
             "деньги на цели, они будут учитываться "
             "в общей категории «Цели (всего)».",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(callback.from_user.id),
         )
 
         return
@@ -520,7 +520,7 @@ async def menu_goals(
 
     await callback.message.answer(
         "\n".join(lines),
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -565,7 +565,7 @@ async def menu_summary(
         "Полную сводную таблицу по правилам "
         "исходного алгоритма подключим после "
         "обработчика поступлений.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -586,7 +586,7 @@ async def menu_back(
     await callback.message.answer(
         "🧪 <b>ФИНАНСОВЫЙ АЛЛОКАТОР</b>\n\n"
         "Выберите действие.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -625,7 +625,7 @@ async def unknown_message(
     await message.answer(
         "Не понял команду.\n\n"
         "Используйте кнопки меню или команду /menu.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 
@@ -650,6 +650,10 @@ async def set_bot_commands(
         BotCommand(
             command="state",
             description="Мой режим",
+        ),
+        BotCommand(
+            command="about",
+            description="От разработчика",
         ),
         BotCommand(
             command="help",

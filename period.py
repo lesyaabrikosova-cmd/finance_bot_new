@@ -44,7 +44,7 @@ async def cancel_new_period(callback: CallbackQuery):
     await callback.answer("Отменено")
     await callback.message.answer(
         "Расчётный период не изменён.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 @router.callback_query(F.data == "period:confirm")
@@ -68,5 +68,5 @@ async def confirm_new_period(callback: CallbackQuery):
         "✅ <b>НОВЫЙ РАСЧЁТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
         "Баланс жизни и месячные категории начаты заново.\n"
         "Подушка, цели, инвестиции, кредиты и история сохранены.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )

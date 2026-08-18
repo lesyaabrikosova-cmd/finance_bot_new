@@ -303,7 +303,7 @@ async def confirm_full_reset(
         "✅ <b>УЧЁТ ПОЛНОСТЬЮ ОБНУЛЁН</b>\n\n"
         "Все финансовые счётчики начаты с нуля.\n"
         "Настройки профиля сохранены.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -329,7 +329,7 @@ async def save_pillow(message: Message, state: FSMContext):
     distribute_existing_pillow(allocator, value)
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(f"✅ Подушка обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard())
+    await message.answer(f"✅ Подушка обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
 
 @router.callback_query(F.data == "settings:critical")
 async def edit_critical(callback: CallbackQuery, state: FSMContext):
@@ -361,7 +361,7 @@ async def save_critical(message: Message, state: FSMContext):
     allocator.settings.critical_life = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(f"✅ Обязательная жизнь обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard())
+    await message.answer(f"✅ Обязательная жизнь обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
 
 @router.callback_query(F.data == "settings:household")
 async def edit_household(callback: CallbackQuery, state: FSMContext):
@@ -384,7 +384,7 @@ async def save_household(message: Message, state: FSMContext):
     allocator.settings.household_reserve = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(f"✅ Бытовой резерв обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard())
+    await message.answer(f"✅ Бытовой резерв обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
 
 @router.callback_query(F.data == "settings:income")
 async def edit_average_income(callback: CallbackQuery, state: FSMContext):
@@ -407,7 +407,7 @@ async def save_average_income(message: Message, state: FSMContext):
     allocator.settings.average_income = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(f"✅ Средний доход обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard())
+    await message.answer(f"✅ Средний доход обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
 
 @router.callback_query(F.data == "settings:tax")
 async def edit_tax(callback: CallbackQuery, state: FSMContext):
@@ -433,7 +433,7 @@ async def save_tax(message: Message, state: FSMContext):
     await message.answer(
         f"✅ Ставка налога обновлена: <b>{value}%</b>\n\n"
         "Список типов дохода, с которых удерживается налог, остаётся прежним.",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
 @router.callback_query(F.data == "settings:life_categories")
@@ -497,7 +497,7 @@ async def save_life_categories(message: Message, state: FSMContext):
     }
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer("Отдельные конверты Критического минимума обновлены.", reply_markup=main_menu_keyboard())
+    await message.answer("Отдельные конверты Критического минимума обновлены.", reply_markup=main_menu_keyboard(message.from_user.id))
 
 @router.callback_query(F.data == "settings:goals")
 async def edit_goal_percentages(callback: CallbackQuery, state: FSMContext):
@@ -506,7 +506,7 @@ async def edit_goal_percentages(callback: CallbackQuery, state: FSMContext):
     if not allocator.settings.goals:
         await callback.message.answer(
             "У вас пока нет отдельных категорий целей. Чтобы создать их, проще пройти настройку заново.",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(callback.from_user.id),
         )
         return
 
@@ -556,7 +556,7 @@ async def save_goal_percentages(message: Message, state: FSMContext):
 
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer("✅ Проценты целей обновлены.", reply_markup=main_menu_keyboard())
+    await message.answer("✅ Проценты целей обновлены.", reply_markup=main_menu_keyboard(message.from_user.id))
 
 @router.callback_query(F.data == "settings:c_split")
 async def edit_c_split(callback: CallbackQuery, state: FSMContext):
@@ -594,4 +594,4 @@ async def save_c_split(message: Message, state: FSMContext):
     db.save_allocator(message.from_user.id, allocator)
 
     await state.clear()
-    await message.answer(f"✅ Этап C обновлён: ⭐️ {first}% / 🛡️ {second}%", reply_markup=main_menu_keyboard())
+    await message.answer(f"✅ Этап C обновлён: ⭐️ {first}% / 🛡️ {second}%", reply_markup=main_menu_keyboard(message.from_user.id))

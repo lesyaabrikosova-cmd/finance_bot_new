@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from storage import db
+
 
 def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -16,14 +18,27 @@ def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     )
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return keyboard([
+def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
+    allocator = db.load_allocator(telegram_id)
+    has_active_debts = bool(
+        allocator
+        and any(
+            credit.active
+            for credit in allocator.settings.credits
+        )
+    )
+
+    rows = [
         [("Новый доход", "menu:income")],
-        [("Балансы", "menu:analytics"), ("Режим", "menu:state")],
-        [("Анализ доходов", "menu:income_analysis")],
-        [("Кредиты", "menu:credits"), ("Цели", "menu:goals")],
+        [("Балансы", "menu:analytics"), ("Анализ доходов", "menu:income_analysis")],
+        [("Режим", "menu:state"), ("Настройки", "settings:open")],
+    ]
+
+    if has_active_debts:
+        rows.append([("Кредиты", "menu:credits")])
+
+    rows.extend([
         [("Новый расчетный период", "period:new")],
-        [("Настройки", "settings:open")],
-        [("От разработчика", "menu:about")],
-        [("Помощь", "menu:help")],
     ])
+
+    return keyboard(rows)
