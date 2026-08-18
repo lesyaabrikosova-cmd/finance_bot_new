@@ -1193,13 +1193,7 @@ async def send_distribution_report(
             Decimal(str(value))
         )
 
-    # ========================================================
-    # ДАНО
-    # ========================================================
-
     lines = [
-        "<b>ДАНО</b>",
-        "",
         f"{income_date.strftime('%d.%m.%Y')}",
         f"{escape(income_type)} — "
         f"{money_plain(result.income)}",
@@ -1239,7 +1233,7 @@ async def send_distribution_report(
     )
 
     add_distribution_line(
-        "🛟",
+        "🛡️",
         "Подушка",
         allocations.get(
             "Подушка",
@@ -1352,10 +1346,6 @@ async def send_distribution_report(
         "",
     ])
 
-    # ========================================================
-    # ТВОИ НАГРАДЫ
-    # ========================================================
-
     mode = allocator.active_mode()
 
     if settings.employment_type == "Фрилансер":
@@ -1385,11 +1375,7 @@ async def send_distribution_report(
 
     next_info = allocator.next_mode_info()
 
-    lines.extend([
-        "<b>ТВОИ НАГРАДЫ</b>",
-        "",
-        reward,
-    ])
+    lines.append(reward)
 
     if next_info:
 
@@ -1418,7 +1404,7 @@ async def send_distribution_report(
                 ),
                 5: (
                     "Отложи на Подушку еще "
-                    f"{remaining} ₽ и достигни Максимального режима!"
+                    f"{remaining} ₽ и копи на цели еще быстрее!"
                 ),
             }
         else:
@@ -1434,7 +1420,7 @@ async def send_distribution_report(
                 ),
                 3: (
                     "Отложи на Подушку еще "
-                    f"{remaining} ₽ и достигни Максимального режима!"
+                    f"{remaining} ₽ и копи на цели еще быстрее!"
                 ),
             }
 
@@ -1477,11 +1463,11 @@ async def send_distribution_report(
         "",
         f"🔄 <b>Баланс жизни</b> — "
         f"{money_plain(state.life_balance)}",
-        f"🛟 <b>Подушка</b> — "
+        f"🛡️ <b>Подушка</b> — "
         f"{money_plain(state.pillow_balance)}",
-        f"<b>До Критического минимума осталось</b> — "
+        f"🆘 <b>До Критического минимума осталось</b> — "
         f"{money_plain(life_remaining)}",
-        f"<b>До Устойчивой жизни осталось</b> — "
+        f"✳️ <b>До Устойчивой жизни осталось</b> — "
         f"{money_plain(sustainable_remaining)}",
     ])
 
@@ -1601,4 +1587,3 @@ async def send_long_message(
                 else None
             ),
         )
-

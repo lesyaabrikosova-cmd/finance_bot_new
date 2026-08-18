@@ -622,10 +622,10 @@ async def send_balances(
         f"<b>{rub(tax)}</b> "
         f"({pct(tax, income)})",
         "",
-        f"🛟 Подушка за период: "
+        f"🛡️ Подушка за период: "
         f"<b>{rub(pillow_period)}</b> "
         f"({pct(pillow_period, income)})",
-        f"🛟 Подушка итого: "
+        f"🛡️ Подушка итого: "
         f"<b>{rub(state.pillow_balance)}</b>",
         "",
         f"📈 Инвестиции за период: "

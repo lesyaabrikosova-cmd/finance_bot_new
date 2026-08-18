@@ -97,13 +97,13 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
         f"🏛 Налог: <b>{s.tax_rate}%</b>\n"
-        f"🛟 Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
+        f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"
         f"⭐️ Цели: {escape(goals)}\n\n"
-        f"Распределение этапа C: ⭐️ цели {s.goals_share_c}% / 🛟 подушка {s.pillow_share_c}%",
+        f"Распределение этапа C: ⭐️ цели {s.goals_share_c}% / 🛡️ подушка {s.pillow_share_c}%",
         reply_markup=keyboard([
-            [("🛟 Изменить Подушку", "settings:pillow")],
+            [("🛡️ Изменить Подушку", "settings:pillow")],
             [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
             [("💰 Средний доход", "settings:income")],
             [("🏛 Налог", "settings:tax")],
@@ -197,7 +197,7 @@ async def ask_full_reset(
         "⚠️ <b>ПОЛНЫЙ СБРОС УЧЁТА</b>\n\n"
         "Будут обнулены:\n"
         "🔄 Баланс жизни\n"
-        "🛟 Подушка\n"
+        "🛡️ Подушка\n"
         "📈 Инвестиции\n"
         "💳 Счётчик досрочного погашения\n"
         "⭐️ Накопления по целям\n"
@@ -313,7 +313,7 @@ async def edit_pillow(callback: CallbackQuery, state: FSMContext):
     allocator = db.load_allocator(callback.from_user.id)
     await state.set_state(EditSettingsStates.pillow)
     await callback.message.answer(
-        "🛟 <b>ТЕКУЩИЙ БАЛАНС ПОДУШКИ</b>\n\n"
+        "🛡️ <b>ТЕКУЩИЙ БАЛАНС ПОДУШКИ</b>\n\n"
         f"Сейчас в Аллокаторе: <b>{rub(allocator.state.pillow_balance)}</b>\n\n"
         "Введите фактическую сумму, которая сейчас находится в вашей Подушке.\n"
         "Например: <code>175000</code>"
@@ -565,7 +565,7 @@ async def edit_c_split(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditSettingsStates.c_split)
     await callback.message.answer(
         "⚖️ <b>ЭТАП C: ЦЕЛИ / ПОДУШКА</b>\n\n"
-        f"Сейчас: ⭐️ цели {allocator.settings.goals_share_c}% / 🛟 подушка {allocator.settings.pillow_share_c}%\n\n"
+        f"Сейчас: ⭐️ цели {allocator.settings.goals_share_c}% / 🛡️ подушка {allocator.settings.pillow_share_c}%\n\n"
         "Введите два числа через запятую. Например: <code>60,40</code>\n"
         "Первое — цели, второе — Подушка. В сумме должно быть 100%."
     )
@@ -594,4 +594,4 @@ async def save_c_split(message: Message, state: FSMContext):
     db.save_allocator(message.from_user.id, allocator)
 
     await state.clear()
-    await message.answer(f"✅ Этап C обновлён: ⭐️ {first}% / 🛟 {second}%", reply_markup=main_menu_keyboard())
+    await message.answer(f"✅ Этап C обновлён: ⭐️ {first}% / 🛡️ {second}%", reply_markup=main_menu_keyboard())
