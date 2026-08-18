@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from html import escape
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, FSInputFile
 
 from financial_engine import (
     MODE_NAMES,
@@ -19,6 +20,21 @@ from ui import main_menu_keyboard
 
 
 router = Router()
+
+
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+INCOME_ANALYSIS_IMAGE_PATH = ASSETS_DIR / "menu" / "income_analysis.png"
+MODE_IMAGE_PATHS = {
+    mode: ASSETS_DIR / "modes" / f"mode_{mode}.png"
+    for mode in range(1, 7)
+}
+
+
+async def send_current_mode_image(message: Message, mode: int) -> None:
+    image_path = MODE_IMAGE_PATHS.get(mode)
+    if image_path is None or not image_path.exists():
+        return
+    await message.answer_photo(photo=FSInputFile(image_path))
 
 
 # ============================================================
@@ -411,6 +427,8 @@ async def send_mode(
     settings = allocator.settings
 
     mode = allocator.active_mode()
+
+    await send_current_mode_image(message, mode)
 
     mapping = (
         FREELANCER_MODES
@@ -915,6 +933,11 @@ async def send_income_analysis(
         )
         return
 
+    if INCOME_ANALYSIS_IMAGE_PATH.exists():
+        await message.answer_photo(
+            photo=FSInputFile(INCOME_ANALYSIS_IMAGE_PATH),
+        )
+
     # Берём операции прямо из SQLite.
     # Они уже отсортированы:
     # сначала самые новые.
@@ -990,7 +1013,6 @@ async def send_income_analysis(
     if total_income <= 0:
 
         await message.answer(
-            "<b>АНАЛИЗ ДОХОДОВ</b>\n\n"
             "В текущем расчётном периоде "
             "пока нет поступлений.",
             reply_markup=main_menu_keyboard(),
@@ -1009,8 +1031,6 @@ async def send_income_analysis(
     )
 
     lines = [
-        "<b>АНАЛИЗ ДОХОДОВ</b>",
-        "",
         f"👛 Доход итого: "
         f"<b>{rub(total_income)}</b>",
         "",

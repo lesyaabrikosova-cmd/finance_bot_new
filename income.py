@@ -31,6 +31,9 @@ from ui import main_menu_keyboard
 router = Router()
 
 
+NEW_INCOME_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "menu" / "new_income.png"
+
+
 MODE_IMAGE_PATHS = {2: Path(__file__).resolve().parent / "assets" / "modes" / "mode_2.png", 3: Path(__file__).resolve().parent / "assets" / "modes" / "mode_3.png", 4: Path(__file__).resolve().parent / "assets" / "modes" / "mode_4.png", 5: Path(__file__).resolve().parent / "assets" / "modes" / "mode_5.png", 6: Path(__file__).resolve().parent / "assets" / "modes" / "mode_6.png"}
 
 async def send_mode_unlock_image(message: Message, result) -> None:
@@ -39,7 +42,15 @@ async def send_mode_unlock_image(message: Message, result) -> None:
     image_path = MODE_IMAGE_PATHS.get(result.mode_after)
     if image_path is None or not image_path.exists():
         return
-    await message.answer_photo(photo=FSInputFile(image_path), caption=f"<b>РЕЖИМ {result.mode_after}</b>\n{escape(MODE_TITLES[result.mode_after])}")
+    mode_label = (
+        "МАКСИМАЛЬНЫЙ РЕЖИМ"
+        if result.mode_after == 6
+        else f"РЕЖИМ {result.mode_after}"
+    )
+    await message.answer_photo(
+        photo=FSInputFile(image_path),
+        caption=f"<b>{mode_label}</b>\n{escape(MODE_TITLES[result.mode_after])}",
+    )
 
 
 # ============================================================
@@ -209,14 +220,13 @@ async def start_income(
         IncomeStates.amount
     )
 
+    if NEW_INCOME_IMAGE_PATH.exists():
+        await message.answer_photo(
+            photo=FSInputFile(NEW_INCOME_IMAGE_PATH),
+        )
+
     await message.answer(
-        "💰 <b>НОВОЕ ПОСТУПЛЕНИЕ</b>\n\n"
-
-        "Сколько денег вы получили?\n\n"
-
-        "Введите полную сумму поступления "
-        "<b>до удержания налога</b>.\n\n"
-
+        "<b>Введите полную сумму поступления</b>\n\n"
         "Примеры:\n"
         "<code>50000</code>\n"
         "<code>125 000</code>\n"
@@ -1150,6 +1160,11 @@ async def confirm_income(
         income_date,
     )
 
+    await send_mode_unlock_image(
+        callback.message,
+        result,
+    )
+
 
 # ============================================================
 # ОТЧЁТ
@@ -1382,26 +1397,58 @@ async def send_distribution_report(
             next_info["remaining"]
         )
 
-        if mode == 2:
-
-            lines.append(
-                "Погаси еще "
-                f"{remaining} ₽ долгов "
-                "и получи следующий кубок!"
-            )
-
+        if settings.employment_type == "Фрилансер":
+            reward_text = {
+                1: (
+                    "Отложи на Подушку еще "
+                    f"{remaining} ₽ и защити себя от новых долгов!"
+                ),
+                2: (
+                    "Погаси еще "
+                    f"{remaining} ₽ долгов и начни формировать надежную "
+                    "форс-мажорную Подушку!"
+                ),
+                3: (
+                    "Отложи на Подушку еще "
+                    f"{remaining} ₽ и открой Стабилизатор дохода!"
+                ),
+                4: (
+                    "Отложи на Подушку еще "
+                    f"{remaining} ₽ — и откроются инвестиции и цели!"
+                ),
+                5: (
+                    "Отложи на Подушку еще "
+                    f"{remaining} ₽ и достигни Максимального режима!"
+                ),
+            }
         else:
+            reward_text = {
+                1: (
+                    "Отложи на Подушку еще "
+                    f"{remaining} ₽ и защити себя от новых долгов!"
+                ),
+                2: (
+                    "Погаси еще "
+                    f"{remaining} ₽ долгов и начни формировать надежную "
+                    "форс-мажорную Подушку!"
+                ),
+                3: (
+                    "Отложи на Подушку еще "
+                    f"{remaining} ₽ и достигни Максимального режима!"
+                ),
+            }
 
-            lines.append(
-                "Отложи на Подушку еще "
-                f"{remaining} ₽ "
-                "и получи следующий кубок!"
+        lines.append(
+            reward_text.get(
+                mode,
+                f"До следующего режима осталось {remaining} ₽."
             )
+        )
 
     else:
 
         lines.append(
-            "Все кубки этого профиля уже получены!"
+            "Философский камень найден."
         )
 
     lines.extend([
