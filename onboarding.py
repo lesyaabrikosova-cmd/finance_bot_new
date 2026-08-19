@@ -38,6 +38,7 @@ INTRO_IMAGE_1 = INTRO_IMAGES_DIR / "intro_1.png"
 INTRO_IMAGE_2 = INTRO_IMAGES_DIR / "intro_2.png"
 INTRO_IMAGE_3 = INTRO_IMAGES_DIR / "intro_3.png"
 INTRO_IMAGE_4 = INTRO_IMAGES_DIR / "intro_4.png"
+FINANCIAL_PROFILE_IMAGE = INTRO_IMAGES_DIR / "financial_profile.png"
 
 
 # ============================================================
@@ -800,7 +801,7 @@ async def setup_start(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(SetupStates.employment)
 
-    await callback.message.answer(
+    caption = (
         f"{progress_bar(1, 2)}\n\n"
         "<b>КАК ВЫ ПОЛУЧАЕТЕ ОСНОВНОЙ ДОХОД?</b>\n\n"
         "Выберите <b>Наёмный</b>, если у вас регулярная зарплата от работодателя.\n\n"
@@ -808,7 +809,12 @@ async def setup_start(callback: CallbackQuery, state: FSMContext):
         "- проекты;\n"
         "- заказы;\n"
         "- самозанятость;\n"
-        "- небольшой бизнес и др.",
+        "- небольшой бизнес и др."
+    )
+
+    await callback.message.answer_photo(
+        photo=FSInputFile(FINANCIAL_PROFILE_IMAGE),
+        caption=caption,
         reply_markup=keyboard([
             [("Наёмный", "employment:employee"), ("Фрилансер", "employment:freelancer")],
         ]),
