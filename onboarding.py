@@ -504,19 +504,51 @@ KM_CATEGORIES = {
         "Жильё, Аренда, ЖКХ",
         "Сюда относятся аренда квартиры или дома, обязательный платёж по ипотеке, ЖКХ, "
         "аренда студии, кабинета или рабочего места, без которых невозможно получать основной доход, "
-        "и другие обязательные расходы на помещение.",
+        "и другие обязательные расходы на помещение. Земельный налог и налог на имущество тоже "
+        "относятся к обязательной жизни, но хранятся в общем конверте «Налоги».",
     ),
     "food": (
         "Питание",
-        "Продукты, питьевая вода и другое питание, без которого нельзя нормально прожить месяц.",
+        "• Супермаркеты\n"
+        "• Питьевая вода\n"
+        "• Еда вне дома\n"
+        "• Доставки, если это необходимо\n"
+        "• Другое питание, без которого нельзя нормально прожить месяц.\n\n"
+        "Введите название расхода.\n"
+        "Например: Вода, Супермаркет, Столовка",
     ),
     "communication": (
-        "Связь",
-        "Мобильная связь, домашний интернет, необходимый VPN и действительно необходимые подписки.",
+        "Связь и подписки",
+        "• Мобильная связь\n"
+        "• Домашний интернет\n"
+        "• VPN с ежемесячной оплатой\n"
+        "• Необходимые подписки с ежемесячной оплатой\n\n"
+        "Совет: если вы оплачиваете подписку раз в год или раз в несколько месяцев, "
+        "лучше добавьте её в Бытовой резерв. Если вы всё же добавите её здесь, "
+        "система предложит создать отдельный конверт «Подписки».\n\n"
+        "Введите название расхода.\n"
+        "Например: МТС, Домашний интернет, Яндекс Плюс",
     ),
     "transport": (
         "Транспорт",
-        "Обязательный общественный транспорт или необходимые расходы на автомобиль.",
+        "<b>Общественный транспорт</b>\n"
+        "• Метро\n• Автобус\n• Трамвай\n• Электричка\n\n"
+        "Если вы часто пользуетесь общественным транспортом, проверьте, есть ли подходящий "
+        "безлимитный или льготный проездной. Во многих случаях он помогает заметно сократить расходы.\n\n"
+        "<b>Безлимитный проездной</b>\n"
+        "Укажите стоимость и через сколько месяцев потребуется купить новый. Бот рассчитает "
+        "ежемесячное пополнение отдельного конверта «Проездной».\n\n"
+        "<b>Такси — необходимое</b>\n"
+        "Учитывайте поездки, без которых действительно трудно обойтись: перевозку родственников "
+        "или питомцев, позднее возвращение с работы, дорогу в аэропорт или на вокзал. Поездки из-за "
+        "того, что просто не хочется ехать на общественном транспорте, лучше учитывать в Бытовом резерве.\n\n"
+        "<b>Автомобиль</b>\n"
+        "• Бензин\n• ОСАГО или КАСКО\n• ТО\n• Расходники\n• Автосервис\n"
+        "• Шиномонтаж\n• Платные дороги\n• Мойка\n• Резина\n• Штрафы ГИБДД\n\n"
+        "<b>Транспортный налог</b>\n"
+        "Он входит в Критический минимум, но хранится в общем конверте «Налоги».\n\n"
+        "Введите название расхода.\n"
+        "Например: Проездной, Такси, Бензин",
     ),
     "education": (
         "Образование",
@@ -529,7 +561,9 @@ KM_CATEGORIES = {
     ),
     "pets": (
         "Питомцы",
-        "Корм, наполнитель и другие регулярные обязательные расходы на питомцев.",
+        "• Корм\n• Наполнитель\n• Пелёнки\n• Аксессуары\n• Ветеринар\n\n"
+        "Введите название расхода.\n"
+        "Например: Кошачий корм, Ветеринарка, Пелёнки собаке",
     ),
     "health": (
         "Здоровье",
@@ -553,6 +587,7 @@ BR_CATEGORIES = {
     "courses": ("Образовательные курсы для души", "Необязательные курсы, хобби и занятия, которые полезны или приятны, но не являются обязательной частью Критического минимума."),
     "repairs": ("Мелкий ремонт и бытовые траты", "Мелкий ремонт, расходники, бытовые покупки и другие нерегулярные траты по дому."),
     "comfort": ("Домашний уют", "Текстиль, посуда, декор, растения и другие покупки, которые делают дом удобнее и приятнее."),
+    "subscriptions": ("Подписки", "Подписки с оплатой раз в несколько месяцев или раз в год, которые вы хотите заранее учитывать в обычном бюджете."),
     "other": ("Другое", "Любой нерегулярный расход нормальной жизни, который не относится к Критическому минимуму, но периодически требует денег."),
 }
 
@@ -604,6 +639,7 @@ def default_km_storage(item: dict) -> dict:
     name = (item.get("name") or item.get("category_label") or "Расход").strip()
     lowered = name.lower()
     months = Decimal(str(item.get("months", "1")))
+    subtype = item.get("subcategory")
 
     storage = "salary"
     envelope_name = None
@@ -618,7 +654,10 @@ def default_km_storage(item: dict) -> dict:
 
     # Аренда жилья — отдельный конверт независимо от периодичности.
     elif category == "housing":
-        if "ипотек" in lowered:
+        if subtype in {"property_tax", "land_tax"}:
+            storage = "separate"
+            envelope_name = "Налоги"
+        elif "ипотек" in lowered:
             storage = "separate"
             envelope_name = "Ипотека"
         elif any(token in lowered for token in ("студи", "кабинет", "офис", "рабоч")):
@@ -633,14 +672,30 @@ def default_km_storage(item: dict) -> dict:
             storage = "separate"
             envelope_name = name
 
-    # Продукты и связь обычно тратятся прямо в течение месяца.
-    elif category in {"food", "communication"}:
+    # Продукты обычно тратятся прямо в течение месяца.
+    elif category == "food":
         storage = "salary"
+
+    # Редкую подписку можно оставить в КЖ, но тогда деньги лучше
+    # физически отделить от ежемесячных расходов.
+    elif category == "communication":
+        if months > 1:
+            storage = "separate"
+            envelope_name = "Подписки"
 
     # Для транспорта, детей, образования и прочих расходов периодичность
     # даёт хорошую рекомендацию: крупный будущий платёж лучше копить отдельно.
     elif category in {"transport", "children", "education", "other"}:
-        if months > 1:
+        if category == "transport" and subtype == "tax":
+            storage = "separate"
+            envelope_name = "Налоги"
+        elif category == "transport" and subtype == "pass":
+            storage = "separate"
+            envelope_name = "Проездной"
+        elif category == "transport" and subtype == "car":
+            storage = "separate"
+            envelope_name = "Автомобиль"
+        elif months > 1:
             storage = "separate"
             defaults = {
                 "transport": "Транспорт",
@@ -656,6 +711,7 @@ def default_km_storage(item: dict) -> dict:
         "monthly": str(money2(Decimal(item["monthly"]))),
         "storage": storage,
         "envelope_name": envelope_name,
+        "subcategory": subtype,
     }
 
 
@@ -671,6 +727,26 @@ def life_categories_from_storage(storage_items: list[dict]) -> dict[str, Decimal
         envelope = (item.get("envelope_name") or item.get("item_name") or "Конверт").strip()
         amount = Decimal(item["monthly"])
         result[envelope] = money2(result.get(envelope, Decimal("0")) + amount)
+    return result
+
+
+def planned_taxes_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
+    """Возвращает внутреннюю детализацию налоговой части КЖ."""
+    labels = {
+        "tax": "Транспортный налог",
+        "property_tax": "Налог на имущество",
+        "land_tax": "Земельный налог",
+    }
+    result: dict[str, Decimal] = {}
+    for item in storage_items:
+        subtype = item.get("subcategory")
+        if subtype not in labels:
+            continue
+        object_name = (item.get("item_name") or labels[subtype]).strip()
+        key = f"{labels[subtype]} · {object_name}"
+        result[key] = money2(
+            result.get(key, Decimal("0")) + Decimal(item["monthly"])
+        )
     return result
 
 
@@ -919,15 +995,16 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
         )
 
     rows = [
-        [("Жильё, Аренда, ЖКХ", "kmcat:housing"), ("Питание", "kmcat:food")],
-        [("Связь", "kmcat:communication"), ("Транспорт", "kmcat:transport")],
-        [("Образование", "kmcat:education"), ("Дети", "kmcat:children")],
-        [("Питомцы", "kmcat:pets"), ("Здоровье", "kmcat:health")],
+        [("Жильё, Аренда, ЖКХ", "kmcat:housing"), ("Здоровье", "kmcat:health")],
+        [("Связь и подписки", "kmcat:communication"), ("Питомцы", "kmcat:pets")],
+        [("Транспорт", "kmcat:transport"), ("Дети", "kmcat:children")],
+        [("Питание", "kmcat:food"), ("Образование", "kmcat:education")],
         [("Другое", "kmcat:other")],
     ]
     if items:
-        rows.append([("Редактировать расходы", "kmedit:list")])
-    rows.append([("Рассчитать минимум", "km:finish")])
+        rows.append([("Редактировать", "kmedit:list"), ("✔️ Готово", "km:finish")])
+    else:
+        rows.append([("✔️ Готово", "km:finish")])
 
     await message.answer(
         f"{setup_progress(data, 5)}\n\n"
@@ -946,14 +1023,102 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         return
 
     label, hint = KM_CATEGORIES[key]
-    await state.update_data(pending_km_category=key, pending_km_category_label=label)
+    await state.update_data(
+        pending_km_category=key,
+        pending_km_category_label=label,
+        pending_km_subcategory=None,
+    )
+    if key == "housing":
+        await state.set_state(SetupStates.km_menu)
+        data = await state.get_data()
+        await callback.message.answer(
+            f"{setup_progress(data, 5)}\n\n<b>ЖИЛЬЁ, АРЕНДА, ЖКХ</b>\n\n{hint}",
+            reply_markup=keyboard([
+                [("Жильё, аренда или ЖКХ", "kmhousing:regular")],
+                [("Налог на имущество", "kmhousing:property_tax")],
+                [("Земельный налог", "kmhousing:land_tax")],
+                [("Назад", "km:cancel")],
+            ]),
+        )
+        return
+    if key == "transport":
+        await state.set_state(SetupStates.km_menu)
+        data = await state.get_data()
+        await callback.message.answer(
+            f"{setup_progress(data, 5)}\n\n<b>ТРАНСПОРТ</b>\n\n{hint}",
+            reply_markup=keyboard([
+                [("Общественный транспорт", "kmtransport:public")],
+                [("Безлимитный проездной", "kmtransport:pass")],
+                [("Такси — необходимое", "kmtransport:taxi")],
+                [("Автомобиль", "kmtransport:car")],
+                [("Транспортный налог", "kmtransport:tax")],
+                [("Назад", "km:cancel")],
+            ]),
+        )
+        return
     await state.set_state(SetupStates.km_item_name)
     data = await state.get_data()
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(label.upper())}</b>\n\n"
-        f"{escape(hint)}\n\n"
-        "Введите короткое название расхода. Например: <code>Аренда квартиры</code>, <code>Ипотека</code>, <code>Студия</code> или <code>ЖКХ</code>.",
+        f"{hint}\n\n"
+        "Введите короткое название расхода.",
+        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+    )
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmhousing:"))
+async def choose_housing_subcategory(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    subtype = callback.data.split(":", 1)[1]
+    labels = {
+        "regular": "Жильё, аренда или ЖКХ",
+        "property_tax": "Налог на имущество",
+        "land_tax": "Земельный налог",
+    }
+    if subtype not in labels:
+        return
+    await state.update_data(
+        pending_km_category="housing",
+        pending_km_category_label="Жильё, Аренда, ЖКХ",
+        pending_km_subcategory=subtype,
+    )
+    await state.set_state(SetupStates.km_item_name)
+    data = await state.get_data()
+    await callback.message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        f"<b>{escape(labels[subtype].upper())}</b>\n\n"
+        "Введите название расхода или объекта.\n"
+        f"Например: <code>{escape(labels[subtype])}</code>",
+        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+    )
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmtransport:"))
+async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    subtype = callback.data.split(":", 1)[1]
+    labels = {
+        "public": "Общественный транспорт",
+        "pass": "Безлимитный проездной",
+        "taxi": "Такси — необходимое",
+        "car": "Автомобиль",
+        "tax": "Транспортный налог",
+    }
+    if subtype not in labels:
+        return
+    await state.update_data(
+        pending_km_category="transport",
+        pending_km_category_label="Транспорт",
+        pending_km_subcategory=subtype,
+    )
+    await state.set_state(SetupStates.km_item_name)
+    data = await state.get_data()
+    await callback.message.answer(
+        f"{setup_progress(data, 5)}\n\n"
+        f"<b>{escape(labels[subtype].upper())}</b>\n\n"
+        "Введите название расхода.\n"
+        f"Например: <code>{escape(labels[subtype])}</code>",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -976,7 +1141,8 @@ async def km_item_name(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(name.upper())}</b>\n\n"
-        "Сколько вы тратите? Введите сумму. Период укажем следующим сообщением.",
+        "Введите сумму.\n"
+        "(Период укажем следующим сообщением)",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -994,10 +1160,9 @@ async def km_item_amount(message: Message, state: FSMContext):
         f"{setup_progress(data, 5)}\n\n"
         "<b>ЗА КАКОЙ ПЕРИОД ЭТА СУММА?</b>",
         reply_markup=keyboard([
-            [("В месяц", "kmperiod:1"), ("За 3 месяца", "kmperiod:3")],
+            [("В неделю", "kmperiod:week"), ("В месяц", "kmperiod:1")],
             [("За 6 месяцев", "kmperiod:6"), ("В год", "kmperiod:12")],
-            [("Другой период", "kmperiod:custom")],
-            [("Отмена", "km:cancel")],
+            [("Другой период", "kmperiod:custom"), ("Отмена", "km:cancel")],
         ]),
     )
 
@@ -1006,6 +1171,9 @@ async def km_item_amount(message: Message, state: FSMContext):
 async def km_item_period(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     value = callback.data.split(":", 1)[1]
+    if value == "week":
+        await save_km_item(callback.message, state, Decimal("12") / Decimal("52"))
+        return
     if value == "custom":
         await state.set_state(SetupStates.km_custom_period)
         data = await state.get_data()
@@ -1039,6 +1207,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         "amount": str(amount),
         "months": str(months),
         "monthly": str(monthly),
+        "subcategory": data.get("pending_km_subcategory"),
     }
     items = list(data.get("km_items", []))
     items.append(item)
@@ -1046,11 +1215,33 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     await state.set_state(SetupStates.km_menu)
 
     index = len(items) - 1
+    action_rows = [[('Изменить', f'kmedit:item:{index}'), ('Удалить', f'kmedit:delete:{index}')]]
+    if item["category"] == "communication" and months > 1:
+        action_rows.insert(0, [('Направить в Бытовой резерв', f'kmmove:br:{index}')])
     await message.answer(
         f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес.",
-        reply_markup=keyboard([[('Изменить', f'kmedit:item:{index}'), ('Удалить', f'kmedit:delete:{index}')]])
+        reply_markup=keyboard(action_rows)
     )
     await show_km_menu(message, state)
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmmove:br:"))
+async def move_km_item_to_household_reserve(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Перенесено в Бытовой резерв")
+    index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    km_items = list(data.get("km_items", []))
+    if not 0 <= index < len(km_items):
+        await show_km_menu(callback.message, state)
+        return
+
+    item = dict(km_items.pop(index))
+    item["category"] = "subscriptions"
+    item["category_label"] = "Подписки"
+    deferred = list(data.get("deferred_br_items", []))
+    deferred.append(item)
+    await state.update_data(km_items=km_items, deferred_br_items=deferred)
+    await show_km_menu(callback.message, state)
 
 
 @router.callback_query(SetupStates.km_menu, F.data == "km:finish")
@@ -1099,6 +1290,7 @@ async def clear_pending_km(state: FSMContext):
         pending_km_category_label=None,
         pending_km_item_name=None,
         pending_km_item_amount=None,
+        pending_km_subcategory=None,
         pending_km_edit_index=None,
     )
 
@@ -1442,7 +1634,8 @@ async def review_km_storage(callback: CallbackQuery, state: FSMContext):
 
 
 async def start_household_reserve(message: Message, state: FSMContext):
-    await state.update_data(br_items=[])
+    data = await state.get_data()
+    await state.update_data(br_items=list(data.get("deferred_br_items", [])))
     await state.set_state(SetupStates.br_menu)
     await show_br_menu(message, state, intro=True)
 
@@ -1470,6 +1663,7 @@ async def show_br_menu(message: Message, state: FSMContext, intro: bool = False)
         [("Образовательные курсы для души", "brcat:courses")],
         [("Мелкий ремонт и бытовые траты", "brcat:repairs")],
         [("Домашний уют", "brcat:comfort")],
+        [("Подписки", "brcat:subscriptions")],
         [("Другое", "brcat:other")],
     ]
     if items:
@@ -1520,7 +1714,8 @@ async def br_item_name(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(data, 6)}\n\n"
         f"<b>{escape(name.upper())}</b>\n\n"
-        "Сколько вы тратите? Введите сумму. Период укажем следующим сообщением.\n\n"
+        "Введите сумму.\n"
+        "(Период укажем следующим сообщением)\n\n"
         "Например: <code>12000</code>.",
         reply_markup=keyboard([[('Отмена','br:cancel')]]),
     )
@@ -1541,10 +1736,9 @@ async def br_item_amount(message: Message, state: FSMContext):
         f"{setup_progress(data, 6)}\n\n"
         "<b>ЗА КАКОЙ ПЕРИОД ЭТА СУММА?</b>",
         reply_markup=keyboard([
-            [("В месяц", "brperiod:1"), ("За 3 месяца", "brperiod:3")],
+            [("В неделю", "brperiod:week"), ("В месяц", "brperiod:1")],
             [("За 6 месяцев", "brperiod:6"), ("В год", "brperiod:12")],
-            [("Другой период", "brperiod:custom")],
-            [("Отмена", "br:cancel")],
+            [("Другой период", "brperiod:custom"), ("Отмена", "br:cancel")],
         ]),
     )
 
@@ -1553,6 +1747,10 @@ async def br_item_amount(message: Message, state: FSMContext):
 async def br_item_period(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     value = callback.data.split(":", 1)[1]
+
+    if value == "week":
+        await save_br_item(callback.message, state, Decimal("12") / Decimal("52"))
+        return
 
     if value == "custom":
         await state.set_state(SetupStates.br_custom_period)
@@ -1678,7 +1876,40 @@ async def br_edit_item(callback: CallbackQuery, state: FSMContext):
     await callback.answer(); index=int(callback.data.rsplit(":",1)[1]); data=await state.get_data(); items=data.get("br_items",[])
     if not (0<=index<len(items)): await show_br_menu(callback.message,state); return
     item=items[index]; await state.update_data(pending_br_edit_index=index)
-    await callback.message.answer(f"<b>{escape(item['name'])}</b>\n\nКатегория — {escape(item['category_label'])}\nИсходная сумма — {rub(Decimal(item['amount']))}\nПериод — {item['months']} мес.\nВ расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",reply_markup=keyboard([[('Изменить название',f'bredit:name:{index}')],[('Изменить сумму',f'bredit:amount:{index}')],[('Изменить период',f'bredit:period:{index}')],[('Удалить',f'bredit:delete:{index}')],[('Назад','bredit:list')]]))
+    rows = [[('Изменить название',f'bredit:name:{index}')],[('Изменить сумму',f'bredit:amount:{index}')],[('Изменить период',f'bredit:period:{index}')]]
+    if item.get("category") == "subscriptions":
+        rows.append([('Вернуть в Критический минимум', f'brmove:km:{index}')])
+    rows.extend([[('Удалить',f'bredit:delete:{index}')],[('Назад','bredit:list')]])
+    await callback.message.answer(f"<b>{escape(item['name'])}</b>\n\nКатегория — {escape(item['category_label'])}\nИсходная сумма — {rub(Decimal(item['amount']))}\nПериод — {item['months']} мес.\nВ расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",reply_markup=keyboard(rows))
+
+
+@router.callback_query(SetupStates.br_menu, F.data.startswith("brmove:km:"))
+async def move_br_item_to_critical_minimum(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Возвращено в Критический минимум")
+    index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    br_items = list(data.get("br_items", []))
+    if not 0 <= index < len(br_items):
+        await show_br_menu(callback.message, state)
+        return
+
+    item = dict(br_items.pop(index))
+    item["category"] = "communication"
+    item["category_label"] = "Связь и подписки"
+    km_items = list(data.get("km_items", []))
+    km_items.append(item)
+    exact = money2(sum((Decimal(entry["monthly"]) for entry in km_items), Decimal("0")))
+    storage_items = build_default_km_storage(km_items)
+    categories = life_categories_from_storage(storage_items)
+    await state.update_data(
+        br_items=br_items,
+        km_items=km_items,
+        critical_life_exact=str(exact),
+        critical_life=str(round_up_thousand(exact)),
+        km_storage_items=storage_items,
+        life_categories={name: str(value) for name, value in categories.items()},
+    )
+    await show_br_menu(callback.message, state)
 
 
 @router.callback_query(F.data.startswith("bredit:delete:"))
@@ -2765,6 +2996,9 @@ def build_settings_from_data(
             {}
         ).items()
     }
+    planned_taxes = planned_taxes_from_storage(
+        data.get("km_storage_items", [])
+    )
 
     return UserSettings(
         has_debts=data[
@@ -2795,6 +3029,8 @@ def build_settings_from_data(
             "taxable_income_types",
             [],
         ),
+
+        planned_taxes=planned_taxes,
 
         minimum_reserve_months=Decimal(
             data.get(
@@ -2971,12 +3207,14 @@ async def show_confirmation(
     )
 
     accounts: list[tuple[str, str]] = []
-    if settings.tax_rate > 0:
-        accounts.append(("🏛️", "Налог"))
+    if settings.tax_rate > 0 or "Налоги" in settings.life_categories:
+        accounts.append(("🏛️", "Налоги"))
 
     accounts.append(("🛡️", "Подушка"))
 
     for name in settings.life_categories.keys():
+        if name == "Налоги":
+            continue
         accounts.append(("❤️", name))
 
     accounts.append(("❤️", "Зарплата"))
@@ -3056,6 +3294,30 @@ async def confirm_save(
         telegram_id,
         allocator,
     )
+
+    # Налоги на имущество, землю и транспорт уже входят в КЖ,
+    # но дополнительно сохраняются как понятные накопительные цели.
+    if not db.load_tax_obligations(telegram_id):
+        tax_labels = {
+            "tax": "Транспортный налог",
+            "property_tax": "Налог на имущество",
+            "land_tax": "Земельный налог",
+        }
+        for item in data.get("km_storage_items", []):
+            subtype = item.get("subcategory")
+            if subtype not in tax_labels:
+                continue
+            months_decimal = Decimal(str(item.get("months", "1")))
+            months = max(1, int(months_decimal.to_integral_value(rounding=ROUND_CEILING)))
+            db.add_tax_obligation(
+                telegram_id=telegram_id,
+                tax_type=tax_labels[subtype],
+                object_name=item.get("item_name") or tax_labels[subtype],
+                target_amount=Decimal(str(item.get("amount", "0"))),
+                saved_before=Decimal("0"),
+                months=months,
+                monthly_amount=Decimal(str(item.get("monthly", "0"))),
+            )
 
     await state.clear()
 

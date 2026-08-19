@@ -378,6 +378,54 @@ class Database:
             """
         )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tax_configuration (
+                telegram_id INTEGER PRIMARY KEY,
+                planned_taxes TEXT NOT NULL DEFAULT '{}',
+                track_payments INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tax_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                tax_name TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                paid_at TEXT NOT NULL,
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tax_obligations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                tax_type TEXT NOT NULL,
+                object_name TEXT NOT NULL,
+                target_amount TEXT NOT NULL,
+                opening_amount TEXT NOT NULL DEFAULT '0',
+                saved_before TEXT NOT NULL DEFAULT '0',
+                months INTEGER NOT NULL,
+                monthly_amount TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
         # ----------------------------------------------------
         # Индексы
         # ----------------------------------------------------
@@ -1380,6 +1428,13 @@ class Database:
         if settings is None:
             return None
 
+        planned_taxes, track_payments = self.load_tax_configuration(telegram_id)
+        settings.planned_taxes = {
+            name: string_to_decimal(amount)
+            for name, amount in planned_taxes.items()
+        }
+        settings.track_tax_payments = track_payments
+
         state = self.load_state(
             telegram_id
         )
@@ -1414,6 +1469,8 @@ class Database:
             allocator.settings,
         )
 
+        self.save_tax_configuration(telegram_id, allocator.settings)
+
         # Сохраняем состояние.
         self.save_state(
             telegram_id,
@@ -1444,6 +1501,146 @@ class Database:
                 operation_type,
                 latest,
             )
+
+    def save_tax_configuration(self, telegram_id: int, settings: UserSettings):
+        self.connection.execute(
+            """
+            INSERT INTO tax_configuration (telegram_id, planned_taxes, track_payments)
+            VALUES (?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                planned_taxes = excluded.planned_taxes,
+                track_payments = excluded.track_payments
+            """,
+            (
+                telegram_id,
+                serialize_json(settings.planned_taxes),
+                int(settings.track_tax_payments),
+            ),
+        )
+        self.connection.commit()
+
+    def load_tax_configuration(self, telegram_id: int) -> tuple[dict, bool]:
+        row = self.connection.execute(
+            "SELECT planned_taxes, track_payments FROM tax_configuration WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if row is None:
+            return {}, False
+        return deserialize_json(row["planned_taxes"]), bool(row["track_payments"])
+
+    def save_tax_payment(self, telegram_id: int, tax_name: str, amount: Decimal):
+        self.ensure_user(telegram_id)
+        self.connection.execute(
+            """
+            INSERT INTO tax_payments (telegram_id, tax_name, amount, paid_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (telegram_id, tax_name, decimal_to_string(amount), datetime.utcnow().isoformat()),
+        )
+        self.connection.commit()
+
+    def load_tax_payments(self, telegram_id: int, year: int | None = None) -> list[dict]:
+        rows = self.connection.execute(
+            """
+            SELECT tax_name, amount, paid_at FROM tax_payments
+            WHERE telegram_id = ? ORDER BY id DESC
+            """,
+            (telegram_id,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            paid_at = datetime.fromisoformat(row["paid_at"])
+            if year is not None and paid_at.year != year:
+                continue
+            result.append({
+                "tax_name": row["tax_name"],
+                "amount": string_to_decimal(row["amount"]),
+                "paid_at": row["paid_at"],
+            })
+        return result
+
+    def add_tax_obligation(
+        self,
+        telegram_id: int,
+        tax_type: str,
+        object_name: str,
+        target_amount: Decimal,
+        saved_before: Decimal,
+        months: int,
+        monthly_amount: Decimal,
+    ) -> int:
+        self.ensure_user(telegram_id)
+        cursor = self.connection.execute(
+            """
+            INSERT INTO tax_obligations (
+                telegram_id, tax_type, object_name, target_amount,
+                opening_amount, saved_before, months, monthly_amount, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                telegram_id,
+                tax_type,
+                object_name,
+                decimal_to_string(target_amount),
+                decimal_to_string(saved_before),
+                decimal_to_string(saved_before),
+                months,
+                decimal_to_string(monthly_amount),
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def load_tax_obligations(self, telegram_id: int, active_only: bool = True) -> list[dict]:
+        query = "SELECT * FROM tax_obligations WHERE telegram_id = ?"
+        params: tuple = (telegram_id,)
+        if active_only:
+            query += " AND active = 1"
+        query += " ORDER BY id"
+        rows = self.connection.execute(query, params).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "tax_type": row["tax_type"],
+                "object_name": row["object_name"],
+                "target_amount": string_to_decimal(row["target_amount"]),
+                "opening_amount": string_to_decimal(row["opening_amount"]),
+                "saved_before": string_to_decimal(row["saved_before"]),
+                "months": row["months"],
+                "monthly_amount": string_to_decimal(row["monthly_amount"]),
+                "active": bool(row["active"]),
+            }
+            for row in rows
+        ]
+
+    def deactivate_tax_obligation(self, telegram_id: int, obligation_id: int) -> None:
+        self.connection.execute(
+            "UPDATE tax_obligations SET active = 0 WHERE telegram_id = ? AND id = ?",
+            (telegram_id, obligation_id),
+        )
+        self.connection.commit()
+
+    def update_tax_obligation_saved(
+        self,
+        telegram_id: int,
+        obligation_id: int,
+        saved_amount: Decimal,
+        active: bool,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tax_obligations
+            SET saved_before = ?, active = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (
+                decimal_to_string(saved_amount),
+                int(active),
+                telegram_id,
+                obligation_id,
+            ),
+        )
+        self.connection.commit()
 
     # ========================================================
     # ПОЛНОЕ УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ

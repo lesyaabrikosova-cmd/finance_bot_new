@@ -212,6 +212,11 @@ class UserSettings:
 
     tax_rate: Decimal = Decimal("0")
     taxable_income_types: List[str] = field(default_factory=list)
+    # Плановые налоги, которые входят в Критический минимум.
+    # Ключ — понятное пользователю обязательство/объект,
+    # значение — его среднемесячная сумма.
+    planned_taxes: Dict[str, Decimal] = field(default_factory=dict)
+    track_tax_payments: bool = False
 
     # ----------------------------
     # Подушка
@@ -269,6 +274,10 @@ class UserSettings:
         self.average_income = D(self.average_income)
 
         self.tax_rate = D(self.tax_rate)
+        self.planned_taxes = {
+            name: D(amount)
+            for name, amount in self.planned_taxes.items()
+        }
 
         self.minimum_reserve_months = D(
             self.minimum_reserve_months
@@ -2178,6 +2187,23 @@ class FinancialAllocator:
         # Журнал
         # --------------------------------------------
 
+        planned_tax_details: Dict[str, Decimal] = {}
+        planned_tax_allocation = D(allocations.get("КЖ:Налоги", ZERO))
+        planned_tax_target = sum(self.settings.planned_taxes.values(), ZERO)
+        if planned_tax_allocation > ZERO and planned_tax_target > ZERO:
+            distributed_tax = ZERO
+            tax_items = list(self.settings.planned_taxes.items())
+            for index, (name, target) in enumerate(tax_items):
+                share = (
+                    planned_tax_allocation - distributed_tax
+                    if index == len(tax_items) - 1
+                    else money(
+                        planned_tax_allocation * target / planned_tax_target
+                    )
+                )
+                planned_tax_details[name] = share
+                distributed_tax += share
+
         operation = {
             "type": "income_distribution",
             "date": (
@@ -2191,6 +2217,7 @@ class FinancialAllocator:
             "tax_overridden": (
                 tax_override is not None
             ),
+            "planned_tax_details": planned_tax_details,
             "allocations": dict(allocations),
             "mode_before": mode_before,
             "mode_after": mode_after,

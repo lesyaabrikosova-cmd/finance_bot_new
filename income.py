@@ -26,6 +26,7 @@ from financial_engine import (
 
 from storage import db
 from ui import main_menu_keyboard
+from taxes import apply_planned_tax_allocation
 
 
 router = Router()
@@ -721,23 +722,29 @@ async def edit_income_tax(
         reply_markup=keyboard([
             [
                 (
-                    "По настройкам",
+                    "По настройкам профиля",
                     "taxedit:auto",
                 ),
+            ],
+            [
                 (
-                    "Без налога",
+                    "НДФЛ платит работодатель",
                     "taxedit:none",
                 ),
             ],
             [
                 (
-                    "4%",
+                    "Самозанятость от физлиц — 4%",
                     "taxedit:pct:4",
                 ),
+            ],
+            [
                 (
-                    "6%",
+                    "Самозанятость от юрлиц и ИП — 6%",
                     "taxedit:pct:6",
                 ),
+            ],
+            [
                 (
                     "13%",
                     "taxedit:pct:13",
@@ -801,7 +808,7 @@ async def tax_edit_none(
 
     await state.update_data(
         tax_override="0",
-        tax_override_label="без налога",
+        tax_override_label="НДФЛ платит работодатель — налог не резервируется",
     )
 
     await show_income_confirmation(
@@ -852,7 +859,13 @@ async def tax_edit_fixed_percent(
 
     await state.update_data(
         tax_override=str(tax),
-        tax_override_label=f"вручную {percent}%",
+        tax_override_label=(
+            "самозанятость от физлиц — 4%"
+            if percent == Decimal("4")
+            else "самозанятость от юрлиц и ИП — 6%"
+            if percent == Decimal("6")
+            else f"вручную {percent}%"
+        ),
     )
 
     await show_income_confirmation(
@@ -1148,6 +1161,12 @@ async def confirm_income(
     # ========================================================
     # СОХРАНЕНИЕ
     # ========================================================
+
+    apply_planned_tax_allocation(
+        telegram_id,
+        allocator,
+        result.allocations.get("КЖ:Налоги", Decimal("0")),
+    )
 
     db.save_allocator(
         telegram_id,

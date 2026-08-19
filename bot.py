@@ -63,6 +63,8 @@ from dashboard import (
     router as dashboard_router,
 )
 
+from taxes import router as taxes_router
+
 from ui import (
     keyboard,
     main_menu_keyboard,
@@ -706,6 +708,8 @@ async def main():
     dp.include_router(
         dashboard_router
     )
+
+    dp.include_router(taxes_router)
 
     # Новый расчётный период
     dp.include_router(

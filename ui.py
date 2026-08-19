@@ -32,6 +32,7 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         [("Новый доход", "menu:income")],
         [("Балансы", "menu:analytics"), ("Анализ доходов", "menu:income_analysis")],
         [("Режим", "menu:state"), ("Настройки", "settings:open")],
+        [("Налоги", "menu:taxes")],
     ]
 
     if has_active_debts:
