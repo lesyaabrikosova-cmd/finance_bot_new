@@ -212,6 +212,7 @@ class UserSettings:
 
     tax_rate: Decimal = Decimal("0")
     taxable_income_types: List[str] = field(default_factory=list)
+    income_type_tax_rates: Dict[str, Decimal] = field(default_factory=dict)
     # Плановые налоги, которые входят в Критический минимум.
     # Ключ — понятное пользователю обязательство/объект,
     # значение — его среднемесячная сумма.
@@ -274,6 +275,21 @@ class UserSettings:
         self.average_income = D(self.average_income)
 
         self.tax_rate = D(self.tax_rate)
+        self.income_type_tax_rates = {
+            str(name).strip(): D(rate)
+            for name, rate in self.income_type_tax_rates.items()
+            if str(name).strip()
+        }
+        if not self.income_type_tax_rates and self.taxable_income_types:
+            self.income_type_tax_rates = {
+                name: self.tax_rate
+                for name in self.taxable_income_types
+            }
+        self.taxable_income_types = [
+            name
+            for name, rate in self.income_type_tax_rates.items()
+            if rate > ZERO
+        ]
         self.planned_taxes = {
             name: D(amount)
             for name, amount in self.planned_taxes.items()
@@ -397,6 +413,12 @@ class UserSettings:
             errors.append(
                 "Ставка налога должна быть от 0 до 100%."
             )
+
+        for name, rate in self.income_type_tax_rates.items():
+            if rate < ZERO or rate > HUNDRED:
+                errors.append(
+                    f"Ставка налога для типа дохода «{name}» должна быть от 0 до 100%."
+                )
 
         # Критическое правило:
         # УЖ = КЖ + БР и поэтому УЖ не может быть меньше КЖ.
@@ -778,16 +800,8 @@ class FinancialAllocator:
 
         income = D(income)
 
-        if income_type not in (
-            self.settings.taxable_income_types
-        ):
-            return ZERO
-
-        return (
-            income
-            * self.settings.tax_rate
-            / HUNDRED
-        )
+        rate = self.settings.income_type_tax_rates.get(income_type, ZERO)
+        return income * rate / HUNDRED
 
     # ========================================================
     # БАЛАНС ПОДУШКИ

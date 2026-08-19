@@ -16,10 +16,53 @@ from onboarding import (  # noqa: E402
 )
 from taxes import apply_planned_tax_allocation, make_pie_chart, report_text  # noqa: E402
 from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
-from storage import db  # noqa: E402
+from storage import db, deserialize_income_types, serialize_json  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_income_types_can_have_different_tax_rates(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("1000"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            income_type_tax_rates={
+                "Зарплата": Decimal("0"),
+                "Заказ ФЛ": Decimal("4"),
+                "Заказ ЮЛ": Decimal("6"),
+            },
+        )
+        allocator = FinancialAllocator(settings)
+        self.assertEqual(allocator.calculate_tax(Decimal("10000"), "Зарплата"), Decimal("0"))
+        self.assertEqual(allocator.calculate_tax(Decimal("10000"), "Заказ ФЛ"), Decimal("400"))
+        self.assertEqual(allocator.calculate_tax(Decimal("10000"), "Заказ ЮЛ"), Decimal("600"))
+
+    def test_income_type_rates_survive_storage_round_trip(self):
+        telegram_id = 880002
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("1000"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            income_type_tax_rates={"Заказ ФЛ": Decimal("4"), "Подарок": Decimal("0")},
+        )
+        db.save_allocator(telegram_id, FinancialAllocator(settings))
+        loaded = db.load_allocator(telegram_id)
+        self.assertEqual(
+            loaded.settings.income_type_tax_rates,
+            {"Заказ ФЛ": Decimal("4"), "Подарок": Decimal("0")},
+        )
+
+    def test_legacy_tax_profile_is_migrated_to_per_type_rates(self):
+        taxable, rates = deserialize_income_types(
+            serialize_json(["Заказ ФЛ", "Заказ ЮЛ"]),
+            Decimal("6"),
+        )
+        self.assertEqual(taxable, ["Заказ ФЛ", "Заказ ЮЛ"])
+        self.assertEqual(rates, {"Заказ ФЛ": Decimal("6"), "Заказ ЮЛ": Decimal("6")})
+
     def test_tax_due_date_helpers(self):
         self.assertEqual(parse_tax_due_date("01.12.2026"), date(2026, 12, 1))
         self.assertIsNone(parse_tax_due_date("2026-12-01"))

@@ -145,6 +145,28 @@ def deserialize_json(value):
     )
 
 
+def serialize_income_types(settings: UserSettings) -> str:
+    return serialize_json({
+        "version": 2,
+        "rates": {
+            name: decimal_to_string(rate)
+            for name, rate in settings.income_type_tax_rates.items()
+        },
+    })
+
+
+def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
+    raw = deserialize_json(value)
+    if isinstance(raw, dict) and raw.get("version") == 2:
+        rates = {
+            str(name): string_to_decimal(rate)
+            for name, rate in raw.get("rates", {}).items()
+        }
+        return [name for name, rate in rates.items() if rate > 0], rates
+    legacy_types = [str(name) for name in raw] if isinstance(raw, list) else []
+    return legacy_types, {name: legacy_rate for name in legacy_types}
+
+
 # ============================================================
 # КЛАСС DATABASE
 # ============================================================
@@ -664,9 +686,7 @@ class Database:
                     settings.tax_rate
                 ),
 
-                serialize_json(
-                    settings.taxable_income_types
-                ),
+                serialize_income_types(settings),
 
                 decimal_to_string(
                     settings.minimum_reserve_months
@@ -975,6 +995,12 @@ class Database:
         # Создание UserSettings
         # ----------------------------------------------------
 
+        legacy_tax_rate = string_to_decimal(row["tax_rate"])
+        taxable_income_types, income_type_tax_rates = deserialize_income_types(
+            row["taxable_income_types"],
+            legacy_tax_rate,
+        )
+
         settings = UserSettings(
 
             has_debts=bool(
@@ -999,17 +1025,11 @@ class Database:
                     row["average_income"]
                 ),
 
-            tax_rate=
-                string_to_decimal(
-                    row["tax_rate"]
-                ),
+            tax_rate=legacy_tax_rate,
 
-            taxable_income_types=
-                deserialize_json(
-                    row[
-                        "taxable_income_types"
-                    ]
-                ),
+            taxable_income_types=taxable_income_types,
+
+            income_type_tax_rates=income_type_tax_rates,
 
             minimum_reserve_months=
                 string_to_decimal(

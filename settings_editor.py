@@ -20,6 +20,11 @@ class EditSettingsStates(StatesGroup):
     household_reserve = State()
     average_income = State()
     tax_rate = State()
+    income_type_name = State()
+    income_type_rate = State()
+    income_type_edit_name = State()
+    income_type_edit_rate = State()
+    income_type_confirm = State()
     life_categories = State()
     goal_percentages = State()
     c_split = State()
@@ -96,7 +101,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"🔴 Обязательная жизнь: <b>{rub(s.critical_life)}</b>\n"
         f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
-        f"🏛 Налог: <b>{s.tax_rate}%</b>\n"
+        f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
         f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"
@@ -106,7 +111,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("🛡️ Изменить Подушку", "settings:pillow")],
             [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
             [("💰 Средний доход", "settings:income")],
-            [("🏛 Налог", "settings:tax")],
+            [("Типы доходов", "settings:income_types")],
             [("❤️ Категории КЖ", "settings:life_categories")],
             [("⭐️ Проценты целей", "settings:goals")],
             [("⚖️ Цели / Подушка этапа C", "settings:c_split")],
@@ -409,16 +414,240 @@ async def save_average_income(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Средний доход обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
 
+async def show_income_types_settings(message: Message, telegram_id: int):
+    allocator = db.load_allocator(telegram_id)
+    rates = allocator.settings.income_type_tax_rates
+    lines = [
+        f"• {escape(name)} — " + (f"налог {rate}%" if rate > 0 else "без налога")
+        for name, rate in rates.items()
+    ]
+    rows = [[(name, f"incomesettings:view:{index}")] for index, name in enumerate(rates)]
+    rows.append([("Добавить доход", "incomesettings:add")])
+    rows.append([("Назад", "settings:open")])
+    await message.answer(
+        "<b>ТИПЫ ДОХОДОВ</b>\n\n"
+        + ("\n".join(lines) if lines else "Пока ничего не добавлено."),
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "settings:income_types")
+async def income_types_settings(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await show_income_types_settings(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data == "incomesettings:add")
+async def income_type_add(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(income_type_action="add")
+    await state.set_state(EditSettingsStates.income_type_name)
+    await callback.message.answer(
+        "<b>НОВЫЙ ТИП ДОХОДА</b>\n\n—————\n"
+        "<b>→ Введите короткое название.</b>",
+        reply_markup=keyboard([[("Отмена", "incomesettings:cancel")]]),
+    )
+
+
+@router.message(EditSettingsStates.income_type_name)
+async def income_type_add_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    allocator = db.load_allocator(message.from_user.id)
+    if len(name) < 2 or len(name) > 40:
+        await message.answer("Введите название длиной от 2 до 40 символов.")
+        return
+    if name.casefold() in {item.casefold() for item in allocator.settings.income_type_tax_rates}:
+        await message.answer("Такой тип дохода уже существует.")
+        return
+    await state.update_data(income_type_draft_name=name)
+    await message.answer(
+        f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
+        reply_markup=keyboard([
+            [("Да", "incomesettings:tax:yes"), ("Нет", "incomesettings:tax:no")],
+            [("Отмена", "incomesettings:cancel")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("incomesettings:tax:"))
+async def income_type_add_tax(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.data.endswith(":no"):
+        await state.update_data(income_type_draft_rate="0")
+        await show_income_type_confirmation(callback.message, state)
+        return
+    await state.set_state(EditSettingsStates.income_type_rate)
+    await callback.message.answer("<b>СТАВКА НАЛОГА</b>\n\n—————\n<b>→ Введите число без знака %.</b>")
+
+
+@router.message(EditSettingsStates.income_type_rate)
+async def income_type_add_rate(message: Message, state: FSMContext):
+    rate = parse_decimal(message.text)
+    if rate is None or rate <= 0 or rate > 100:
+        await message.answer("Введите ставку больше 0 и не больше 100.")
+        return
+    await state.update_data(income_type_draft_rate=str(rate))
+    await show_income_type_confirmation(message, state)
+
+
+async def show_income_type_confirmation(message: Message, state: FSMContext):
+    data = await state.get_data()
+    name = data["income_type_draft_name"]
+    rate = Decimal(data["income_type_draft_rate"])
+    fix_callback = {
+        "rename": "incomesettings:rename",
+        "rerate": "incomesettings:rerate",
+    }.get(data.get("income_type_action"), "incomesettings:add")
+    await state.set_state(EditSettingsStates.income_type_confirm)
+    await message.answer(
+        "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>\n\n"
+        f"Название — <b>{escape(name)}</b>\n"
+        + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
+        reply_markup=keyboard([
+            [("Сохранить", "incomesettings:save"), ("Исправить", fix_callback)],
+            [("Отмена", "incomesettings:cancel")],
+        ]),
+    )
+
+
+@router.callback_query(EditSettingsStates.income_type_confirm, F.data == "incomesettings:save")
+async def income_type_save(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    allocator = db.load_allocator(callback.from_user.id)
+    rates = allocator.settings.income_type_tax_rates
+    action = data.get("income_type_action", "add")
+    name = data["income_type_draft_name"]
+    rate = Decimal(data["income_type_draft_rate"])
+    if action == "rename":
+        original = data["income_type_edit_original"]
+        rates = {name if item == original else item: item_rate for item, item_rate in rates.items()}
+        allocator.settings.income_type_tax_rates = rates
+    else:
+        rates[name] = rate
+    allocator.settings.taxable_income_types = [
+        item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
+    ]
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_income_types_settings(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("incomesettings:view:"))
+async def income_type_view(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    allocator = db.load_allocator(callback.from_user.id)
+    names = list(allocator.settings.income_type_tax_rates)
+    if not 0 <= index < len(names):
+        await show_income_types_settings(callback.message, callback.from_user.id)
+        return
+    name = names[index]
+    rate = allocator.settings.income_type_tax_rates[name]
+    await state.update_data(income_type_edit_original=name)
+    await callback.message.answer(
+        f"<b>{escape(name.upper())}</b>\n\n" + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Без налога"),
+        reply_markup=keyboard([
+            [("Изменить название", "incomesettings:rename")],
+            [("Изменить налог", "incomesettings:rerate")],
+            [("Удалить", "incomesettings:delete")],
+            [("Назад", "settings:income_types")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "incomesettings:rename")
+async def income_type_rename_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(EditSettingsStates.income_type_edit_name)
+    await callback.message.answer("Введите новое название.", reply_markup=keyboard([[("Отмена", "incomesettings:cancel")]]))
+
+
+@router.message(EditSettingsStates.income_type_edit_name)
+async def income_type_rename_save(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    data = await state.get_data()
+    allocator = db.load_allocator(message.from_user.id)
+    original = data["income_type_edit_original"]
+    if len(name) < 2 or len(name) > 40:
+        await message.answer("Введите название длиной от 2 до 40 символов.")
+        return
+    if name.casefold() != original.casefold() and name.casefold() in {item.casefold() for item in allocator.settings.income_type_tax_rates}:
+        await message.answer("Такой тип дохода уже существует.")
+        return
+    await state.update_data(
+        income_type_action="rename",
+        income_type_draft_name=name,
+        income_type_draft_rate=str(allocator.settings.income_type_tax_rates[original]),
+    )
+    await show_income_type_confirmation(message, state)
+
+
+@router.callback_query(F.data == "incomesettings:rerate")
+async def income_type_rate_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(EditSettingsStates.income_type_edit_rate)
+    await callback.message.answer(
+        "Введите новую ставку от 0 до 100. Ноль означает, что налог автоматически не резервируется.",
+        reply_markup=keyboard([[("Отмена", "incomesettings:cancel")]]),
+    )
+
+
+@router.message(EditSettingsStates.income_type_edit_rate)
+async def income_type_rate_save(message: Message, state: FSMContext):
+    rate = parse_decimal(message.text)
+    if rate is None or rate < 0 or rate > 100:
+        await message.answer("Введите ставку от 0 до 100.")
+        return
+    data = await state.get_data()
+    allocator = db.load_allocator(message.from_user.id)
+    name = data["income_type_edit_original"]
+    await state.update_data(
+        income_type_action="rerate",
+        income_type_draft_name=name,
+        income_type_draft_rate=str(rate),
+    )
+    await show_income_type_confirmation(message, state)
+
+
+@router.callback_query(F.data == "incomesettings:delete")
+async def income_type_delete(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    name = data["income_type_edit_original"]
+    await callback.message.answer(
+        f"Удалить тип дохода <b>{escape(name)}</b>? История поступлений сохранится.",
+        reply_markup=keyboard([
+            [("Удалить", "incomesettings:delete:confirm"), ("Отмена", "incomesettings:cancel")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "incomesettings:delete:confirm")
+async def income_type_delete_confirm(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    allocator = db.load_allocator(callback.from_user.id)
+    allocator.settings.income_type_tax_rates.pop(data["income_type_edit_original"], None)
+    allocator.settings.taxable_income_types = [name for name, rate in allocator.settings.income_type_tax_rates.items() if rate > 0]
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_income_types_settings(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data == "incomesettings:cancel")
+async def income_type_cancel(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await show_income_types_settings(callback.message, callback.from_user.id)
+
+
 @router.callback_query(F.data == "settings:tax")
 async def edit_tax(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    allocator = db.load_allocator(callback.from_user.id)
-    await state.set_state(EditSettingsStates.tax_rate)
-    await callback.message.answer(
-        "🏛 <b>СТАВКА НАЛОГА</b>\n\n"
-        f"Сейчас: <b>{allocator.settings.tax_rate}%</b>\n\n"
-        "Введите новую ставку от 0 до 100."
-    )
+    await state.clear()
+    await show_income_types_settings(callback.message, callback.from_user.id)
 
 @router.message(EditSettingsStates.tax_rate)
 async def save_tax(message: Message, state: FSMContext):

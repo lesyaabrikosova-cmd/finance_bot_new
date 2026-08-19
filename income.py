@@ -65,6 +65,9 @@ class IncomeStates(StatesGroup):
     amount = State()
     income_type = State()
     custom_income_type = State()
+    custom_income_tax_choice = State()
+    custom_income_tax_rate = State()
+    custom_income_confirm = State()
     income_date = State()
     confirmation = State()
 
@@ -288,30 +291,7 @@ async def income_amount(
     # Собираем удобный список типов.
     # --------------------------------------------------------
 
-    types = []
-
-    for item in (
-        settings.taxable_income_types
-    ):
-
-        if item not in types:
-            types.append(item)
-
-    common = [
-        "Зарплата",
-        "Халтура",
-        "Частник",
-        "Подарок",
-        "Авито",
-        "Подработка",
-        "Премия",
-        "Фриланс",
-    ]
-
-    for item in common:
-
-        if item not in types:
-            types.append(item)
+    types = list(settings.income_type_tax_rates)
 
     # Telegram callback_data ограничен,
     # поэтому используем номер типа.
@@ -321,49 +301,33 @@ async def income_amount(
 
     rows = []
 
-    for index, item in enumerate(
-        types
-    ):
-
+    for index in range(0, len(types), 2):
         rows.append([
-            (
-                item,
-                f"incometype:{index}",
-            )
+            (types[item_index], f"incometype:{item_index}")
+            for item_index in range(index, min(index + 2, len(types)))
         ])
 
     rows.append([
         (
-            "✏️ Другой тип",
+            "＋ Новый тип",
             "incometype:custom",
         )
     ])
 
     tax_note = ""
 
-    if settings.tax_rate > 0:
-
-        taxable = (
-            ", ".join(
-                settings.taxable_income_types
-            )
-            if settings.taxable_income_types
-            else "не указаны"
-        )
-
-        tax_note = (
-            f"\n\n🏛 Ваша ставка налога: "
-            f"<b>{settings.tax_rate}%</b>\n"
-            f"Облагаемые типы: "
-            f"<b>{escape(taxable)}</b>"
-        )
+    taxable = [
+        f"{escape(name)} — {rate}%"
+        for name, rate in settings.income_type_tax_rates.items()
+        if rate > 0
+    ]
+    if taxable:
+        tax_note = "\n\n<b>Налог:</b>\n" + "\n".join(f"• {item}" for item in taxable)
 
     await message.answer(
         "🏷 <b>Что это за доход?</b>\n\n"
 
-        "Тип дохода нужен, в частности, чтобы бот "
-        "понимал, следует ли резервировать с этого "
-        "поступления налог."
+        "Выберите сохранённый тип или добавьте новый."
         + tax_note,
         reply_markup=keyboard(
             rows
@@ -458,14 +422,92 @@ async def custom_income_type(
 
         return
 
+    allocator = db.load_allocator(message.from_user.id)
+    existing = allocator.settings.income_type_tax_rates if allocator is not None else {}
+    if value.casefold() in {name.casefold() for name in existing}:
+        await message.answer("Такой тип дохода уже существует. Выберите его в списке или введите другое название.")
+        return
+
     await state.update_data(
         income_type=value
     )
 
-    await ask_date(
-        message,
-        state,
+    await state.set_state(IncomeStates.custom_income_tax_choice)
+    await message.answer(
+        f"<b>{escape(value.upper())}</b>\n\n"
+        "Нужно самостоятельно откладывать налог с этого дохода?",
+        reply_markup=keyboard([
+            [("Да", "newincome:tax:yes"), ("Нет", "newincome:tax:no")],
+            [("Отмена", "income:cancel")],
+        ]),
     )
+
+
+@router.callback_query(IncomeStates.custom_income_tax_choice, F.data.startswith("newincome:tax:"))
+async def custom_income_tax_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.data.endswith(":yes"):
+        await state.set_state(IncomeStates.custom_income_tax_rate)
+        await callback.message.answer(
+            "<b>СТАВКА НАЛОГА</b>\n\n—————\n"
+            "<b>→ Введите число без знака %.</b>\n"
+            "<b>Например:</b> <code>4</code>"
+        )
+        return
+    await save_custom_income_type(callback.message, state, callback.from_user.id, Decimal("0"))
+
+
+@router.message(IncomeStates.custom_income_tax_rate)
+async def custom_income_tax_rate(message: Message, state: FSMContext):
+    rate = parse_decimal(message.text)
+    if rate is None or rate <= 0 or rate > 100:
+        await message.answer("Введите ставку больше 0 и не больше 100.")
+        return
+    await save_custom_income_type(message, state, message.from_user.id, rate)
+
+
+async def save_custom_income_type(message: Message, state: FSMContext, telegram_id: int, rate: Decimal):
+    data = await state.get_data()
+    name = data["income_type"]
+    await state.update_data(custom_income_type_rate=str(rate))
+    await state.set_state(IncomeStates.custom_income_confirm)
+    await message.answer(
+        "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>\n\n"
+        f"Название — <b>{escape(name)}</b>\n"
+        + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
+        reply_markup=keyboard([
+            [("Сохранить", "newincome:save"), ("Исправить", "newincome:fix")],
+            [("Отмена", "income:cancel")],
+        ]),
+    )
+
+
+@router.callback_query(IncomeStates.custom_income_confirm, F.data == "newincome:fix")
+async def fix_custom_income_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(IncomeStates.custom_income_type)
+    await callback.message.answer("Введите исправленное название типа дохода.")
+
+
+@router.callback_query(IncomeStates.custom_income_confirm, F.data == "newincome:save")
+async def commit_custom_income_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    name = data["income_type"]
+    rate = Decimal(data["custom_income_type_rate"])
+    telegram_id = callback.from_user.id
+    allocator = db.load_allocator(telegram_id)
+    if allocator is not None:
+        allocator.settings.income_type_tax_rates[name] = rate
+        allocator.settings.taxable_income_types = [
+            item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
+        ]
+        db.save_allocator(telegram_id, allocator)
+    await callback.message.answer(
+        f"Тип дохода <b>{escape(name)}</b> сохранён"
+        + (f" со ставкой <b>{rate}%</b>." if rate > 0 else " без налога.")
+    )
+    await ask_date(callback.message, state)
 
 
 # ============================================================
@@ -1030,7 +1072,6 @@ async def tax_edit_back(
 
 
 @router.callback_query(
-    IncomeStates.confirmation,
     F.data == "income:cancel"
 )
 async def cancel_income(

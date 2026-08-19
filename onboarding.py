@@ -93,6 +93,12 @@ class SetupStates(StatesGroup):
     # Налог
     tax_rate = State()
     taxable_types = State()
+    income_types_menu = State()
+    income_type_name = State()
+    income_type_tax_choice = State()
+    income_type_rate = State()
+    income_type_confirm = State()
+    income_type_edit_name = State()
 
     # Подушка
     minimum_reserve_months = State()
@@ -916,77 +922,225 @@ async def save_average_income(message: Message, state: FSMContext):
 
 
 async def ask_tax(message: Message, state: FSMContext):
+    await state.update_data(income_type_tax_rates={})
+    await show_income_types_setup(message, state)
+
+
+async def show_income_types_setup(message: Message, state: FSMContext):
     data = await state.get_data()
-    await state.set_state(SetupStates.tax_rate)
+    rates = data.get("income_type_tax_rates", {})
+    await state.set_state(SetupStates.income_types_menu)
+    lines = [
+        f"• {escape(name)} — " + (f"налог {rate}%" if Decimal(str(rate)) > 0 else "без налога")
+        for name, rate in rates.items()
+    ]
+    rows = [[(name, f"profileincome:view:{index}")] for index, name in enumerate(rates)]
+    rows.append([("＋ Добавить доход", "profileincome:add")])
+    if rates:
+        rows.append([("✔️ Готово", "profileincome:done")])
     await message.answer(
         f"{setup_progress(data, 4)}\n\n"
-        "<b>ПЛАТИТЕ ЛИ ВЫ САМОСТОЯТЕЛЬНО ПОДОХОДНЫЙ НАЛОГ?</b>\n\n"
-        "С зарплаты налог обычно удерживает работодатель. Но:\n"
-        "- подработки;\n"
-        "- частные заказы;\n"
-        "- самозанятость;\n"
-        "- ИП;\n"
-        "- другие поступления\n"
-        "могут требовать отдельного резерва.\n\n"
-        "Налог конкретного поступления потом можно будет изменить перед распределением.",
+        "<b>ТИПЫ ДОХОДОВ</b>\n\n"
+        "Добавьте поступления, которые получаете или планируете учитывать. Они станут кнопками "
+        "при добавлении нового дохода. Для каждого типа можно отдельно указать налог.\n\n"
+        + ("\n".join(lines) if lines else "Пока ничего не добавлено."),
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "profileincome:add")
+async def profile_income_add(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.income_type_name)
+    await callback.message.answer(
+        "<b>НОВЫЙ ТИП ДОХОДА</b>\n\n—————\n"
+        "<b>→ Введите короткое название.</b>\n"
+        "<b>Например:</b> Зарплата, Заказ ФЛ, Консультация",
+        reply_markup=keyboard([[("Отмена", "profileincome:back")]]),
+    )
+
+
+@router.message(SetupStates.income_type_name)
+async def profile_income_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    data = await state.get_data()
+    rates = data.get("income_type_tax_rates", {})
+    if len(name) < 2 or len(name) > 40:
+        await message.answer("Введите название длиной от 2 до 40 символов.")
+        return
+    if name.casefold() in {item.casefold() for item in rates}:
+        await message.answer("Такой тип дохода уже существует. Введите другое название.")
+        return
+    await state.update_data(pending_income_type_name=name)
+    await state.set_state(SetupStates.income_type_tax_choice)
+    await message.answer(
+        f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
         reply_markup=keyboard([
-            [("Да", "taxsetup:yes"), ("Нет", "taxsetup:no")],
+            [("Да", "profileincome:tax:yes"), ("Нет", "profileincome:tax:no")],
+            [("Отмена", "profileincome:back")],
         ]),
     )
 
 
-@router.callback_query(SetupStates.tax_rate, F.data.startswith("taxsetup:"))
-async def tax_setup_choice(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(SetupStates.income_type_tax_choice, F.data.startswith("profileincome:tax:"))
+async def profile_income_tax_choice(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await remove_setup_button(callback)
-
-    if callback.data == "taxsetup:no":
-        await state.update_data(tax_rate="0", taxable_income_types=[])
-        await start_critical_minimum(callback.message, state)
+    if callback.data.endswith(":no"):
+        await save_profile_income_type(callback.message, state, Decimal("0"))
         return
-
-    data = await state.get_data()
+    await state.set_state(SetupStates.income_type_rate)
     await callback.message.answer(
-        f"{setup_progress(data, 4)}\n\n"
-        "<b>КАКУЮ СТАВКУ ИСПОЛЬЗОВАТЬ ПО УМОЛЧАНИЮ?</b>\n\n"
-        "—————\n"
+        "<b>СТАВКА НАЛОГА</b>\n\n—————\n"
         "<b>→ Введите число без знака %.</b>\n"
-        "<b>Например:</b> <code>6</code>."
+        "<b>Например:</b> <code>4</code>"
     )
 
 
-@router.message(SetupStates.tax_rate)
-async def save_tax_rate(message: Message, state: FSMContext):
+@router.message(SetupStates.income_type_rate)
+async def profile_income_rate(message: Message, state: FSMContext):
     value = parse_decimal(message.text)
-    if value is None or value < 0 or value > 100:
-        await message.answer("Введите ставку от 0 до 100. Например: <code>6</code>")
+    if value is None or value <= 0 or value > 100:
+        await message.answer("Введите ставку больше 0 и не больше 100.")
         return
+    await save_profile_income_type(message, state, value)
 
-    await state.update_data(tax_rate=str(value))
-    if value == 0:
-        await state.update_data(taxable_income_types=[])
-        await start_critical_minimum(message, state)
-        return
 
-    await state.set_state(SetupStates.taxable_types)
+async def save_profile_income_type(message: Message, state: FSMContext, rate: Decimal):
     data = await state.get_data()
+    name = data["pending_income_type_name"]
+    await state.update_data(pending_income_type_rate=str(rate))
+    await state.set_state(SetupStates.income_type_confirm)
     await message.answer(
-        f"{setup_progress(data, 4)}\n\n"
-        "<b>С КАКИХ ПОСТУПЛЕНИЙ ОБЫЧНО НУЖНО РЕЗЕРВИРОВАТЬ НАЛОГ?</b>\n\n"
-        "Введите названия через запятую. Например:\n"
-        "<code>Халтура, Частник, Фриланс</code>\n\n"
-        "Это правило по умолчанию: налог отдельного поступления можно будет изменить вручную."
+        "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>\n\n"
+        f"Название — <b>{escape(name)}</b>\n"
+        + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
+        reply_markup=keyboard([
+            [("Сохранить", "profileincome:save"), ("Исправить", "profileincome:add")],
+            [("Отмена", "profileincome:back")],
+        ]),
     )
 
 
-@router.message(SetupStates.taxable_types)
-async def save_taxable_types(message: Message, state: FSMContext):
-    types = [item.strip() for item in message.text.split(",") if item.strip()]
-    if not types:
-        await message.answer("Укажите хотя бы один тип дохода.")
+@router.callback_query(SetupStates.income_type_confirm, F.data == "profileincome:save")
+async def profile_income_save(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    rates = dict(data.get("income_type_tax_rates", {}))
+    original = data.get("pending_income_type_original")
+    if original:
+        rates.pop(original, None)
+    rates[data["pending_income_type_name"]] = data["pending_income_type_rate"]
+    await state.update_data(
+        income_type_tax_rates=rates,
+        pending_income_type_name=None,
+        pending_income_type_rate=None,
+        pending_income_type_original=None,
+    )
+    await show_income_types_setup(callback.message, state)
+
+
+@router.callback_query(SetupStates.income_types_menu, F.data.startswith("profileincome:view:"))
+async def profile_income_view(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    rates = (await state.get_data()).get("income_type_tax_rates", {})
+    names = list(rates)
+    if not 0 <= index < len(names):
+        await show_income_types_setup(callback.message, state)
         return
-    await state.update_data(taxable_income_types=types)
-    await start_critical_minimum(message, state)
+    name = names[index]
+    await callback.message.answer(
+        f"<b>{escape(name.upper())}</b>\n\n"
+        + (f"Налог — <b>{rates[name]}%</b>" if Decimal(str(rates[name])) > 0 else "Без налога"),
+        reply_markup=keyboard([
+            [("Изменить название", f"profileincome:editname:{index}")],
+            [("Изменить налог", f"profileincome:edittax:{index}")],
+            [("Удалить", f"profileincome:delete:{index}")],
+            [("Назад", "profileincome:back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("profileincome:editname:"))
+async def profile_income_edit_name_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    rates = (await state.get_data()).get("income_type_tax_rates", {})
+    names = list(rates)
+    if not 0 <= index < len(names):
+        await show_income_types_setup(callback.message, state)
+        return
+    await state.update_data(pending_income_type_original=names[index])
+    await state.set_state(SetupStates.income_type_edit_name)
+    await callback.message.answer("Введите исправленное название.", reply_markup=keyboard([[("Отмена", "profileincome:back")]]))
+
+
+@router.message(SetupStates.income_type_edit_name)
+async def profile_income_edit_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    data = await state.get_data()
+    rates = data.get("income_type_tax_rates", {})
+    original = data["pending_income_type_original"]
+    if len(name) < 2 or len(name) > 40:
+        await message.answer("Введите название длиной от 2 до 40 символов.")
+        return
+    if name.casefold() != original.casefold() and name.casefold() in {item.casefold() for item in rates}:
+        await message.answer("Такой тип дохода уже существует.")
+        return
+    await state.update_data(
+        pending_income_type_name=name,
+        pending_income_type_rate=str(rates[original]),
+    )
+    await save_profile_income_type(message, state, Decimal(str(rates[original])))
+
+
+@router.callback_query(F.data.startswith("profileincome:edittax:"))
+async def profile_income_edit_tax_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    rates = (await state.get_data()).get("income_type_tax_rates", {})
+    names = list(rates)
+    if not 0 <= index < len(names):
+        await show_income_types_setup(callback.message, state)
+        return
+    name = names[index]
+    await state.update_data(pending_income_type_original=name, pending_income_type_name=name)
+    await state.set_state(SetupStates.income_type_tax_choice)
+    await callback.message.answer(
+        f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
+        reply_markup=keyboard([
+            [("Да", "profileincome:tax:yes"), ("Нет", "profileincome:tax:no")],
+            [("Отмена", "profileincome:back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("profileincome:delete:"))
+async def profile_income_delete(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Удалено")
+    index = int(callback.data.rsplit(":", 1)[1])
+    rates = dict((await state.get_data()).get("income_type_tax_rates", {}))
+    names = list(rates)
+    if 0 <= index < len(names):
+        rates.pop(names[index])
+        await state.update_data(income_type_tax_rates=rates)
+    await show_income_types_setup(callback.message, state)
+
+
+@router.callback_query(F.data == "profileincome:back")
+async def profile_income_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_income_types_setup(callback.message, state)
+
+
+@router.callback_query(SetupStates.income_types_menu, F.data == "profileincome:done")
+async def profile_income_done(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    rates = (await state.get_data()).get("income_type_tax_rates", {})
+    taxable = [name for name, rate in rates.items() if Decimal(str(rate)) > 0]
+    default_rate = next((Decimal(str(rate)) for rate in rates.values() if Decimal(str(rate)) > 0), Decimal("0"))
+    await state.update_data(tax_rate=str(default_rate), taxable_income_types=taxable)
+    await start_critical_minimum(callback.message, state)
 
 
 async def start_critical_minimum(message: Message, state: FSMContext):
@@ -3177,6 +3331,11 @@ def build_settings_from_data(
             [],
         ),
 
+        income_type_tax_rates={
+            name: Decimal(str(rate))
+            for name, rate in data.get("income_type_tax_rates", {}).items()
+        },
+
         planned_taxes=planned_taxes,
 
         minimum_reserve_months=Decimal(
@@ -3347,14 +3506,13 @@ async def show_confirmation(
     }[mode]
     mode_progress = "🏆" * mode + "➖" * (6 - mode)
 
-    tax_types = (
-        ", ".join(settings.taxable_income_types)
-        if settings.taxable_income_types
-        else "нет"
-    )
+    tax_types = ", ".join(
+        f"{name} — {rate}%" if rate > 0 else f"{name} — без налога"
+        for name, rate in settings.income_type_tax_rates.items()
+    ) or "нет"
 
     accounts: list[tuple[str, str]] = []
-    if settings.tax_rate > 0 or "Налоги" in settings.life_categories:
+    if any(rate > 0 for rate in settings.income_type_tax_rates.values()) or "Налоги" in settings.life_categories:
         accounts.append(("🏛️", "Налоги"))
 
     accounts.append(("🛡️", "Подушка"))
@@ -3387,7 +3545,7 @@ async def show_confirmation(
         f"Бытовой резерв — <b>{rub(settings.household_reserve)}</b>\n"
         f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>\n"
         f"Баланс жизни сейчас — <b>{rub(state_object.life_balance)}</b>\n"
-        f"Типы дохода для налога — <b>{escape(tax_types)}</b>\n\n"
+        f"Типы доходов — <b>{escape(tax_types)}</b>\n\n"
         f"<b>ОТКРОЙТЕ {len(accounts)} НАКОПИТЕЛЬНЫХ СЧЕТОВ В СВОЁМ БАНКЕ:</b>\n\n"
         f"{accounts_text}\n\n"
         "<b>СТАРТОВЫЙ РЕЖИМ:</b>\n\n"
