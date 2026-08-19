@@ -30,11 +30,45 @@ MODE_IMAGE_PATHS = {
 }
 
 
-async def send_current_mode_image(message: Message, mode: int) -> None:
-    image_path = MODE_IMAGE_PATHS.get(mode)
+async def send_text_with_image(
+    message: Message,
+    text: str,
+    image_path: Path | None,
+    reply_markup=None,
+) -> None:
     if image_path is None or not image_path.exists():
+        await message.answer(
+            text,
+            reply_markup=reply_markup,
+        )
         return
-    await message.answer_photo(photo=FSInputFile(image_path))
+
+    caption_lines = []
+    remaining_lines = []
+
+    for line in text.split("\n"):
+        candidate = "\n".join([*caption_lines, line])
+
+        if not remaining_lines and len(candidate) <= 1024:
+            caption_lines.append(line)
+        else:
+            remaining_lines.append(line)
+
+    await message.answer_photo(
+        photo=FSInputFile(image_path),
+        caption="\n".join(caption_lines) or None,
+        reply_markup=(
+            reply_markup
+            if not remaining_lines
+            else None
+        ),
+    )
+
+    if remaining_lines:
+        await message.answer(
+            "\n".join(remaining_lines),
+            reply_markup=reply_markup,
+        )
 
 
 # ============================================================
@@ -428,8 +462,6 @@ async def send_mode(
 
     mode = allocator.active_mode()
 
-    await send_current_mode_image(message, mode)
-
     mapping = (
         FREELANCER_MODES
         if settings.employment_type == "Фрилансер"
@@ -466,7 +498,7 @@ async def send_mode(
             "\n\n<b>Максимальный режим достигнут.</b>"
         )
 
-    await message.answer(
+    text = (
         "<b>ТЕКУЩИЙ РЕЖИМ</b>\n\n"
         f"Профиль: "
         f"<b>{escape(settings.employment_type)}, "
@@ -476,7 +508,13 @@ async def send_mode(
         f"Название: "
         f"<b>{escape(MODE_TITLES[mode])}</b>\n\n"
         f"{escape(description)}"
-        f"{next_text}",
+        f"{next_text}"
+    )
+
+    await send_text_with_image(
+        message,
+        text,
+        MODE_IMAGE_PATHS.get(mode),
         reply_markup=main_menu_keyboard(telegram_id),
     )
 
@@ -949,11 +987,6 @@ async def send_income_analysis(
         )
         return
 
-    if INCOME_ANALYSIS_IMAGE_PATH.exists():
-        await message.answer_photo(
-            photo=FSInputFile(INCOME_ANALYSIS_IMAGE_PATH),
-        )
-
     # Берём операции прямо из SQLite.
     # Они уже отсортированы:
     # сначала самые новые.
@@ -1028,9 +1061,11 @@ async def send_income_analysis(
 
     if total_income <= 0:
 
-        await message.answer(
+        await send_text_with_image(
+            message,
             "В текущем расчётном периоде "
             "пока нет поступлений.",
+            INCOME_ANALYSIS_IMAGE_PATH,
             reply_markup=main_menu_keyboard(telegram_id),
         )
 
@@ -1060,8 +1095,10 @@ async def send_income_analysis(
             f"({pct(amount, total_income)})"
         )
 
-    await message.answer(
+    await send_text_with_image(
+        message,
         "\n".join(lines),
+        INCOME_ANALYSIS_IMAGE_PATH,
         reply_markup=main_menu_keyboard(telegram_id),
     )
 

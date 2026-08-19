@@ -32,6 +32,7 @@ router = Router()
 
 
 NEW_INCOME_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "menu" / "new_income.png"
+INCOME_DISTRIBUTION_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "menu" / "income_distribution.png"
 
 
 MODE_IMAGE_PATHS = {2: Path(__file__).resolve().parent / "assets" / "modes" / "mode_2.png", 3: Path(__file__).resolve().parent / "assets" / "modes" / "mode_3.png", 4: Path(__file__).resolve().parent / "assets" / "modes" / "mode_4.png", 5: Path(__file__).resolve().parent / "assets" / "modes" / "mode_5.png", 6: Path(__file__).resolve().parent / "assets" / "modes" / "mode_6.png"}
@@ -220,18 +221,21 @@ async def start_income(
         IncomeStates.amount
     )
 
-    if NEW_INCOME_IMAGE_PATH.exists():
-        await message.answer_photo(
-            photo=FSInputFile(NEW_INCOME_IMAGE_PATH),
-        )
-
-    await message.answer(
+    prompt = (
         "<b>Введите полную сумму поступления</b>\n\n"
         "Примеры:\n"
         "<code>50000</code>\n"
         "<code>125 000</code>\n"
         "<code>47850,50</code>"
     )
+
+    if NEW_INCOME_IMAGE_PATH.exists():
+        await message.answer_photo(
+            photo=FSInputFile(NEW_INCOME_IMAGE_PATH),
+            caption=prompt,
+        )
+    else:
+        await message.answer(prompt)
 
 
 # ============================================================
@@ -1465,11 +1469,26 @@ async def send_distribution_report(
         f"{money_plain(state.life_balance)}",
         f"🛡️ <b>Подушка</b> — "
         f"{money_plain(state.pillow_balance)}",
-        f"🆘 <b>До Критического минимума осталось</b> — "
+        f"🆘 <b>До Критического минимума</b> — "
         f"{money_plain(life_remaining)}",
-        f"✳️ <b>До Устойчивой жизни осталось</b> — "
+        f"✳️ <b>До Устойчивой жизни</b> — "
         f"{money_plain(sustainable_remaining)}",
     ])
+
+    balance_index = lines.index(
+        "<b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>"
+    )
+    main_sections = [
+        "\n".join(lines[:4]).strip(),
+        "\n".join(lines[4:9]).strip(),
+        "\n".join(lines[9:balance_index]).strip(),
+        "\n".join(lines[balance_index:]).strip(),
+    ]
+    main_sections = [
+        section
+        for section in main_sections
+        if section
+    ]
 
     # ========================================================
     # РЕЖИМ РАЗРАБОТЧИКА
@@ -1479,9 +1498,7 @@ async def send_distribution_report(
 
         check = result.checks
 
-        lines.extend([
-            "",
-            "",
+        developer_lines = [
             "<b>РАСЧЁТ — РЕЖИМ РАЗРАБОТЧИКА</b>",
             "",
             f"Контрольная сумма: "
@@ -1494,28 +1511,80 @@ async def send_distribution_report(
             f"{'сходится' if check['ok'] else 'НЕ сходится'}",
             "",
             "<b>ШАГИ РАСЧЁТА</b>",
-        ])
+        ]
 
         for number, step in enumerate(
             result.steps,
             start=1,
         ):
 
-            lines.append(
+            developer_lines.append(
                 f"{number}. "
                 f"{escape(str(step))}"
             )
 
-    await send_long_message(
+    menu = main_menu_keyboard(message.from_user.id)
+
+    await send_photo_with_sections(
         message,
-        "\n".join(lines),
-        reply_markup=main_menu_keyboard(message.from_user.id),
+        INCOME_DISTRIBUTION_IMAGE_PATH,
+        main_sections,
+        reply_markup=(None if developer_mode else menu),
     )
+
+    if developer_mode:
+        await send_long_message(
+            message,
+            "\n".join(developer_lines),
+            reply_markup=menu,
+        )
 
 
 # ============================================================
 # ДЛИННЫЕ СООБЩЕНИЯ
 # ============================================================
+
+
+async def send_photo_with_sections(
+    message: Message,
+    image_path: Path,
+    sections: list[str],
+    reply_markup=None,
+):
+    caption_sections = []
+    remaining_sections = []
+
+    for section in sections:
+        candidate = "\n\n".join(
+            [*caption_sections, section]
+        )
+
+        if not remaining_sections and len(candidate) <= 1024:
+            caption_sections.append(section)
+        else:
+            remaining_sections.append(section)
+
+    caption = "\n\n".join(caption_sections)
+
+    if image_path.exists():
+        await message.answer_photo(
+            photo=FSInputFile(image_path),
+            caption=caption or None,
+            reply_markup=(
+                reply_markup
+                if not remaining_sections
+                else None
+            ),
+        )
+    elif caption:
+        await message.answer(caption)
+
+    if remaining_sections:
+        await send_long_message(
+            message,
+            "\n\n".join(remaining_sections),
+            reply_markup=reply_markup,
+        )
 
 
 async def send_long_message(
