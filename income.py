@@ -27,6 +27,7 @@ from financial_engine import (
 from storage import db
 from ui import main_menu_keyboard
 from taxes import apply_planned_tax_allocation
+from planned_payments import apply_planned_payment_allocation
 
 
 router = Router()
@@ -1208,6 +1209,16 @@ async def confirm_income(
         allocator,
         result.allocations.get("КЖ:Налоги", Decimal("0")),
     )
+    for envelope_name in {
+        item["envelope_name"]
+        for item in db.load_planned_payments(telegram_id)
+    }:
+        apply_planned_payment_allocation(
+            telegram_id,
+            allocator,
+            envelope_name,
+            result.allocations.get(f"КЖ:{envelope_name}", Decimal("0")),
+        )
 
     db.save_allocator(
         telegram_id,

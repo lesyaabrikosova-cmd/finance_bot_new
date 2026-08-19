@@ -9,17 +9,74 @@ _TEST_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 
 from onboarding import (  # noqa: E402
+    add_calendar_months,
     default_km_storage,
     months_until_due_date,
     parse_tax_due_date,
     planned_taxes_from_storage,
 )
+from planned_payments import apply_planned_payment_allocation  # noqa: E402
 from taxes import apply_planned_tax_allocation, make_pie_chart, report_text  # noqa: E402
 from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
 from storage import db, deserialize_income_types, serialize_json  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_calendar_months_preserve_valid_day(self):
+        self.assertEqual(add_calendar_months(date(2026, 8, 31), 1), date(2026, 9, 30))
+        self.assertEqual(add_calendar_months(date(2026, 10, 31), 5), date(2027, 3, 31))
+
+    def test_completed_planned_payment_stops_monthly_target(self):
+        telegram_id = 880003
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("2000"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("2000"),
+            life_categories={"Образование": Decimal("1000")},
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        db.add_planned_payment(
+            telegram_id,
+            "Образование",
+            "Образование",
+            "Первый семестр",
+            Decimal("1000"),
+            Decimal("1000"),
+            "2026-10-01",
+        )
+        apply_planned_payment_allocation(telegram_id, allocator, "Образование", Decimal("1000"))
+        self.assertNotIn("Образование", allocator.settings.life_categories)
+        self.assertEqual(allocator.settings.critical_life, Decimal("1000"))
+        self.assertEqual(db.load_planned_payments(telegram_id), [])
+
+    def test_planned_payment_uses_only_its_share_of_shared_envelope(self):
+        telegram_id = 880004
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("2500"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("2500"),
+            life_categories={"Образование": Decimal("1500")},
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        db.add_planned_payment(
+            telegram_id,
+            "Образование",
+            "Образование",
+            "Семестр",
+            Decimal("2000"),
+            Decimal("1000"),
+            "2026-10-01",
+        )
+        apply_planned_payment_allocation(telegram_id, allocator, "Образование", Decimal("1500"))
+        payment = db.load_planned_payments(telegram_id)[0]
+        self.assertEqual(payment["saved_amount"], Decimal("1000"))
+
     def test_income_types_can_have_different_tax_rates(self):
         settings = UserSettings(
             has_debts=False,
@@ -82,6 +139,23 @@ class TaxFeatureTests(unittest.TestCase):
         storage = default_km_storage(item)
         self.assertEqual(storage["storage"], "separate")
         self.assertEqual(storage["envelope_name"], "Налоги")
+
+    def test_large_education_payment_keeps_deadline_metadata(self):
+        item = {
+            "category": "education",
+            "category_label": "Образование",
+            "subcategory": "large",
+            "name": "Обучение — платёж 1",
+            "amount": "30000",
+            "months": "5",
+            "monthly": "6000",
+            "due_date": "2027-03-01",
+            "one_time": True,
+        }
+        storage = default_km_storage(item)
+        self.assertEqual(storage["envelope_name"], "Образование")
+        self.assertEqual(storage["due_date"], "2027-03-01")
+        self.assertEqual(storage["target_amount"], "30000")
 
     def test_long_subscription_gets_separate_envelope(self):
         item = {

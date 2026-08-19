@@ -66,6 +66,10 @@ class SetupStates(StatesGroup):
     km_item_amount = State()
     km_item_period = State()
     km_tax_due_date = State()
+    km_education_lesson_count = State()
+    km_education_custom_count = State()
+    km_education_due_date = State()
+    km_education_confirm = State()
     km_custom_period = State()
     km_edit_name = State()
     km_edit_amount = State()
@@ -721,7 +725,7 @@ def default_km_storage(item: dict) -> dict:
             }
             envelope_name = defaults.get(category, name)
 
-    return {
+    result = {
         "item_name": name,
         "category": category,
         "category_label": item.get("category_label", name),
@@ -730,6 +734,12 @@ def default_km_storage(item: dict) -> dict:
         "envelope_name": envelope_name,
         "subcategory": subtype,
     }
+    if item.get("due_date"):
+        result["due_date"] = item["due_date"]
+    if item.get("one_time"):
+        result["one_time"] = True
+        result["target_amount"] = str(item.get("amount", "0"))
+    return result
 
 
 def build_default_km_storage(items: list[dict]) -> list[dict]:
@@ -777,6 +787,14 @@ def parse_tax_due_date(value: str | None) -> date | None:
 def months_until_due_date(today: date, due_date: date) -> int:
     """Количество ежемесячных пополнений до месяца уплаты включительно."""
     return max(1, (due_date.year - today.year) * 12 + due_date.month - today.month)
+
+
+def add_calendar_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    days_in_month = (date(year + month // 12, month % 12 + 1, 1) - date(year, month, 1)).days
+    return date(year, month, min(value.day, days_in_month))
 
 
 def km_storage_summary(storage_items: list[dict], critical_life: Decimal) -> str:
@@ -1249,6 +1267,66 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
             ]),
         )
         return
+    if key == "communication":
+        await state.set_state(SetupStates.km_menu)
+        await callback.message.answer(
+            f"{setup_progress(await state.get_data(), 5)}\n\n"
+            "<b>СВЯЗЬ И ПОДПИСКИ</b>",
+            reply_markup=keyboard([
+                [("Мобильная связь", "kmcommunication:mobile"), ("Подписка", "kmcommunication:subscription")],
+                [("Домашний интернет", "kmcommunication:internet"), ("VPN", "kmcommunication:vpn")],
+                [("← Назад", "km:cancel"), ("Другое", "kmcommunication:other")],
+            ]),
+        )
+        return
+    if key == "education":
+        await state.set_state(SetupStates.km_menu)
+        await callback.message.answer(
+            f"{setup_progress(await state.get_data(), 5)}\n\n"
+            "<b>КАК УСТРОЕНА ОПЛАТА?</b>",
+            reply_markup=keyboard([
+                [("За каждое занятие", "kmeducation:lesson"), ("Каждый месяц", "kmeducation:monthly")],
+                [("Крупный платёж", "kmeducation:large"), ("Другое", "kmeducation:other")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
+    quick_categories = {
+        "health": [
+            [("Лекарства", "medicine"), ("Стоматолог", "dentist")],
+            [("Врачи", "doctors"), ("Анализы", "tests")],
+            [("Витамины", "vitamins"), ("Другое", "other")],
+        ],
+        "pets": [
+            [("Корм", "food"), ("Наполнитель", "litter")],
+            [("Пелёнки", "pads"), ("Ветеринар", "vet")],
+            [("Аксессуары", "accessories"), ("Другое", "other")],
+        ],
+        "children": [
+            [("Детский сад", "kindergarten"), ("Школа", "school")],
+            [("Питание", "food"), ("Секция", "club")],
+            [("Другое", "other")],
+        ],
+        "food": [
+            [("Супермаркет", "supermarket"), ("Питьевая вода", "water")],
+            [("Еда вне дома", "outside"), ("Доставка", "delivery")],
+            [("Другое", "other")],
+        ],
+    }
+    if key in quick_categories:
+        rows = [
+            [(text, f"kmquick:{key}:{code}") for text, code in row]
+            for row in quick_categories[key]
+        ]
+        rows.append([("← Назад", "km:cancel")])
+        await state.set_state(SetupStates.km_menu)
+        await callback.message.answer(
+            f"{setup_progress(await state.get_data(), 5)}\n\n"
+            f"<b>{escape(label.upper())}</b>\n\n"
+            "Выберите расход или добавьте свой.",
+            reply_markup=keyboard(rows),
+        )
+        return
     await state.set_state(SetupStates.km_item_name)
     data = await state.get_data()
     prompt = hint
@@ -1352,6 +1430,133 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
     )
 
 
+async def ask_preset_km_amount(message: Message, state: FSMContext, name: str):
+    await state.update_data(pending_km_item_name=name)
+    await state.set_state(SetupStates.km_item_amount)
+    data = await state.get_data()
+    await message.answer(
+        f"{setup_progress(data, 5)}\n\n<b>{escape(name.upper())}</b>\n\n"
+        "—————\n<b>→ Введите сумму.</b>",
+        reply_markup=keyboard([[("Отмена", "km:cancel")]]),
+    )
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmquick:"))
+async def choose_quick_km_subcategory(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    _, category, subtype = callback.data.split(":", 2)
+    labels = {
+        "health": {
+            "medicine": "Лекарства", "dentist": "Стоматолог", "doctors": "Врачи",
+            "tests": "Анализы", "vitamins": "Витамины",
+        },
+        "pets": {
+            "food": "Корм", "litter": "Наполнитель", "pads": "Пелёнки",
+            "vet": "Ветеринар", "accessories": "Аксессуары",
+        },
+        "children": {
+            "kindergarten": "Детский сад", "school": "Школа", "food": "Питание", "club": "Секция",
+        },
+        "food": {
+            "supermarket": "Супермаркет", "water": "Питьевая вода",
+            "outside": "Еда вне дома", "delivery": "Доставка",
+        },
+    }
+    category_labels = {
+        "health": "Здоровье", "pets": "Питомцы", "children": "Дети", "food": "Питание",
+    }
+    if category not in labels or (subtype != "other" and subtype not in labels[category]):
+        return
+    await state.update_data(
+        pending_km_category=category,
+        pending_km_category_label=category_labels[category],
+        pending_km_subcategory=subtype,
+    )
+    if subtype == "other":
+        await state.set_state(SetupStates.km_item_name)
+        await callback.message.answer(
+            f"<b>{escape(category_labels[category].upper())}</b>\n\n—————\n"
+            "<b>→ Введите название расхода.</b>",
+            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+        )
+        return
+    await ask_preset_km_amount(callback.message, state, labels[category][subtype])
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmcommunication:"))
+async def choose_communication_subcategory(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    subtype = callback.data.rsplit(":", 1)[1]
+    labels = {
+        "mobile": "Мобильная связь",
+        "subscription": "Подписка",
+        "internet": "Домашний интернет",
+        "vpn": "VPN",
+        "other": "Другое",
+    }
+    if subtype not in labels:
+        return
+    await state.update_data(
+        pending_km_category="communication",
+        pending_km_category_label="Связь и подписки",
+        pending_km_subcategory=subtype,
+    )
+    if subtype == "other":
+        await state.set_state(SetupStates.km_item_name)
+        await callback.message.answer(
+            "<b>ДРУГОЙ РАСХОД НА СВЯЗЬ</b>\n\n—————\n"
+            "<b>→ Введите название расхода.</b>",
+            reply_markup=keyboard([[("Отмена", "km:cancel")]]),
+        )
+        return
+    await ask_preset_km_amount(callback.message, state, labels[subtype])
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmeducation:"))
+async def choose_education_subcategory(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    subtype = callback.data.rsplit(":", 1)[1]
+    labels = {
+        "lesson": "Занятия",
+        "monthly": "Обучение",
+        "large": "Обучение — крупный платёж",
+        "other": "Другое",
+    }
+    if subtype not in labels:
+        return
+    await state.update_data(
+        pending_km_category="education",
+        pending_km_category_label="Образование",
+        pending_km_subcategory=subtype,
+    )
+    if subtype == "other":
+        await state.set_state(SetupStates.km_item_name)
+        await callback.message.answer(
+            "<b>ДРУГОЙ РАСХОД НА ОБРАЗОВАНИЕ</b>\n\n—————\n"
+            "<b>→ Введите название расхода.</b>",
+            reply_markup=keyboard([[("Отмена", "km:cancel")]]),
+        )
+        return
+    if subtype == "large":
+        data = await state.get_data()
+        payment_number = 1 + sum(
+            1
+            for item in data.get("km_items", [])
+            if item.get("category") == "education" and item.get("subcategory") == "large"
+        )
+        await state.update_data(pending_km_item_name=f"Обучение — платёж {payment_number}")
+        await state.set_state(SetupStates.km_item_amount)
+        await callback.message.answer(
+            "<b>КРУПНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ</b>\n\n"
+            "Укажите не полную стоимость обучения, а сумму, которую должны внести именно вы. "
+            "Не учитывайте часть, которую оплачивают родители, работодатель, грант или другое лицо.\n\n"
+            "—————\n<b>→ Какую сумму вам нужно внести самостоятельно?</b>",
+            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+        )
+        return
+    await ask_preset_km_amount(callback.message, state, labels[subtype])
+
+
 @router.message(SetupStates.km_item_name)
 async def km_item_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
@@ -1390,6 +1595,60 @@ async def km_item_amount(message: Message, state: FSMContext):
         return
     await state.update_data(pending_km_item_amount=str(value))
     data = await state.get_data()
+    category = data.get("pending_km_category")
+    subtype = data.get("pending_km_subcategory")
+    if category == "communication" and subtype in {"mobile", "internet", "vpn", "subscription"}:
+        await state.set_state(SetupStates.km_item_period)
+        if subtype in {"mobile", "internet"}:
+            rows = [
+                [("Каждый месяц", "kmperiod:1"), ("Другой период", "kmperiod:custom")],
+                [("← Назад", "kmperiod:back")],
+            ]
+        else:
+            rows = [
+                [("Каждый месяц", "kmperiod:1"), ("Раз в 3 месяца", "kmperiod:3")],
+                [("Раз в 6 месяцев", "kmperiod:6"), ("Раз в год", "kmperiod:12")],
+                [("← Назад", "kmperiod:back"), ("Другой период", "kmperiod:custom")],
+            ]
+        await message.answer("<b>КАК ЧАСТО ВЫ ОПЛАЧИВАЕТЕ?</b>", reply_markup=keyboard(rows))
+        return
+    if category == "transport" and subtype == "pass":
+        await state.set_state(SetupStates.km_item_period)
+        await message.answer(
+            "<b>КАК ЧАСТО НУЖНО ПОКУПАТЬ ИЛИ ПРОДЛЕВАТЬ ПРОЕЗДНОЙ?</b>",
+            reply_markup=keyboard([
+                [("Каждый месяц", "kmperiod:1"), ("Раз в 3 месяца", "kmperiod:3")],
+                [("Раз в 6 месяцев", "kmperiod:6"), ("Раз в год", "kmperiod:12")],
+                [("← Назад", "kmperiod:back"), ("Другой период", "kmperiod:custom")],
+            ]),
+        )
+        return
+    if category == "education" and subtype == "monthly":
+        await save_km_item(message, state, Decimal("1"))
+        return
+    if category == "education" and subtype == "lesson":
+        await state.set_state(SetupStates.km_education_lesson_count)
+        await message.answer(
+            "<b>СКОЛЬКО ЗАНЯТИЙ ОБЫЧНО БЫВАЕТ?</b>",
+            reply_markup=keyboard([
+                [("Раз в неделю", "edulessons:1"), ("2 раза в неделю", "edulessons:2")],
+                [("3 раза в неделю", "edulessons:3"), ("Свой вариант", "edulessons:custom")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
+    if category == "education" and subtype == "large":
+        await state.set_state(SetupStates.km_education_due_date)
+        await message.answer(
+            "<b>КОГДА НУЖНО ВНЕСТИ ПЛАТЁЖ?</b>\n\n"
+            "Посмотрите точную дату в договоре, личном кабинете студента или уведомлении учебного заведения.",
+            reply_markup=keyboard([
+                [("Через 1 месяц", "edudue:months:1"), ("Через 3 месяца", "edudue:months:3")],
+                [("Через 6 месяцев", "edudue:months:6"), ("Указать дату", "edudue:date")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
     if data.get("pending_km_subcategory") in {"property_tax", "land_tax", "tax"}:
         await state.set_state(SetupStates.km_tax_due_date)
         current_date = date.today()
@@ -1432,10 +1691,108 @@ async def km_tax_due_date(message: Message, state: FSMContext):
     await save_km_item(message, state, Decimal(months))
 
 
+@router.callback_query(SetupStates.km_education_lesson_count, F.data.startswith("edulessons:"))
+async def education_lesson_count(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.rsplit(":", 1)[1]
+    if value == "custom":
+        await state.set_state(SetupStates.km_education_custom_count)
+        await callback.message.answer(
+            "<b>СКОЛЬКО ЗАНЯТИЙ БЫВАЕТ В МЕСЯЦ?</b>\n\n—————\n"
+            "<b>→ Введите целое число.</b>",
+            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+        )
+        return
+    lessons_per_week = Decimal(value)
+    data = await state.get_data()
+    lesson_price = Decimal(data["pending_km_item_amount"])
+    annual_amount = lesson_price * lessons_per_week * Decimal("52")
+    await state.update_data(pending_km_item_amount=str(annual_amount))
+    await save_km_item(callback.message, state, Decimal("12"))
+
+
+@router.message(SetupStates.km_education_custom_count)
+async def education_custom_count(message: Message, state: FSMContext):
+    count = parse_decimal(message.text)
+    if count is None or count <= 0 or count != count.to_integral_value():
+        await message.answer("Введите целое количество занятий больше нуля.")
+        return
+    data = await state.get_data()
+    monthly = Decimal(data["pending_km_item_amount"]) * count
+    await state.update_data(pending_km_item_amount=str(monthly))
+    await save_km_item(message, state, Decimal("1"))
+
+
+@router.callback_query(SetupStates.km_education_due_date, F.data.startswith("edudue:"))
+async def education_due_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.split(":", 1)[1]
+    if value == "date":
+        await callback.message.answer(
+            "—————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
+            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+        )
+        return
+    months = int(value.rsplit(":", 1)[1])
+    await prepare_education_large_payment(callback.message, state, add_calendar_months(date.today(), months))
+
+
+@router.message(SetupStates.km_education_due_date)
+async def education_due_date_text(message: Message, state: FSMContext):
+    due_date = parse_tax_due_date(message.text)
+    if due_date is None or due_date <= date.today():
+        await message.answer("Введите будущую дату в формате <code>ДД.ММ.ГГГГ</code>.")
+        return
+    await prepare_education_large_payment(message, state, due_date)
+
+
+async def prepare_education_large_payment(message: Message, state: FSMContext, due_date: date):
+    data = await state.get_data()
+    amount = Decimal(data["pending_km_item_amount"])
+    months = months_until_due_date(date.today(), due_date)
+    monthly = money2(amount / Decimal(months))
+    await state.update_data(
+        pending_km_due_date=due_date.isoformat(),
+        pending_km_payment_months=str(months),
+    )
+    await state.set_state(SetupStates.km_education_confirm)
+    await message.answer(
+        "<b>ПРОВЕРЬТЕ ПЛАТЁЖ</b>\n\n"
+        f"Обучение — <b>{rub(amount)}</b>\n"
+        f"Оплатить до — <b>{due_date.strftime('%d.%m.%Y')}</b>\n"
+        f"Откладывать — <b>{rub(monthly)} в месяц</b>",
+        reply_markup=keyboard([
+            [("Сохранить", "edupayment:save"), ("Изменить сумму", "edupayment:amount")],
+            [("← Назад", "km:cancel"), ("Изменить срок", "edupayment:due")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.km_education_confirm, F.data.startswith("edupayment:"))
+async def education_payment_confirm(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    action = callback.data.rsplit(":", 1)[1]
+    data = await state.get_data()
+    if action == "amount":
+        await state.set_state(SetupStates.km_item_amount)
+        await callback.message.answer("—————\n<b>→ Введите исправленную сумму.</b>")
+        return
+    if action == "due":
+        await state.set_state(SetupStates.km_education_due_date)
+        await callback.message.answer("—————\n<b>→ Введите исправленную дату в формате ДД.ММ.ГГГГ.</b>")
+        return
+    await state.update_data(pending_km_one_time=True)
+    await save_km_item(callback.message, state, Decimal(data["pending_km_payment_months"]))
+
+
 @router.callback_query(SetupStates.km_item_period, F.data.startswith("kmperiod:"))
 async def km_item_period(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     value = callback.data.split(":", 1)[1]
+    if value == "back":
+        data = await state.get_data()
+        await ask_preset_km_amount(callback.message, state, data["pending_km_item_name"])
+        return
     if value == "week":
         await save_km_item(callback.message, state, Decimal("12") / Decimal("52"))
         return
@@ -1474,8 +1831,10 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         "monthly": str(monthly),
         "subcategory": data.get("pending_km_subcategory"),
     }
-    if data.get("pending_km_due_date") and item["subcategory"] in {"property_tax", "land_tax", "tax"}:
+    if data.get("pending_km_due_date") and item["subcategory"] in {"property_tax", "land_tax", "tax", "large"}:
         item["due_date"] = data["pending_km_due_date"]
+    if data.get("pending_km_one_time"):
+        item["one_time"] = True
     items = list(data.get("km_items", []))
     items.append(item)
     await state.update_data(km_items=items)
@@ -1484,13 +1843,12 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     index = len(items) - 1
     if item["category"] == "communication" and months > 1:
         await message.answer(
-            f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес.\n\n"
-            "<b>Совет:</b> если вы оплачиваете подписку НЕ каждый месяц, то лучше "
-            "добавьте её в Бытовой резерв. В противном случае система предложит создать "
-            "дополнительный конверт «Подписки».",
+            "<b>ГДЕ УЧИТЫВАТЬ ЭТОТ РАСХОД?</b>\n\n"
+            "Оплата происходит не каждый месяц. Обычно такие расходы удобнее заранее "
+            "накапливать в Бытовом резерве.",
             reply_markup=keyboard([
-                [("Оставить здесь", f"kmstay:{index}"), ("В Бытовой резерв", f"kmmove:br:{index}")],
-                [("Редактировать", f"kmedit:item:{index}"), ("Удалить", f"kmedit:delete:{index}")],
+                [("Оставить здесь", f"kmstay:{index}"), ("✔️ В Бытовой резерв", f"kmmove:br:{index}")],
+                [("← Назад", f"kmrecommend:back:{index}"), ("Изменить период", f"kmedit:period:{index}")],
             ]),
         )
         return
@@ -1502,7 +1860,46 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес.{tax_due_text}",
         reply_markup=keyboard([[('Редактировать', f'kmedit:item:{index}'), ('Удалить', f'kmedit:delete:{index}')]])
     )
+    if item.get("one_time") and item["category"] == "education":
+        await message.answer(
+            "<b>ЕСТЬ ЕЩЁ ОДИН ОБЯЗАТЕЛЬНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ?</b>\n\n"
+            "Например, оплата следующего семестра или дополнительный взнос по договору.",
+            reply_markup=keyboard([
+                [("Добавить ещё", "edupayment:add"), ("Нет, продолжить", "edupayment:continue")],
+                [("← Назад", f"kmedit:item:{index}")],
+            ]),
+        )
+        return
     await show_km_menu(message, state)
+
+
+@router.callback_query(SetupStates.km_menu, F.data.in_({"edupayment:add", "edupayment:continue"}))
+async def education_payment_next(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.data == "edupayment:add":
+        data = await state.get_data()
+        payment_number = 1 + sum(
+            1
+            for item in data.get("km_items", [])
+            if item.get("category") == "education" and item.get("subcategory") == "large"
+        )
+        await state.update_data(
+            pending_km_category="education",
+            pending_km_category_label="Образование",
+            pending_km_subcategory="large",
+            pending_km_item_name=f"Обучение — платёж {payment_number}",
+            pending_km_due_date=None,
+            pending_km_one_time=None,
+        )
+        await state.set_state(SetupStates.km_item_amount)
+        await callback.message.answer(
+            "<b>КРУПНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ</b>\n\n"
+            "Укажите сумму, которую должны внести именно вы.\n\n"
+            "—————\n<b>→ Какую сумму вам нужно внести самостоятельно?</b>",
+            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+        )
+        return
+    await show_km_menu(callback.message, state)
 
 
 @router.callback_query(SetupStates.km_menu, F.data.startswith("kmstay:"))
@@ -1510,6 +1907,26 @@ async def keep_km_subscription(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Оставлено в Критическом минимуме")
     await remove_setup_button(callback)
     await show_km_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmrecommend:back:"))
+async def communication_recommendation_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    items = list(data.get("km_items", []))
+    if 0 <= index < len(items):
+        items.pop(index)
+        await state.update_data(km_items=items)
+    await state.set_state(SetupStates.km_menu)
+    await callback.message.answer(
+        "<b>СВЯЗЬ И ПОДПИСКИ</b>",
+        reply_markup=keyboard([
+            [("Мобильная связь", "kmcommunication:mobile"), ("Подписка", "kmcommunication:subscription")],
+            [("Домашний интернет", "kmcommunication:internet"), ("VPN", "kmcommunication:vpn")],
+            [("← Назад", "km:cancel"), ("Другое", "kmcommunication:other")],
+        ]),
+    )
 
 
 @router.callback_query(SetupStates.km_menu, F.data.startswith("kmmove:br:"))
@@ -1580,6 +1997,8 @@ async def clear_pending_km(state: FSMContext):
         pending_km_item_amount=None,
         pending_km_subcategory=None,
         pending_km_due_date=None,
+        pending_km_one_time=None,
+        pending_km_payment_months=None,
         pending_km_edit_index=None,
     )
 
@@ -1624,6 +2043,7 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
         return
     item = items[index]
     is_tax = item.get("subcategory") in {"property_tax", "land_tax", "tax"}
+    has_deadline = is_tax or item.get("subcategory") == "large"
     period_line = (
         f"Срок уплаты — {date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}\n"
         if item.get("due_date")
@@ -1639,7 +2059,7 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard([
             [("Изменить название", f"kmedit:name:{index}")],
             [("Изменить сумму", f"kmedit:amount:{index}")],
-            [(("Изменить срок уплаты" if is_tax else "Изменить период"), f"kmedit:period:{index}")],
+            [(("Изменить срок платежа" if has_deadline else "Изменить период"), f"kmedit:period:{index}")],
             [("Удалить", f"kmedit:delete:{index}")],
             [("Назад", "kmedit:list")],
         ]),
@@ -1704,9 +2124,9 @@ async def km_edit_amount_save(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("kmedit:period:"))
 async def km_edit_period_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer(); index=int(callback.data.rsplit(":",1)[1]); data=await state.get_data(); items=list(data.get("km_items",[])); await state.update_data(pending_km_edit_index=index)
-    if 0 <= index < len(items) and items[index].get("subcategory") in {"property_tax", "land_tax", "tax"}:
+    if 0 <= index < len(items) and items[index].get("subcategory") in {"property_tax", "land_tax", "tax", "large"}:
         await state.set_state(SetupStates.km_edit_tax_due_date)
-        await callback.message.answer("<b>НОВЫЙ СРОК УПЛАТЫ</b>\n\n—————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>", reply_markup=keyboard([[('Отмена','km:cancel')]]))
+        await callback.message.answer("<b>НОВЫЙ СРОК ПЛАТЕЖА</b>\n\n—————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>", reply_markup=keyboard([[('Отмена','km:cancel')]]))
         return
     await state.set_state(SetupStates.km_edit_period)
     await callback.message.answer("<b>НОВЫЙ ПЕРИОД</b>", reply_markup=keyboard([[('1 месяц','kmeditperiod:1'),('3 месяца','kmeditperiod:3')],[('6 месяцев','kmeditperiod:6'),('12 месяцев','kmeditperiod:12')],[('Другой','kmeditperiod:custom')],[('Отмена','km:cancel')]]))
@@ -3644,6 +4064,20 @@ async def confirm_save(
                 months=months,
                 monthly_amount=Decimal(str(item.get("monthly", "0"))),
             )
+
+    db.deactivate_all_planned_payments(telegram_id)
+    for item in data.get("km_storage_items", []):
+        if not item.get("one_time") or not item.get("due_date"):
+            continue
+        db.add_planned_payment(
+            telegram_id=telegram_id,
+            category=item.get("category_label", "Плановый платёж"),
+            envelope_name=item.get("envelope_name") or item.get("category_label", "Плановый платёж"),
+            payment_name=item.get("item_name") or "Плановый платёж",
+            target_amount=Decimal(str(item.get("target_amount", "0"))),
+            monthly_amount=Decimal(str(item.get("monthly", "0"))),
+            due_date=item["due_date"],
+        )
 
     await state.clear()
 

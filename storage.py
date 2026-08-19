@@ -448,6 +448,26 @@ class Database:
             """
         )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS planned_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                envelope_name TEXT NOT NULL,
+                payment_name TEXT NOT NULL,
+                target_amount TEXT NOT NULL,
+                saved_amount TEXT NOT NULL DEFAULT '0',
+                monthly_amount TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
         # ----------------------------------------------------
         # Индексы
         # ----------------------------------------------------
@@ -1632,6 +1652,82 @@ class Database:
             }
             for row in rows
         ]
+
+    def add_planned_payment(
+        self,
+        telegram_id: int,
+        category: str,
+        envelope_name: str,
+        payment_name: str,
+        target_amount: Decimal,
+        monthly_amount: Decimal,
+        due_date: str,
+    ) -> int:
+        self.ensure_user(telegram_id)
+        cursor = self.connection.execute(
+            """
+            INSERT INTO planned_payments (
+                telegram_id, category, envelope_name, payment_name,
+                target_amount, saved_amount, monthly_amount, due_date, active
+            ) VALUES (?, ?, ?, ?, ?, '0', ?, ?, 1)
+            """,
+            (
+                telegram_id,
+                category,
+                envelope_name,
+                payment_name,
+                decimal_to_string(target_amount),
+                decimal_to_string(monthly_amount),
+                due_date,
+            ),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def load_planned_payments(self, telegram_id: int, active_only: bool = True) -> list[dict]:
+        query = "SELECT * FROM planned_payments WHERE telegram_id = ?"
+        if active_only:
+            query += " AND active = 1"
+        query += " ORDER BY id"
+        rows = self.connection.execute(query, (telegram_id,)).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "category": row["category"],
+                "envelope_name": row["envelope_name"],
+                "payment_name": row["payment_name"],
+                "target_amount": string_to_decimal(row["target_amount"]),
+                "saved_amount": string_to_decimal(row["saved_amount"]),
+                "monthly_amount": string_to_decimal(row["monthly_amount"]),
+                "due_date": row["due_date"],
+                "active": bool(row["active"]),
+            }
+            for row in rows
+        ]
+
+    def update_planned_payment_saved(
+        self,
+        telegram_id: int,
+        payment_id: int,
+        saved_amount: Decimal,
+        active: bool,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE planned_payments
+            SET saved_amount = ?, active = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (decimal_to_string(saved_amount), int(active), telegram_id, payment_id),
+        )
+        self.connection.commit()
+
+    def deactivate_all_planned_payments(self, telegram_id: int) -> None:
+        self.connection.execute(
+            "UPDATE planned_payments SET active = 0 WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        self.connection.commit()
 
     def deactivate_tax_obligation(self, telegram_id: int, obligation_id: int) -> None:
         self.connection.execute(
