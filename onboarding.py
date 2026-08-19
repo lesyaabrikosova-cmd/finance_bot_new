@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING
 from html import escape
 from pathlib import Path
@@ -64,11 +65,13 @@ class SetupStates(StatesGroup):
     km_item_name = State()
     km_item_amount = State()
     km_item_period = State()
+    km_tax_due_date = State()
     km_custom_period = State()
     km_edit_name = State()
     km_edit_amount = State()
     km_edit_period = State()
     km_edit_custom_period = State()
+    km_edit_tax_due_date = State()
     km_override_amount = State()
 
     # Как физически хранить деньги Критического минимума
@@ -743,6 +746,18 @@ def planned_taxes_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
     return result
 
 
+def parse_tax_due_date(value: str | None) -> date | None:
+    try:
+        return datetime.strptime((value or "").strip(), "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+def months_until_due_date(today: date, due_date: date) -> int:
+    """Количество ежемесячных пополнений до месяца уплаты включительно."""
+    return max(1, (due_date.year - today.year) * 12 + due_date.month - today.month)
+
+
 def km_storage_summary(storage_items: list[dict], critical_life: Decimal) -> str:
     separate = life_categories_from_storage(storage_items)
     separate_sum = sum(separate.values(), Decimal("0"))
@@ -879,8 +894,11 @@ async def ask_income(message: Message, state: FSMContext):
             "<b>КАКОЙ У ВАС СРЕДНИЙ ДОХОД?</b>\n\n"
             "Для нерегулярного дохода нужна реальная средняя за последние 6–12 месяцев. "
             "Лучший месяц не считается вашей новой нормой.\n\n"
-            "Введите среднемесячный доход. Округлите в меньшую сторону.\n\n"
-            "Например: <code>180000</code>"
+            "В банковском приложении посмотрите ваш доход за период и разделите на количество "
+            "месяцев. <b>Округлите в меньшую сторону</b>.\n\n"
+            "—————\n"
+            "<b>→ Введите среднемесячный доход.</b>\n"
+            "<b>Например:</b> <code>180000</code>"
         )
 
     await message.answer(text)
@@ -907,15 +925,12 @@ async def ask_tax(message: Message, state: FSMContext):
         "- подработки;\n"
         "- частные заказы;\n"
         "- самозанятость;\n"
+        "- ИП;\n"
         "- другие поступления\n"
         "могут требовать отдельного резерва.\n\n"
-        "Здесь речь только о налоге с дохода. Имущественный, земельный и транспортный налоги "
-        "можно будет добавить при расчёте Критического минимума. Все виды налогов хранятся "
-        "в общем конверте «Налоги».\n\n"
         "Налог конкретного поступления потом можно будет изменить перед распределением.",
         reply_markup=keyboard([
-            [("Да", "taxsetup:yes")],
-            [("Нет", "taxsetup:no")],
+            [("Да", "taxsetup:yes"), ("Нет", "taxsetup:no")],
         ]),
     )
 
@@ -934,7 +949,9 @@ async def tax_setup_choice(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"{setup_progress(data, 4)}\n\n"
         "<b>КАКУЮ СТАВКУ ИСПОЛЬЗОВАТЬ ПО УМОЛЧАНИЮ?</b>\n\n"
-        "Введите число без знака %. Например: <code>6</code>."
+        "—————\n"
+        "<b>→ Введите число без знака %.</b>\n"
+        "<b>Например:</b> <code>6</code>."
     )
 
 
@@ -1094,12 +1111,30 @@ async def choose_housing_subcategory(callback: CallbackQuery, state: FSMContext)
     )
     await state.set_state(SetupStates.km_item_name)
     data = await state.get_data()
+    if subtype in {"property_tax", "land_tax"}:
+        examples = {
+            "property_tax": "Квартира, Дом, Гараж",
+            "land_tax": "Дача, Земельный участок",
+        }
+        await callback.message.answer(
+            f"{setup_progress(data, 5)}\n\n"
+            f"<b>{escape(labels[subtype].upper())}</b>\n\n"
+            "Сумму и срок уплаты посмотрите в налоговом уведомлении — в Личном кабинете "
+            "налогоплательщика на сайте ФНС или на Госуслугах. В уведомлении указаны объект, "
+            "начисленная сумма и дата платежа.\n\n"
+            "Можно указать точную сумму или осторожную оценку, если уведомление ещё не пришло.\n\n"
+            "—————\n"
+            "<b>→ Введите название объекта.</b>\n"
+            f"<b>Например:</b> {examples[subtype]}",
+            reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        )
+        return
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n"
-        f"<b>{escape(labels[subtype].upper())}</b>\n\n"
+        "<b>ЖИЛЬЁ, АРЕНДА, ЖКХ</b>\n\n"
         "—————\n"
-        "<b>→ Введите название расхода или объекта.</b>\n"
-        f"<b>Например:</b> {escape(labels[subtype])}",
+        "<b>→ Введите название расхода.</b>\n"
+        "<b>Например:</b> Квартира, Студия, Коммуналка и т.п.",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -1124,6 +1159,20 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
     )
     await state.set_state(SetupStates.km_item_name)
     data = await state.get_data()
+    if subtype == "tax":
+        await callback.message.answer(
+            f"{setup_progress(data, 5)}\n\n"
+            "<b>ТРАНСПОРТНЫЙ НАЛОГ</b>\n\n"
+            "Сумму и срок уплаты посмотрите в налоговом уведомлении — в Личном кабинете "
+            "налогоплательщика на сайте ФНС или на Госуслугах. В уведомлении указаны объект, "
+            "начисленная сумма и дата платежа.\n\n"
+            "Можно указать точную сумму или осторожную оценку, если уведомление ещё не пришло.\n\n"
+            "—————\n"
+            "<b>→ Введите название автомобиля.</b>\n"
+            "<b>Например:</b> Автомобиль, Лада, Volkswagen",
+            reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        )
+        return
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(labels[subtype].upper())}</b>\n\n"
@@ -1149,11 +1198,17 @@ async def km_item_name(message: Message, state: FSMContext):
     await state.update_data(pending_km_item_name=name)
     await state.set_state(SetupStates.km_item_amount)
     data = await state.get_data()
+    is_tax = data.get("pending_km_subcategory") in {"property_tax", "land_tax", "tax"}
     await message.answer(
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(name.upper())}</b>\n\n"
+        "—————\n"
         "<b>→ Введите сумму.</b>\n"
-        "(Период укажем следующим сообщением)",
+        + (
+            "(Срок уплаты укажем следующим сообщением)"
+            if is_tax
+            else "(Период укажем следующим сообщением)"
+        ),
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -1165,8 +1220,23 @@ async def km_item_amount(message: Message, state: FSMContext):
         await message.answer("Введите положительную сумму.")
         return
     await state.update_data(pending_km_item_amount=str(value))
-    await state.set_state(SetupStates.km_item_period)
     data = await state.get_data()
+    if data.get("pending_km_subcategory") in {"property_tax", "land_tax", "tax"}:
+        await state.set_state(SetupStates.km_tax_due_date)
+        current_date = date.today()
+        example_year = current_date.year if current_date < date(current_date.year, 12, 1) else current_date.year + 1
+        await message.answer(
+            f"{setup_progress(data, 5)}\n\n"
+            "<b>КОГДА НУЖНО УПЛАТИТЬ НАЛОГ?</b>\n\n"
+            f"Сегодня — <b>{current_date.strftime('%d.%m.%Y')}</b>. Бот сам рассчитает, "
+            "сколько нужно откладывать каждый месяц до срока платежа.\n\n"
+            "—————\n"
+            "<b>→ Введите точную или ориентировочную дату.</b>\n"
+            f"<b>Например:</b> <code>01.12.{example_year}</code>",
+            reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        )
+        return
+    await state.set_state(SetupStates.km_item_period)
     await message.answer(
         f"{setup_progress(data, 5)}\n\n"
         "<b>ЗА КАКОЙ ПЕРИОД ЭТА СУММА?</b>",
@@ -1176,6 +1246,21 @@ async def km_item_amount(message: Message, state: FSMContext):
             [("Другой период", "kmperiod:custom"), ("Отмена", "km:cancel")],
         ]),
     )
+
+
+@router.message(SetupStates.km_tax_due_date)
+async def km_tax_due_date(message: Message, state: FSMContext):
+    due_date = parse_tax_due_date(message.text)
+    current_date = date.today()
+    if due_date is None:
+        await message.answer("Введите дату в формате <code>ДД.ММ.ГГГГ</code>.")
+        return
+    if due_date <= current_date:
+        await message.answer("Срок уплаты должен быть позже сегодняшней даты. Проверьте дату и введите её ещё раз.")
+        return
+    months = months_until_due_date(current_date, due_date)
+    await state.update_data(pending_km_due_date=due_date.isoformat())
+    await save_km_item(message, state, Decimal(months))
 
 
 @router.callback_query(SetupStates.km_item_period, F.data.startswith("kmperiod:"))
@@ -1220,6 +1305,8 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         "monthly": str(monthly),
         "subcategory": data.get("pending_km_subcategory"),
     }
+    if data.get("pending_km_due_date") and item["subcategory"] in {"property_tax", "land_tax", "tax"}:
+        item["due_date"] = data["pending_km_due_date"]
     items = list(data.get("km_items", []))
     items.append(item)
     await state.update_data(km_items=items)
@@ -1239,8 +1326,11 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         )
         return
 
+    tax_due_text = ""
+    if item.get("due_date"):
+        tax_due_text = f"\nСрок уплаты — <b>{date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}</b>"
     await message.answer(
-        f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес.",
+        f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес.{tax_due_text}",
         reply_markup=keyboard([[('Редактировать', f'kmedit:item:{index}'), ('Удалить', f'kmedit:delete:{index}')]])
     )
     await show_km_menu(message, state)
@@ -1320,6 +1410,7 @@ async def clear_pending_km(state: FSMContext):
         pending_km_item_name=None,
         pending_km_item_amount=None,
         pending_km_subcategory=None,
+        pending_km_due_date=None,
         pending_km_edit_index=None,
     )
 
@@ -1363,17 +1454,23 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
         await show_km_menu(callback.message, state)
         return
     item = items[index]
+    is_tax = item.get("subcategory") in {"property_tax", "land_tax", "tax"}
+    period_line = (
+        f"Срок уплаты — {date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}\n"
+        if item.get("due_date")
+        else f"Период — {item['months']} мес.\n"
+    )
     await state.update_data(pending_km_edit_index=index)
     await callback.message.answer(
         f"<b>{escape(item['name'])}</b>\n\n"
         f"Категория — {escape(item['category_label'])}\n"
         f"Исходная сумма — {rub(Decimal(item['amount']))}\n"
-        f"Период — {item['months']} мес.\n"
-        f"В расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",
+        + period_line
+        + f"В расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",
         reply_markup=keyboard([
             [("Изменить название", f"kmedit:name:{index}")],
             [("Изменить сумму", f"kmedit:amount:{index}")],
-            [("Изменить период", f"kmedit:period:{index}")],
+            [(("Изменить срок уплаты" if is_tax else "Изменить период"), f"kmedit:period:{index}")],
             [("Удалить", f"kmedit:delete:{index}")],
             [("Назад", "kmedit:list")],
         ]),
@@ -1437,8 +1534,26 @@ async def km_edit_amount_save(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("kmedit:period:"))
 async def km_edit_period_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer(); await state.update_data(pending_km_edit_index=int(callback.data.rsplit(":",1)[1])); await state.set_state(SetupStates.km_edit_period)
+    await callback.answer(); index=int(callback.data.rsplit(":",1)[1]); data=await state.get_data(); items=list(data.get("km_items",[])); await state.update_data(pending_km_edit_index=index)
+    if 0 <= index < len(items) and items[index].get("subcategory") in {"property_tax", "land_tax", "tax"}:
+        await state.set_state(SetupStates.km_edit_tax_due_date)
+        await callback.message.answer("<b>НОВЫЙ СРОК УПЛАТЫ</b>\n\n—————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>", reply_markup=keyboard([[('Отмена','km:cancel')]]))
+        return
+    await state.set_state(SetupStates.km_edit_period)
     await callback.message.answer("<b>НОВЫЙ ПЕРИОД</b>", reply_markup=keyboard([[('1 месяц','kmeditperiod:1'),('3 месяца','kmeditperiod:3')],[('6 месяцев','kmeditperiod:6'),('12 месяцев','kmeditperiod:12')],[('Другой','kmeditperiod:custom')],[('Отмена','km:cancel')]]))
+
+
+@router.message(SetupStates.km_edit_tax_due_date)
+async def km_edit_tax_due_date_save(message: Message, state: FSMContext):
+    due_date = parse_tax_due_date(message.text)
+    current_date = date.today()
+    if due_date is None or due_date <= current_date:
+        await message.answer("Введите будущую дату в формате <code>ДД.ММ.ГГГГ</code>.")
+        return
+    data=await state.get_data(); index=int(data.get("pending_km_edit_index",-1)); items=list(data.get("km_items",[]))
+    if 0 <= index < len(items):
+        item=dict(items[index]); months=months_until_due_date(current_date,due_date); item["due_date"]=due_date.isoformat(); item["months"]=str(months); item["monthly"]=str(money2(Decimal(item["amount"])/Decimal(months))); items[index]=item; await state.update_data(km_items=items)
+    await state.set_state(SetupStates.km_menu); await show_km_menu(message,state)
 
 
 @router.callback_query(SetupStates.km_edit_period, F.data.startswith("kmeditperiod:"))

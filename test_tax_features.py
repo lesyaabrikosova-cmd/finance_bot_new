@@ -1,19 +1,31 @@
 import os
 import tempfile
 import unittest
+from datetime import date
 from decimal import Decimal
 
 
 _TEST_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 
-from onboarding import default_km_storage, planned_taxes_from_storage  # noqa: E402
+from onboarding import (  # noqa: E402
+    default_km_storage,
+    months_until_due_date,
+    parse_tax_due_date,
+    planned_taxes_from_storage,
+)
 from taxes import apply_planned_tax_allocation, make_pie_chart, report_text  # noqa: E402
 from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
 from storage import db  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_tax_due_date_helpers(self):
+        self.assertEqual(parse_tax_due_date("01.12.2026"), date(2026, 12, 1))
+        self.assertIsNone(parse_tax_due_date("2026-12-01"))
+        self.assertEqual(months_until_due_date(date(2026, 8, 19), date(2026, 12, 1)), 4)
+        self.assertEqual(months_until_due_date(date(2026, 8, 19), date(2026, 8, 30)), 1)
+
     def test_transport_tax_is_stored_in_common_tax_envelope(self):
         item = {
             "category": "transport",
