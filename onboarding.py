@@ -61,8 +61,8 @@ class SetupStates(StatesGroup):
     income_gap_months = State()
     income_work_months = State()
     reliable_gap_income = State()
-    income_payout_schedule = State()
-    work_cost_coverage = State()
+    stabilizer_target_months = State()
+    contract_obligations_menu = State()
     income_method = State()
     income_month_amount = State()
 
@@ -600,6 +600,24 @@ KM_CATEGORIES = {
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Стоматолог, Анализы, Лекарства",
     ),
+    "habits": (
+        "Вредные привычки",
+        "Сигареты, табак, вейпы, алкогольные и безалкогольные напитки или другие привычки, "
+        "без которых вы сейчас фактически не обходитесь.\n\n"
+        "Здесь важна честность, а не идеальная версия бюджета. В Критический минимум добавляйте только "
+        "реальную обязательную ежемесячную сумму. То, что можно сократить или покупать нерегулярно, "
+        "лучше учитывать в Бытовом резерве.",
+    ),
+    "fees": (
+        "Комиссии",
+        "Обязательные регулярные комиссии и сборы:\n"
+        "• обслуживание банковской карты или счёта;\n"
+        "• неизбежные комиссии за переводы;\n"
+        "• регулярные почтовые, платёжные и сервисные сборы.\n\n"
+        "Госпошлины и другие нерегулярные комиссии обычно удобнее учитывать в Бытовом резерве. "
+        "Если расход возникает раз в несколько месяцев, укажите сумму за весь период — Аллокатор "
+        "приведёт её к среднемесячной.",
+    ),
     "other": (
         "Другое",
         "Любой обязательный расход, которого нет в списке. Если при резком падении дохода от него можно отказаться на несколько месяцев — это, скорее всего, не Критический минимум.",
@@ -616,6 +634,18 @@ BR_CATEGORIES = {
     "repairs": ("Мелкий ремонт и бытовые траты", "Мелкий ремонт, расходники, бытовые покупки и другие нерегулярные траты по дому."),
     "comfort": ("Домашний уют", "Текстиль, посуда, декор, растения и другие покупки, которые делают дом удобнее и приятнее."),
     "subscriptions": ("Подписки", "Подписки с оплатой раз в несколько месяцев или раз в год, которые вы хотите заранее учитывать в обычном бюджете."),
+    "habits": (
+        "Вредные привычки",
+        "Сигареты, табак, вейпы, алкогольные и безалкогольные напитки и другие привычки, "
+        "расходы на которые возникают нерегулярно или могут быть сокращены. Учитывайте реальную сумму без осуждения — "
+        "так бюджет не забудет заметную часть обычной жизни.",
+    ),
+    "fees": (
+        "Комиссии",
+        "Нерегулярные банковские комиссии сверх лимита, госпошлины, почтовые сборы, комиссии платёжных "
+        "сервисов и другие подобные расходы. Укажите сумму за несколько месяцев или за год — "
+        "Аллокатор рассчитает среднемесячное пополнение.",
+    ),
     "other": ("Другое", "Любой нерегулярный расход нормальной жизни, который не относится к Критическому минимуму, но периодически требует денег."),
 }
 
@@ -981,8 +1011,6 @@ async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
             income_gap_months="1",
             income_work_months="1",
             reliable_gap_income="0",
-            income_payout_schedule="monthly",
-            work_cost_coverage="self",
             stabilizer_target_months="1",
         )
         await ask_income(callback.message, state)
@@ -1030,7 +1058,7 @@ async def save_income_gap_button(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Введите количество полных месяцев без надёжного дохода.")
         return
     await state.update_data(income_rhythm="cyclic", income_gap_months=value)
-    await ask_cyclic_payout(callback.message, state)
+    await ask_reliable_gap_income(callback.message, state)
 
 
 @router.message(SetupStates.income_gap_months)
@@ -1040,59 +1068,13 @@ async def save_income_gap_text(message: Message, state: FSMContext):
         await message.answer("Введите целое число от 1 до 24.")
         return
     await state.update_data(income_rhythm="cyclic", income_gap_months=str(value))
-    await ask_cyclic_payout(message, state)
+    await ask_reliable_gap_income(message, state)
 
 
-async def ask_cyclic_payout(message: Message, state: FSMContext):
-    await state.set_state(SetupStates.income_payout_schedule)
-    await message.answer(
-        f"{setup_progress(await state.get_data(), 5)}\n\n<b>КАК ПРИХОДИТ ОСНОВНАЯ ВЫПЛАТА?</b>",
-        reply_markup=keyboard([
-            [("Только в рабочие месяцы", "payout:work_only")],
-            [("Каждый календарный месяц", "payout:monthly")],
-            [("В конце работы", "payout:end"), ("Частями", "payout:parts")],
-            [("Смешанно", "payout:mixed"), ("ℹ️", "payouthelp")],
-        ]),
-    )
-
-
-@router.callback_query(SetupStates.income_payout_schedule, F.data == "payouthelp")
-async def show_cyclic_payout_help(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(
-        "<b>КАК ВЫБРАТЬ СХЕМУ ВЫПЛАТЫ</b>\n\n"
-        "<b>Только в рабочие месяцы</b> — деньги приходят, пока вы работаете, а во время отдыха выплат нет.\n\n"
-        "<b>Каждый календарный месяц</b> — выплаты продолжаются и во время работы, и во время отдыха.\n\n"
-        "<b>В конце работы</b> — основную сумму выплачивают после завершения вахты или контракта.\n\n"
-        "<b>Частями</b> — несколько выплат в разные моменты работы.\n\n"
-        "<b>Смешанно</b> — например, ежемесячные выплаты и отдельная финальная сумма."
-    )
-
-
-@router.callback_query(SetupStates.income_payout_schedule, F.data.startswith("payout:"))
-async def save_cyclic_payout(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.update_data(income_payout_schedule=callback.data.split(":", 1)[1])
-    await state.set_state(SetupStates.work_cost_coverage)
-    await callback.message.answer(
-        f"{setup_progress(await state.get_data(), 6)}\n\n<b>КТО ОПЛАЧИВАЕТ ЖИЗНЬ ВО ВРЕМЯ РАБОТЫ?</b>\n\n"
-        "Домашние обязательства, которые продолжаются во время работы, всё равно учитываются.",
-        reply_markup=keyboard([
-            [("Всё оплачиваю самостоятельно", "coverage:self")],
-            [("Оплачивают жильё", "coverage:housing")],
-            [("Оплачивают жильё и питание", "coverage:housing_food")],
-            [("Основные расходы покрывает контракт", "coverage:main")],
-        ]),
-    )
-
-
-@router.callback_query(SetupStates.work_cost_coverage, F.data.startswith("coverage:"))
-async def save_work_cost_coverage(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.update_data(work_cost_coverage=callback.data.split(":", 1)[1])
+async def ask_reliable_gap_income(message: Message, state: FSMContext):
     await state.set_state(SetupStates.reliable_gap_income)
-    await callback.message.answer(
-        f"{setup_progress(await state.get_data(), 7)}\n\n"
+    await message.answer(
+        f"{setup_progress(await state.get_data(), 5)}\n\n"
         "<b>СКОЛЬКО ДЕНЕГ НАДЁЖНО ПРИХОДИТ ВО ВРЕМЯ ПЕРЕРЫВА?</b>\n\n"
         "Сложите все гарантированные поступления. Если их нет — отправьте <code>0</code>."
     )
@@ -1104,11 +1086,39 @@ async def save_reliable_gap_income(message: Message, state: FSMContext):
     if value is None or value < 0:
         await message.answer("Введите сумму от 0 ₽ и выше.")
         return
-    await state.update_data(
-        reliable_gap_income=str(money2(value)),
-        stabilizer_target_months="2",
-        progress_offset=5,
+    await state.update_data(reliable_gap_income=str(money2(value)))
+    await state.set_state(SetupStates.stabilizer_target_months)
+    await message.answer(
+        f"{setup_progress(await state.get_data(), 6)}\n\n"
+        "<b>НА СКОЛЬКО МОЖЕТ УВЕЛИЧИТЬСЯ ПЕРЕРЫВ МЕЖДУ КОНТРАКТАМИ?</b>\n\n"
+        "Межконтрактный резерв покрывает плановый перерыв. Стабилизатор нужен, если следующий "
+        "контракт задержится, отменится или предыдущий закончится раньше по независящим от вас причинам.",
+        reply_markup=keyboard([
+            [("1 месяц", "stabilizermonths:1"), ("2 месяца", "stabilizermonths:2")],
+            [("3 месяца", "stabilizermonths:3"), ("6 месяцев", "stabilizermonths:6")],
+            [("Свой вариант", "stabilizermonths:custom")],
+        ]),
     )
+
+
+@router.callback_query(SetupStates.stabilizer_target_months, F.data.startswith("stabilizermonths:"))
+async def save_stabilizer_target_button(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.split(":", 1)[1]
+    if value == "custom":
+        await callback.message.answer("Введите количество месяцев от 1 до 12.")
+        return
+    await state.update_data(stabilizer_target_months=value, progress_offset=4)
+    await ask_income(callback.message, state)
+
+
+@router.message(SetupStates.stabilizer_target_months)
+async def save_stabilizer_target_text(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 12:
+        await message.answer("Введите количество месяцев от 1 до 12.")
+        return
+    await state.update_data(stabilizer_target_months=str(value), progress_offset=4)
     await ask_income(message, state)
 
 
@@ -1371,6 +1381,7 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
         [("Связь и подписки", "kmcat:communication"), ("Питомцы", "kmcat:pets")],
         [("Транспорт", "kmcat:transport"), ("Дети", "kmcat:children")],
         [("Питание", "kmcat:food"), ("Образование", "kmcat:education")],
+        [("Вредные привычки", "kmcat:habits"), ("Комиссии", "kmcat:fees")],
         [("Другое", "kmcat:other"), ("✔️Готово", "km:finish")],
     ]
     if items:
@@ -2557,6 +2568,7 @@ async def show_br_menu(message: Message, state: FSMContext, intro: bool = False)
         [("Мелкий ремонт и бытовые траты", "brcat:repairs")],
         [("Домашний уют", "brcat:comfort")],
         [("Подписки", "brcat:subscriptions")],
+        [("Вредные привычки", "brcat:habits"), ("Комиссии", "brcat:fees")],
         [("Другое", "brcat:other")],
     ]
     if items:
@@ -2869,7 +2881,72 @@ async def apply_br_edit_period(message: Message, state: FSMContext, months: Deci
 
 @router.callback_query(SetupStates.br_menu, F.data == "brfinal:continue")
 async def br_final_continue(callback: CallbackQuery, state: FSMContext):
-    await callback.answer(); await ask_pillow_policy(callback.message,state)
+    await callback.answer()
+    data = await state.get_data()
+    if data.get("income_rhythm") == "cyclic":
+        await state.update_data(contract_obligation_keys=[])
+        await show_contract_obligations(callback.message, state)
+    else:
+        await ask_pillow_policy(callback.message,state)
+
+
+def contract_obligation_entries(data: dict) -> list[tuple[str, dict]]:
+    return (
+        [(f"km:{index}", item) for index, item in enumerate(data.get("km_items", []))]
+        + [(f"br:{index}", item) for index, item in enumerate(data.get("br_items", []))]
+    )
+
+
+def contract_obligation_amount(item: dict, work_months: Decimal) -> Decimal:
+    months = Decimal(str(item.get("months", "1")))
+    if months > 1:
+        return money2(Decimal(str(item.get("amount", "0"))))
+    return money2(Decimal(str(item.get("monthly", "0"))) * work_months)
+
+
+async def show_contract_obligations(message: Message, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("contract_obligation_keys", []))
+    rows = []
+    for key, item in contract_obligation_entries(data):
+        mark = "✔️ " if key in selected else ""
+        rows.append([(f"{mark}{item['name']}", f"contractobligation:{key}")])
+    rows.append([("✔️ Готово", "contractobligation:done")])
+    await state.set_state(SetupStates.contract_obligations_menu)
+    await message.answer(
+        f"{setup_progress(data, 7)}\n\n"
+        "<b>КАКИЕ РАСХОДЫ НУЖНО ОПЛАЧИВАТЬ, ПОКА ВЫ НА КОНТРАКТЕ?</b>\n\n"
+        "Выберите обязательства в России, которые продолжатся или наступят во время рабочей части: "
+        "например, ЖКХ, связь или годовая подписка. Нажмите повторно, чтобы снять выбор.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(SetupStates.contract_obligations_menu, F.data.startswith("contractobligation:"))
+async def toggle_contract_obligation(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    key = callback.data.split(":", 1)[1]
+    if key == "done":
+        data = await state.get_data()
+        selected = set(data.get("contract_obligation_keys", []))
+        work_months = Decimal(str(data.get("income_work_months", "1")))
+        obligations = {}
+        for item_key, item in contract_obligation_entries(data):
+            if item_key in selected:
+                amount = contract_obligation_amount(item, work_months)
+                obligations[item["name"]] = str(
+                    Decimal(obligations.get(item["name"], "0")) + amount
+                )
+        await state.update_data(contract_obligations=obligations, progress_offset=5)
+        await ask_pillow_policy(callback.message, state)
+        return
+    selected = set((await state.get_data()).get("contract_obligation_keys", []))
+    if key in selected:
+        selected.remove(key)
+    else:
+        selected.add(key)
+    await state.update_data(contract_obligation_keys=sorted(selected))
+    await show_contract_obligations(callback.message, state)
 
 
 @router.callback_query(SetupStates.br_menu, F.data == "brfinal:override")
@@ -3966,9 +4043,11 @@ def build_settings_from_data(
         income_gap_months=Decimal(str(data.get("income_gap_months", "1"))),
         income_work_months=Decimal(str(data.get("income_work_months", "1"))),
         reliable_gap_income=Decimal(str(data.get("reliable_gap_income", "0"))),
-        income_payout_schedule=data.get("income_payout_schedule", "monthly"),
-        work_cost_coverage=data.get("work_cost_coverage", "self"),
         stabilizer_target_months=Decimal(str(data.get("stabilizer_target_months", "1"))),
+        contract_obligations={
+            name: Decimal(str(amount))
+            for name, amount in data.get("contract_obligations", {}).items()
+        },
 
         tax_rate=Decimal(
             data["tax_rate"]
@@ -4199,17 +4278,25 @@ async def show_confirmation(
             "Профиль можно сохранить, но финансовая система остаётся дефицитной."
         )
     rhythm_labels = {
-        "monthly": "каждый месяц",
-        "irregular": "неравномерно",
-        "cyclic": f"циклами, до {settings.income_gap_months} мес. без дохода",
+        "monthly": "Стабильный",
+        "irregular": "Сдельный",
+        "cyclic": "Цикличный (контрактный)",
     }
+    cycle_text = ""
+    if settings.income_rhythm == "cyclic":
+        cycle_text = (
+            f"\nФинансовый цикл — <b>{settings.income_work_months} / {settings.income_gap_months}</b> "
+            f"({settings.income_work_months} мес. работы · {settings.income_gap_months} мес. перерыва)\n"
+            f"Стабилизатор — <b>{settings.stabilizer_target_months} мес.</b>\n"
+            f"Обязательства на время контракта — <b>{rub(settings.contract_obligations_total)}</b>"
+        )
 
     await state.set_state(SetupStates.confirmation)
     await message.answer(
         "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
-        f"Профиль — <b>{escape(settings.employment_type)}</b>\n"
+        f"Профиль — <b>{rhythm_labels.get(settings.income_rhythm)}</b>\n"
         f"{income_label} — <b>{rub(settings.average_income)}</b>\n"
-        f"Ритм поступлений — <b>{rhythm_labels.get(settings.income_rhythm)}</b>\n"
+        f"{cycle_text}\n"
         f"Критический минимум — <b>{rub(settings.critical_life)}</b>\n"
         f"Бытовой резерв — <b>{rub(settings.household_reserve)}</b>\n"
         f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>\n"

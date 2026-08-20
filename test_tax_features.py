@@ -154,9 +154,8 @@ class TaxFeatureTests(unittest.TestCase):
             income_gap_months=Decimal("6"),
             income_work_months=Decimal("5"),
             reliable_gap_income=Decimal("12000"),
-            income_payout_schedule="end",
-            work_cost_coverage="housing_food",
             stabilizer_target_months=Decimal("3"),
+            contract_obligations={"ЖКХ": Decimal("5000")},
             income_type_tax_rates={"Вахта": Decimal("0")},
         )
         allocator = FinancialAllocator(settings)
@@ -168,9 +167,8 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(loaded.settings.income_gap_months, Decimal("6"))
         self.assertEqual(loaded.settings.income_work_months, Decimal("5"))
         self.assertEqual(loaded.settings.reliable_gap_income, Decimal("12000"))
-        self.assertEqual(loaded.settings.income_payout_schedule, "end")
-        self.assertEqual(loaded.settings.work_cost_coverage, "housing_food")
         self.assertEqual(loaded.settings.stabilizer_target_months, Decimal("3"))
+        self.assertEqual(loaded.settings.contract_obligations, {"ЖКХ": Decimal("5000")})
         self.assertEqual(loaded.state.intercontract_reserve, Decimal("3456"))
         self.assertEqual(loaded.state.intercontract_months_remaining, Decimal("4"))
 

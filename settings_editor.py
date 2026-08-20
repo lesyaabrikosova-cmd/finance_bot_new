@@ -111,6 +111,10 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
         f"Ритм дохода: <b>{rhythm_labels.get(s.income_rhythm, s.income_rhythm)}</b>\n"
+        + (f"Финансовый цикл: <b>{s.income_work_months} / {s.income_gap_months}</b>\n" if s.income_rhythm == "cyclic" else "")
+        + (f"Стабилизатор: <b>{s.stabilizer_target_months} мес.</b>\n" if s.needs_stabilizer else "")
+        + (f"Обязательства на время контракта: <b>{rub(s.contract_obligations_total)}</b>\n" if s.income_rhythm == "cyclic" else "")
+        +
         f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
         f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
         + (f"Межконтрактный резерв: <b>{rub(st.intercontract_reserve)}</b> / {rub(s.intercontract_full_limit)}\n" if s.income_rhythm == "cyclic" else "")

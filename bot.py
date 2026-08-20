@@ -55,6 +55,8 @@ from period import (
     router as period_router,
 )
 
+from forecast import router as forecast_router
+
 from settings_editor import (
     router as settings_router,
 )
@@ -731,6 +733,7 @@ async def main():
     dp.include_router(
         period_router
     )
+    dp.include_router(forecast_router)
 
     # Редактирование пользовательских настроек
     dp.include_router(

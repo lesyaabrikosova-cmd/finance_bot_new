@@ -38,6 +38,9 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
     if has_active_debts:
         rows.append([("Кредиты", "menu:credits")])
 
+    if allocator:
+        rows.append([("Прогноз распределения дохода", "menu:forecast")])
+
     if allocator and allocator.settings.income_rhythm == "cyclic":
         if allocator.state.intercontract_months_remaining > 0:
             rows.append([("Зарплата из резерва", "intercontract:salary")])

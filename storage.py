@@ -156,9 +156,11 @@ def serialize_income_types(settings: UserSettings) -> str:
         "gap_months": decimal_to_string(settings.income_gap_months),
         "work_months": decimal_to_string(settings.income_work_months),
         "reliable_gap_income": decimal_to_string(settings.reliable_gap_income),
-        "payout_schedule": settings.income_payout_schedule,
-        "work_cost_coverage": settings.work_cost_coverage,
         "stabilizer_months": decimal_to_string(settings.stabilizer_target_months),
+        "contract_obligations": {
+            name: decimal_to_string(amount)
+            for name, amount in settings.contract_obligations.items()
+        },
     })
 
 
@@ -183,9 +185,11 @@ def deserialize_income_rhythm(value) -> dict:
             "income_gap_months": max(Decimal("1"), string_to_decimal(raw.get("gap_months", "1"))),
             "income_work_months": max(Decimal("1"), string_to_decimal(raw.get("work_months", "1"))),
             "reliable_gap_income": max(Decimal("0"), string_to_decimal(raw.get("reliable_gap_income", "0"))),
-            "income_payout_schedule": str(raw.get("payout_schedule", "monthly")),
-            "work_cost_coverage": str(raw.get("work_cost_coverage", "self")),
             "stabilizer_target_months": max(Decimal("1"), string_to_decimal(raw.get("stabilizer_months", "1" if rhythm != "cyclic" else "2"))),
+            "contract_obligations": {
+                str(name): string_to_decimal(amount)
+                for name, amount in raw.get("contract_obligations", {}).items()
+            },
         }
     return {"income_rhythm": "monthly", "income_gap_months": Decimal("1")}
 

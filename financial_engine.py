@@ -214,9 +214,8 @@ class UserSettings:
     income_gap_months: Decimal = Decimal("1")
     income_work_months: Decimal = Decimal("1")
     reliable_gap_income: Decimal = Decimal("0")
-    income_payout_schedule: str = "monthly"
-    work_cost_coverage: str = "self"
     stabilizer_target_months: Decimal = Decimal("1")
+    contract_obligations: Dict[str, Decimal] = field(default_factory=dict)
 
     # ----------------------------
     # Налог
@@ -289,6 +288,10 @@ class UserSettings:
         self.income_work_months = max(ONE, D(self.income_work_months))
         self.reliable_gap_income = max(ZERO, D(self.reliable_gap_income))
         self.stabilizer_target_months = max(ONE, D(self.stabilizer_target_months))
+        self.contract_obligations = {
+            str(name): max(ZERO, D(amount))
+            for name, amount in self.contract_obligations.items()
+        }
 
         self.tax_rate = D(self.tax_rate)
         self.income_type_tax_rates = {
@@ -427,6 +430,10 @@ class UserSettings:
         return monthly_gap * self.income_gap_months
 
     @property
+    def contract_obligations_total(self) -> Decimal:
+        return sum(self.contract_obligations.values(), ZERO)
+
+    @property
     def total_goals_percentage(self) -> Decimal:
         return sum(
             (goal.percentage for goal in self.goals),
@@ -514,12 +521,6 @@ class UserSettings:
 
         if self.income_work_months < ONE:
             errors.append("Рабочая часть цикла должна быть не меньше одного месяца.")
-
-        if self.income_payout_schedule not in {"monthly", "work_only", "parts", "end", "mixed"}:
-            errors.append("Неизвестная схема выплаты циклического дохода.")
-
-        if self.work_cost_coverage not in {"self", "housing", "housing_food", "main"}:
-            errors.append("Неизвестный способ покрытия расходов во время работы.")
 
         if self.debt_strategy not in {
             "Лавина",
