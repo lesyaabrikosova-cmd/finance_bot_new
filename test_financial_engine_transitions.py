@@ -88,18 +88,38 @@ class ModeTransitionTests(unittest.TestCase):
         result = allocator.process_income(D("2000"), "Тест")
 
         self.assert_money(result.allocations["Досрочное"], "100.00")
-        self.assert_money(result.allocations["Подушка"], "1445.00")
-        self.assert_money(result.allocations["Инвестиции"], "210.00")
-        self.assert_money(result.allocations["Цели:Цель"], "245.00")
+        self.assert_money(result.allocations["Подушка"], "1620.00")
+        self.assert_money(result.allocations["Инвестиции"], "280.00")
+        self.assertNotIn("Цели:Цель", result.allocations)
+        self.assert_money(result.super_income_part, "1000.00")
 
     def test_mode_3_to_4_keeps_stage_c(self):
         allocator = self.make_allocator(force="100")
 
         result = allocator.process_income(D("1500"), "Тест")
 
-        self.assert_money(result.allocations["Подушка"], "1240.00")
-        self.assert_money(result.allocations["Инвестиции"], "120.00")
-        self.assert_money(result.allocations["Цели:Цель"], "140.00")
+        self.assert_money(result.allocations["Подушка"], "1340.00")
+        self.assert_money(result.allocations["Инвестиции"], "160.00")
+        self.assertNotIn("Цели:Цель", result.allocations)
+        self.assert_money(result.super_income_part, "500.00")
+
+    def test_average_income_splits_current_receipt_by_period_total(self):
+        allocator = self.make_allocator(employment="Наёмный", life="2000")
+        allocator.state.pillow_force_majeure = D("200")
+        allocator.state.period_income = D("800")
+        result = allocator.process_income(D("500"), "Тест")
+        self.assert_money(result.regular_income_part, "200.00")
+        self.assert_money(result.super_income_part, "300.00")
+        self.assert_money(result.allocations["Инвестиции"], "180.00")
+        self.assert_money(result.allocations["Цели:Цель"], "320.00")
+
+    def test_cyclic_employee_gets_multi_month_stabilizer(self):
+        allocator = self.make_allocator(employment="Наёмный")
+        allocator.settings.income_rhythm = "cyclic"
+        allocator.settings.income_gap_months = D("3")
+        self.assertTrue(allocator.settings.needs_stabilizer)
+        self.assertEqual(allocator.settings.stabilizer_life_limit, D("3000"))
+        self.assertEqual(allocator.settings.stabilizer_full_limit, D("6000"))
 
     def test_mode_3_to_maximum_for_employee_keeps_stage_c(self):
         allocator = self.make_allocator(

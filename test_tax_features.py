@@ -15,8 +15,13 @@ from onboarding import (  # noqa: E402
     parse_tax_due_date,
     planned_taxes_from_storage,
 )
-from planned_payments import apply_planned_payment_allocation  # noqa: E402
-from taxes import apply_planned_tax_allocation, make_pie_chart, report_text  # noqa: E402
+from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets  # noqa: E402
+from taxes import (  # noqa: E402
+    apply_planned_tax_allocation,
+    make_pie_chart,
+    refresh_planned_tax_targets,
+    report_text,
+)
 from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
 from storage import db, deserialize_income_types, serialize_json  # noqa: E402
 
@@ -77,6 +82,31 @@ class TaxFeatureTests(unittest.TestCase):
         payment = db.load_planned_payments(telegram_id)[0]
         self.assertEqual(payment["saved_amount"], Decimal("1000"))
 
+    def test_planned_payment_overflow_moves_to_other_goal_in_same_envelope(self):
+        telegram_id = 880005
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("1000"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            life_categories={"Образование": Decimal("1000")},
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        first = db.add_planned_payment(
+            telegram_id, "Образование", "Образование", "Первый",
+            Decimal("100"), Decimal("500"), "2026-10-01",
+        )
+        second = db.add_planned_payment(
+            telegram_id, "Образование", "Образование", "Второй",
+            Decimal("2000"), Decimal("500"), "2027-03-01",
+        )
+        apply_planned_payment_allocation(telegram_id, allocator, "Образование", Decimal("1000"))
+        items = {item["id"]: item for item in db.load_planned_payments(telegram_id, active_only=False)}
+        self.assertEqual(items[first]["saved_amount"], Decimal("100"))
+        self.assertEqual(items[second]["saved_amount"], Decimal("900"))
+
     def test_income_types_can_have_different_tax_rates(self):
         settings = UserSettings(
             has_debts=False,
@@ -111,6 +141,51 @@ class TaxFeatureTests(unittest.TestCase):
             loaded.settings.income_type_tax_rates,
             {"Заказ ФЛ": Decimal("4"), "Подарок": Decimal("0")},
         )
+
+    def test_income_rhythm_survives_storage_round_trip(self):
+        telegram_id = 880006
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Наёмный",
+            critical_life=Decimal("1000"),
+            household_reserve=Decimal("500"),
+            average_income=Decimal("3000"),
+            income_rhythm="cyclic",
+            income_gap_months=Decimal("6"),
+            income_type_tax_rates={"Вахта": Decimal("0")},
+        )
+        db.save_allocator(telegram_id, FinancialAllocator(settings))
+        loaded = db.load_allocator(telegram_id)
+        self.assertEqual(loaded.settings.income_rhythm, "cyclic")
+        self.assertEqual(loaded.settings.income_gap_months, Decimal("6"))
+
+    def test_unknown_income_type_is_rejected_when_profile_has_types(self):
+        settings = UserSettings(
+            has_debts=False, employment_type="Наёмный",
+            critical_life=Decimal("1000"), household_reserve=Decimal("0"),
+            average_income=Decimal("1000"), income_type_tax_rates={"Зарплата": Decimal("0")},
+        )
+        with self.assertRaisesRegex(ValueError, "не найден"):
+            FinancialAllocator(settings).process_income(Decimal("1000"), "Опечатка")
+
+    def test_planned_payment_target_is_recalculated_from_remaining_deadline(self):
+        telegram_id = 880007
+        settings = UserSettings(
+            has_debts=False, employment_type="Фрилансер",
+            critical_life=Decimal("2000"), household_reserve=Decimal("0"),
+            average_income=Decimal("2000"), life_categories={"Образование": Decimal("1000")},
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        payment_id = db.add_planned_payment(
+            telegram_id, "Образование", "Образование", "Семестр",
+            Decimal("3000"), Decimal("500"), "2026-11-01",
+        )
+        db.update_planned_payment_saved(telegram_id, payment_id, Decimal("1000"), True)
+        refresh_planned_payment_targets(telegram_id, allocator, date(2026, 9, 1))
+        payment = db.load_planned_payments(telegram_id)[0]
+        self.assertEqual(payment["monthly_amount"], Decimal("1000.00"))
+        self.assertEqual(allocator.settings.life_categories["Образование"], Decimal("1500.00"))
 
     def test_legacy_tax_profile_is_migrated_to_per_type_rates(self):
         taxable, rates = deserialize_income_types(
@@ -244,6 +319,25 @@ class TaxFeatureTests(unittest.TestCase):
         apply_planned_tax_allocation(telegram_id, allocator, Decimal("1000"))
         self.assertNotIn("Налоги", allocator.settings.life_categories)
         self.assertEqual(db.load_tax_obligations(telegram_id), [])
+
+    def test_tax_target_recalculates_from_concrete_due_date(self):
+        telegram_id = 880008
+        settings = UserSettings(
+            has_debts=False, employment_type="Наёмный",
+            critical_life=Decimal("1500"), household_reserve=Decimal("0"),
+            average_income=Decimal("3000"), life_categories={"Налоги": Decimal("500")},
+            planned_taxes={"Налог на имущество · Дом": Decimal("500")},
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        db.add_tax_obligation(
+            telegram_id, "Налог на имущество", "Дом", Decimal("3000"),
+            Decimal("1000"), 4, Decimal("500"), "2026-11-01",
+        )
+        refresh_planned_tax_targets(telegram_id, allocator, date(2026, 9, 1))
+        item = db.load_tax_obligations(telegram_id)[0]
+        self.assertEqual(item["monthly_amount"], Decimal("1000.00"))
+        self.assertEqual(allocator.settings.life_categories["Налоги"], Decimal("1000.00"))
 
 
 if __name__ == "__main__":

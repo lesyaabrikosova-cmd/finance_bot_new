@@ -147,17 +147,19 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 2,
+        "version": 3,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
         },
+        "rhythm": settings.income_rhythm,
+        "gap_months": decimal_to_string(settings.income_gap_months),
     })
 
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") == 2:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -165,6 +167,16 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
         return [name for name, rate in rates.items() if rate > 0], rates
     legacy_types = [str(name) for name in raw] if isinstance(raw, list) else []
     return legacy_types, {name: legacy_rate for name in legacy_types}
+
+
+def deserialize_income_rhythm(value) -> tuple[str, Decimal]:
+    raw = deserialize_json(value)
+    if isinstance(raw, dict) and raw.get("version") == 3:
+        return (
+            str(raw.get("rhythm", "monthly")),
+            max(Decimal("1"), string_to_decimal(raw.get("gap_months", "1"))),
+        )
+    return "monthly", Decimal("1")
 
 
 # ============================================================
@@ -467,6 +479,14 @@ class Database:
             )
             """
         )
+
+        # Неразрушающая миграция старых локальных баз.
+        tax_columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(tax_obligations)").fetchall()
+        }
+        if "due_date" not in tax_columns:
+            cursor.execute("ALTER TABLE tax_obligations ADD COLUMN due_date TEXT")
 
         # ----------------------------------------------------
         # Индексы
@@ -1020,6 +1040,9 @@ class Database:
             row["taxable_income_types"],
             legacy_tax_rate,
         )
+        income_rhythm, income_gap_months = deserialize_income_rhythm(
+            row["taxable_income_types"]
+        )
 
         settings = UserSettings(
 
@@ -1044,6 +1067,9 @@ class Database:
                 string_to_decimal(
                     row["average_income"]
                 ),
+
+            income_rhythm=income_rhythm,
+            income_gap_months=income_gap_months,
 
             tax_rate=legacy_tax_rate,
 
@@ -1608,14 +1634,15 @@ class Database:
         saved_before: Decimal,
         months: int,
         monthly_amount: Decimal,
+        due_date: str | None = None,
     ) -> int:
         self.ensure_user(telegram_id)
         cursor = self.connection.execute(
             """
             INSERT INTO tax_obligations (
                 telegram_id, tax_type, object_name, target_amount,
-                opening_amount, saved_before, months, monthly_amount, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                opening_amount, saved_before, months, monthly_amount, due_date, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 telegram_id,
@@ -1626,6 +1653,7 @@ class Database:
                 decimal_to_string(saved_before),
                 months,
                 decimal_to_string(monthly_amount),
+                due_date,
             ),
         )
         self.connection.commit()
@@ -1648,6 +1676,7 @@ class Database:
                 "saved_before": string_to_decimal(row["saved_before"]),
                 "months": row["months"],
                 "monthly_amount": string_to_decimal(row["monthly_amount"]),
+                "due_date": row["due_date"],
                 "active": bool(row["active"]),
             }
             for row in rows
@@ -1722,6 +1751,41 @@ class Database:
         )
         self.connection.commit()
 
+    def update_planned_payment_monthly(
+        self, telegram_id: int, payment_id: int, monthly_amount: Decimal
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE planned_payments SET monthly_amount = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (decimal_to_string(monthly_amount), telegram_id, payment_id),
+        )
+        self.connection.commit()
+
+    def deactivate_planned_payment(self, telegram_id: int, payment_id: int) -> None:
+        self.connection.execute(
+            "UPDATE planned_payments SET active = 0 WHERE telegram_id = ? AND id = ?",
+            (telegram_id, payment_id),
+        )
+        self.connection.commit()
+
+    def update_planned_payment_details(
+        self, telegram_id: int, payment_id: int, *,
+        target_amount: Decimal | None = None, due_date: str | None = None,
+    ) -> None:
+        if target_amount is not None:
+            self.connection.execute(
+                "UPDATE planned_payments SET target_amount = ? WHERE telegram_id = ? AND id = ?",
+                (decimal_to_string(target_amount), telegram_id, payment_id),
+            )
+        if due_date is not None:
+            self.connection.execute(
+                "UPDATE planned_payments SET due_date = ? WHERE telegram_id = ? AND id = ?",
+                (due_date, telegram_id, payment_id),
+            )
+        self.connection.commit()
+
     def deactivate_all_planned_payments(self, telegram_id: int) -> None:
         self.connection.execute(
             "UPDATE planned_payments SET active = 0 WHERE telegram_id = ?",
@@ -1755,6 +1819,18 @@ class Database:
                 telegram_id,
                 obligation_id,
             ),
+        )
+        self.connection.commit()
+
+    def update_tax_obligation_monthly(
+        self, telegram_id: int, obligation_id: int, monthly_amount: Decimal
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tax_obligations SET monthly_amount = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (decimal_to_string(monthly_amount), telegram_id, obligation_id),
         )
         self.connection.commit()
 

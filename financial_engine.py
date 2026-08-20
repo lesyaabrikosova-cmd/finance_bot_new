@@ -206,6 +206,13 @@ class UserSettings:
     household_reserve: Decimal
     average_income: Decimal
 
+    # Ритм поступлений — отдельная характеристика от формы занятости.
+    # monthly: деньги приходят каждый месяц;
+    # irregular: сумма меняется, но длинного известного перерыва нет;
+    # cyclic: между рабочими циклами бывают месяцы без надёжного дохода.
+    income_rhythm: str = "monthly"
+    income_gap_months: Decimal = Decimal("1")
+
     # ----------------------------
     # Налог
     # ----------------------------
@@ -273,6 +280,7 @@ class UserSettings:
         self.critical_life = D(self.critical_life)
         self.household_reserve = D(self.household_reserve)
         self.average_income = D(self.average_income)
+        self.income_gap_months = max(ONE, D(self.income_gap_months))
 
         self.tax_rate = D(self.tax_rate)
         self.income_type_tax_rates = {
@@ -371,14 +379,22 @@ class UserSettings:
         """
         СтабД-КЖ.
         """
-        return self.critical_life
+        return self.critical_life * self.stabilizer_months
 
     @property
     def stabilizer_full_limit(self) -> Decimal:
         """
         СтабД-Полный = УЖ.
         """
-        return self.household_life
+        return self.household_life * self.stabilizer_months
+
+    @property
+    def needs_stabilizer(self) -> bool:
+        return self.employment_type == "Фрилансер" or self.income_rhythm == "cyclic"
+
+    @property
+    def stabilizer_months(self) -> Decimal:
+        return self.income_gap_months if self.needs_stabilizer else ONE
 
     @property
     def total_goals_percentage(self) -> Decimal:
@@ -459,6 +475,12 @@ class UserSettings:
                 "Форма занятости должна быть "
                 "'Фрилансер' или 'Наёмный'."
             )
+
+        if self.income_rhythm not in {"monthly", "irregular", "cyclic"}:
+            errors.append("Неизвестный ритм поступления дохода.")
+
+        if self.income_gap_months < ONE:
+            errors.append("Период без дохода должен быть не меньше одного месяца.")
 
         if self.debt_strategy not in {
             "Лавина",
@@ -653,6 +675,8 @@ class DistributionResult:
     checks: Dict[str, object]
 
     transition_message: Optional[str] = None
+    regular_income_part: Decimal = ZERO
+    super_income_part: Decimal = ZERO
 
     def total_allocated_after_tax(self) -> Decimal:
         return sum(
@@ -799,6 +823,15 @@ class FinancialAllocator:
     ) -> Decimal:
 
         income = D(income)
+
+        if (
+            self.settings.income_type_tax_rates
+            and income_type not in self.settings.income_type_tax_rates
+        ):
+            raise ValueError(
+                f"Тип дохода «{income_type}» не найден в профиле. "
+                "Выберите сохранённый тип или добавьте новый."
+            )
 
         rate = self.settings.income_type_tax_rates.get(income_type, ZERO)
         return income * rate / HUNDRED
@@ -963,7 +996,7 @@ class FinancialAllocator:
         ):
             return MODE_3
 
-        if self.settings.employment_type == "Наёмный":
+        if not self.settings.needs_stabilizer:
             return MODE_6
 
         if (
@@ -1023,7 +1056,7 @@ class FinancialAllocator:
             )
 
             if remaining > ZERO:
-                if s.employment_type == "Фрилансер":
+                if s.needs_stabilizer:
                     candidates.append((MODE_4, remaining))
                 else:
                     candidates.append((MODE_6, remaining))
@@ -2033,6 +2066,20 @@ class FinancialAllocator:
             - tax
         )
 
+        # Обычная база определяется по совокупному валовому доходу периода.
+        # Налог делится пропорционально, поэтому части после налога всегда
+        # сходятся с фактической суммой к распределению.
+        if self.settings.average_income > ZERO:
+            regular_gross_capacity = max(
+                ZERO,
+                self.settings.average_income - self.state.period_income,
+            )
+            regular_gross = min(income, regular_gross_capacity)
+            regular_net = amount * regular_gross / income
+        else:
+            regular_net = amount
+        super_net = amount - regular_net
+
         allocations: Dict[str, Decimal] = {
             "Подушка": ZERO,
             "Инвестиции": ZERO,
@@ -2058,6 +2105,7 @@ class FinancialAllocator:
         # ЭТАП A
         # --------------------------------------------
 
+        before_required_stages = amount
         amount = self.run_stage_with_mode_transitions(
             amount,
             lambda stage_amount, mode: self.stage_a(
@@ -2086,12 +2134,19 @@ class FinancialAllocator:
             ),
         )
 
+        # Этапы A/B в первую очередь расходуют обычную месячную базу.
+        # Если её недостаточно, обязательная жизнь вправе использовать и
+        # сверхдоход: инвестиции не могут быть важнее текущих обязательств.
+        required_consumed = before_required_stages - amount
+        regular_remaining = max(ZERO, regular_net - required_consumed)
+        super_remaining = amount - regular_remaining
+
         # --------------------------------------------
         # ЭТАП C
         # --------------------------------------------
 
-        amount = self.run_stage_with_mode_transitions(
-            amount,
+        regular_remaining = self.run_stage_with_mode_transitions(
+            regular_remaining,
             lambda stage_amount, mode: self.stage_c(
                 stage_amount,
                 mode,
@@ -2104,9 +2159,12 @@ class FinancialAllocator:
         # СВЕРХДОХОД
         # --------------------------------------------
 
-        if amount > ZERO:
-            amount = self.run_stage_with_mode_transitions(
-                amount,
+        # Защитный остаток обычной части (например, после переполнения слоя)
+        # также считается сверхдоходом, чтобы ни одна копейка не потерялась.
+        super_remaining += regular_remaining
+        if super_remaining > ZERO:
+            super_remaining = self.run_stage_with_mode_transitions(
+                super_remaining,
                 lambda stage_amount, mode: self.super_income(
                     stage_amount,
                     mode,
@@ -2231,6 +2289,8 @@ class FinancialAllocator:
             "tax_overridden": (
                 tax_override is not None
             ),
+            "regular_income_part": regular_net,
+            "super_income_part": super_net,
             "planned_tax_details": planned_tax_details,
             "allocations": dict(allocations),
             "mode_before": mode_before,
@@ -2256,6 +2316,8 @@ class FinancialAllocator:
             steps=steps,
             checks=checks,
             transition_message=transition,
+            regular_income_part=regular_net,
+            super_income_part=super_net,
         )
 
     # ========================================================

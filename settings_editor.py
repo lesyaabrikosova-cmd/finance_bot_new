@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from html import escape
 
@@ -19,6 +19,9 @@ class EditSettingsStates(StatesGroup):
     critical_life = State()
     household_reserve = State()
     average_income = State()
+    income_gap_months = State()
+    planned_amount = State()
+    planned_due_date = State()
     tax_rate = State()
     income_type_name = State()
     income_type_rate = State()
@@ -65,7 +68,7 @@ def distribute_existing_pillow(allocator, total: Decimal) -> None:
     st.pillow_force_majeure = part
     remaining -= part
 
-    if remaining > 0 and s.employment_type == "Фрилансер":
+    if remaining > 0 and s.needs_stabilizer:
         normal = min(remaining, s.stabilizer_full_limit)
         st.pillow_stabilizer = normal
         remaining -= normal
@@ -95,12 +98,14 @@ async def show_settings_menu(message: Message, telegram_id: int):
 
     goals = ", ".join(f"{g.name} {g.percentage}%" for g in s.goals) if s.goals else "без отдельных категорий"
     categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"
+    rhythm_labels = {"monthly": "ежемесячно", "irregular": "неравномерно", "cyclic": "вахтами или циклами"}
 
     await message.answer(
         "⚙️ <b>РЕДАКТИРОВАНИЕ НАСТРОЕК</b>\n\n"
         f"🔴 Обязательная жизнь: <b>{rub(s.critical_life)}</b>\n"
         f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
+        f"Ритм дохода: <b>{rhythm_labels.get(s.income_rhythm, s.income_rhythm)}</b>\n"
         f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
         f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
@@ -111,7 +116,9 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("🛡️ Изменить Подушку", "settings:pillow")],
             [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
             [("💰 Средний доход", "settings:income")],
+            [("Ритм поступлений", "settings:rhythm")],
             [("Типы доходов", "settings:income_types")],
+            [("Плановые платежи", "settings:planned")],
             [("❤️ Категории КЖ", "settings:life_categories")],
             [("⭐️ Проценты целей", "settings:goals")],
             [("⚖️ Цели / Подушка этапа C", "settings:c_split")],
@@ -121,6 +128,211 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("⬅️ Главное меню", "menu:back")],
         ]),
     )
+
+
+async def show_planned_payments(message: Message, telegram_id: int):
+    items = db.load_planned_payments(telegram_id)
+    taxes = db.load_tax_obligations(telegram_id)
+    lines = []
+    rows = []
+    for item in items:
+        remaining = max(Decimal("0"), item["target_amount"] - item["saved_amount"])
+        due = date.fromisoformat(item["due_date"]).strftime("%d.%m.%Y")
+        lines.append(
+            f"• <b>{escape(item['payment_name'])}</b>\n"
+            f"  осталось {rub(remaining)}, до {due}, сейчас {rub(item['monthly_amount'])}/мес"
+        )
+        rows.append([(f"{item['payment_name']}", f"planned:view:{item['id']}")])
+    for item in taxes:
+        remaining = max(Decimal("0"), item["target_amount"] - item["saved_before"])
+        due = f", до {date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}" if item.get("due_date") else ""
+        lines.append(
+            f"• <b>{escape(item['tax_type'])} · {escape(item['object_name'])}</b>\n"
+            f"  осталось {rub(remaining)}{due}"
+        )
+    rows.append([("← Настройки", "settings:open")])
+    await message.answer(
+        "<b>ПЛАНОВЫЕ ПЛАТЕЖИ</b>\n\n"
+        + ("\n\n".join(lines) if lines else "Активных плановых платежей нет.")
+        + "\n\nСумма ежемесячного накопления пересчитывается по остатку и сроку.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "settings:planned")
+async def open_planned_payments(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await show_planned_payments(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("planned:view:"))
+async def view_planned_payment(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    payment_id = int(callback.data.rsplit(":", 1)[1])
+    item = next((x for x in db.load_planned_payments(callback.from_user.id) if x["id"] == payment_id), None)
+    if item is None:
+        await show_planned_payments(callback.message, callback.from_user.id)
+        return
+    await callback.message.answer(
+        f"<b>{escape(item['payment_name'])}</b>\n\n"
+        f"Нужно накопить — {rub(item['target_amount'])}\n"
+        f"Уже учтено — {rub(item['saved_amount'])}\n"
+        f"Срок — {date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}",
+        reply_markup=keyboard([
+            [("Изменить сумму", f"planned:amount:{payment_id}"), ("Изменить дату", f"planned:date:{payment_id}")],
+            [("Отметить оплату", f"planned:close:{payment_id}")],
+            [("Отменить обязательство", f"planned:cancel:{payment_id}")],
+            [("← Назад", "settings:planned")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("planned:amount:"))
+async def edit_planned_amount(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(planned_payment_id=int(callback.data.rsplit(":", 1)[1]))
+    await state.set_state(EditSettingsStates.planned_amount)
+    await callback.message.answer("Введите новую полную сумму планового платежа.")
+
+
+@router.message(EditSettingsStates.planned_amount)
+async def save_planned_amount(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    data = await state.get_data()
+    payment_id = data.get("planned_payment_id")
+    item = next((x for x in db.load_planned_payments(message.from_user.id) if x["id"] == payment_id), None)
+    if item is None:
+        await state.clear()
+        await show_planned_payments(message, message.from_user.id)
+        return
+    if value is None or value <= item["saved_amount"]:
+        await message.answer(
+            f"Новая сумма должна быть больше уже накопленных {rub(item['saved_amount'])}."
+        )
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    db.update_planned_payment_details(message.from_user.id, payment_id, target_amount=value)
+    from planned_payments import refresh_planned_payment_targets
+    refresh_planned_payment_targets(message.from_user.id, allocator)
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_planned_payments(message, message.from_user.id)
+
+
+@router.callback_query(F.data.startswith("planned:date:"))
+async def edit_planned_date(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(planned_payment_id=int(callback.data.rsplit(":", 1)[1]))
+    await state.set_state(EditSettingsStates.planned_due_date)
+    await callback.message.answer("Введите новую дату в формате <code>ДД.ММ.ГГГГ</code>.")
+
+
+@router.message(EditSettingsStates.planned_due_date)
+async def save_planned_date(message: Message, state: FSMContext):
+    try:
+        due = date.fromisoformat("-".join(reversed((message.text or "").strip().split("."))))
+    except ValueError:
+        await message.answer("Введите дату в формате ДД.ММ.ГГГГ.")
+        return
+    if due <= date.today():
+        await message.answer("Дата должна быть позже сегодняшнего дня.")
+        return
+    data = await state.get_data()
+    allocator = db.load_allocator(message.from_user.id)
+    db.update_planned_payment_details(
+        message.from_user.id, data["planned_payment_id"], due_date=due.isoformat()
+    )
+    from planned_payments import refresh_planned_payment_targets
+    refresh_planned_payment_targets(message.from_user.id, allocator)
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_planned_payments(message, message.from_user.id)
+
+
+async def close_planned_payment(message: Message, telegram_id: int, payment_id: int, paid: bool):
+    allocator = db.load_allocator(telegram_id)
+    item = next((x for x in db.load_planned_payments(telegram_id) if x["id"] == payment_id), None)
+    if allocator is None or item is None:
+        await show_planned_payments(message, telegram_id)
+        return
+    envelope = item["envelope_name"]
+    monthly = item["monthly_amount"]
+    current = allocator.settings.life_categories.get(envelope, Decimal("0"))
+    updated = max(Decimal("0"), current - monthly)
+    if updated:
+        allocator.settings.life_categories[envelope] = updated
+    else:
+        allocator.settings.life_categories.pop(envelope, None)
+    allocator.settings.critical_life = max(
+        sum(allocator.settings.life_categories.values(), Decimal("0")),
+        allocator.settings.critical_life - monthly,
+    )
+    db.deactivate_planned_payment(telegram_id, payment_id)
+    db.save_allocator(telegram_id, allocator)
+    await message.answer("Платёж отмечен оплаченным." if paid else "Плановое обязательство отменено.")
+    await show_planned_payments(message, telegram_id)
+
+
+@router.callback_query(F.data.startswith("planned:close:"))
+async def mark_planned_paid(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await close_planned_payment(callback.message, callback.from_user.id, int(callback.data.rsplit(":", 1)[1]), True)
+
+
+@router.callback_query(F.data.startswith("planned:cancel:"))
+async def cancel_planned(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await close_planned_payment(callback.message, callback.from_user.id, int(callback.data.rsplit(":", 1)[1]), False)
+
+
+@router.callback_query(F.data == "settings:rhythm")
+async def edit_income_rhythm(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await callback.message.answer(
+        "<b>РИТМ ПОСТУПЛЕНИЙ</b>\n\n"
+        "Для циклического дохода Стабилизатор покрывает месяцы между надёжными выплатами.",
+        reply_markup=keyboard([
+            [("Каждый месяц", "settingsrhythm:monthly")],
+            [("Неравномерно", "settingsrhythm:irregular")],
+            [("Вахтами или циклами", "settingsrhythm:cyclic")],
+            [("Отмена", "settings:open")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("settingsrhythm:"))
+async def save_income_rhythm_setting(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    rhythm = callback.data.split(":", 1)[1]
+    allocator = db.load_allocator(callback.from_user.id)
+    if rhythm == "cyclic":
+        await state.set_state(EditSettingsStates.income_gap_months)
+        await state.update_data(settings_income_rhythm=rhythm)
+        await callback.message.answer(
+            "Сколько полных месяцев может не быть надёжного дохода?\n"
+            "Введите целое число от 1 до 24."
+        )
+        return
+    allocator.settings.income_rhythm = rhythm
+    allocator.settings.income_gap_months = Decimal("1")
+    db.save_allocator(callback.from_user.id, allocator)
+    await show_settings_menu(callback.message, callback.from_user.id)
+
+
+@router.message(EditSettingsStates.income_gap_months)
+async def save_income_gap_setting(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
+        await message.answer("Введите целое число от 1 до 24.")
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    allocator.settings.income_rhythm = "cyclic"
+    allocator.settings.income_gap_months = value
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_settings_menu(message, message.from_user.id)
 
 @router.callback_query(
     F.data.in_(

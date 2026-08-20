@@ -26,8 +26,8 @@ from financial_engine import (
 
 from storage import db
 from ui import main_menu_keyboard
-from taxes import apply_planned_tax_allocation
-from planned_payments import apply_planned_payment_allocation
+from taxes import apply_planned_tax_allocation, refresh_planned_tax_targets
+from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets
 
 
 router = Router()
@@ -1141,6 +1141,9 @@ async def confirm_income(
     # ========================================================
     # ЗАПУСК ФИНАНСОВОГО ЯДРА
     # ========================================================
+
+    refresh_planned_payment_targets(telegram_id, allocator, income_date)
+    refresh_planned_tax_targets(telegram_id, allocator, income_date)
 
     try:
 

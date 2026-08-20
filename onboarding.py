@@ -57,6 +57,8 @@ class SetupStates(StatesGroup):
     critical_life = State()
     household_reserve = State()
     average_income = State()
+    income_rhythm = State()
+    income_gap_months = State()
     income_method = State()
     income_month_amount = State()
 
@@ -951,6 +953,62 @@ async def save_average_income(message: Message, state: FSMContext):
         return
 
     await state.update_data(average_income=str(money2(value)))
+    await ask_income_rhythm(message, state)
+
+
+async def ask_income_rhythm(message: Message, state: FSMContext):
+    await state.set_state(SetupStates.income_rhythm)
+    await message.answer(
+        "<b>КАК ЧАСТО ПРИХОДИТ ОСНОВНОЙ ДОХОД?</b>\n\n"
+        "Это не связано с оформлением работы. Наёмный сотрудник тоже может "
+        "получать деньги вахтами, а фрилансер — стабильно каждый месяц.",
+        reply_markup=keyboard([
+            [("Каждый месяц", "rhythm:monthly")],
+            [("Неравномерно", "rhythm:irregular")],
+            [("Вахтами или циклами", "rhythm:cyclic")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.income_rhythm, F.data.startswith("rhythm:"))
+async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    rhythm = callback.data.split(":", 1)[1]
+    if rhythm != "cyclic":
+        await state.update_data(income_rhythm=rhythm, income_gap_months="1")
+        await ask_tax(callback.message, state)
+        return
+    await state.set_state(SetupStates.income_gap_months)
+    await callback.message.answer(
+        "<b>СКОЛЬКО МЕСЯЦЕВ МОЖЕТ НЕ БЫТЬ НАДЁЖНОГО ДОХОДА?</b>\n\n"
+        "Аллокатор создаст Стабилизатор дохода на этот промежуток. "
+        "Если выплаты продолжаются и во время отдыха, выберите 1 месяц.",
+        reply_markup=keyboard([
+            [("1 месяц", "gap:1"), ("2 месяца", "gap:2")],
+            [("3 месяца", "gap:3"), ("6 месяцев", "gap:6")],
+            [("Указать другое", "gap:custom")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.income_gap_months, F.data.startswith("gap:"))
+async def save_income_gap_button(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.split(":", 1)[1]
+    if value == "custom":
+        await callback.message.answer("Введите количество полных месяцев без надёжного дохода.")
+        return
+    await state.update_data(income_rhythm="cyclic", income_gap_months=value)
+    await ask_tax(callback.message, state)
+
+
+@router.message(SetupStates.income_gap_months)
+async def save_income_gap_text(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
+        await message.answer("Введите целое число от 1 до 24.")
+        return
+    await state.update_data(income_rhythm="cyclic", income_gap_months=str(value))
     await ask_tax(message, state)
 
 
@@ -3763,6 +3821,9 @@ def build_settings_from_data(
             data["average_income"]
         ),
 
+        income_rhythm=data.get("income_rhythm", "monthly"),
+        income_gap_months=Decimal(str(data.get("income_gap_months", "1"))),
+
         tax_rate=Decimal(
             data["tax_rate"]
         ),
@@ -3873,10 +3934,7 @@ def build_state_from_data(
 
     remaining -= pillow_force
 
-    if (
-        settings.employment_type
-        == "Фрилансер"
-    ):
+    if settings.needs_stabilizer:
 
         stabilizer_limit = (
             settings.stabilizer_full_limit
@@ -3976,17 +4034,33 @@ async def show_confirmation(
         if settings.employment_type == "Наёмный"
         else "Средний доход"
     )
+    deficit = settings.total_critical_life - settings.average_income
+    deficit_warning = ""
+    if deficit > 0:
+        deficit_warning = (
+            "\n\n⚠️ <b>ДОХОД НИЖЕ ОБЯЗАТЕЛЬНЫХ РАСХОДОВ</b>\n\n"
+            f"Средней месячной базе не хватает <b>{rub(deficit)}</b> для "
+            "Критического минимума и минимальных платежей по долгам. "
+            "Профиль можно сохранить, но финансовая система остаётся дефицитной."
+        )
+    rhythm_labels = {
+        "monthly": "каждый месяц",
+        "irregular": "неравномерно",
+        "cyclic": f"циклами, до {settings.income_gap_months} мес. без дохода",
+    }
 
     await state.set_state(SetupStates.confirmation)
     await message.answer(
         "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
         f"Профиль — <b>{escape(settings.employment_type)}</b>\n"
         f"{income_label} — <b>{rub(settings.average_income)}</b>\n"
+        f"Ритм поступлений — <b>{rhythm_labels.get(settings.income_rhythm)}</b>\n"
         f"Критический минимум — <b>{rub(settings.critical_life)}</b>\n"
         f"Бытовой резерв — <b>{rub(settings.household_reserve)}</b>\n"
         f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>\n"
         f"Баланс жизни сейчас — <b>{rub(state_object.life_balance)}</b>\n"
-        f"Типы доходов — <b>{escape(tax_types)}</b>\n\n"
+        f"Типы доходов — <b>{escape(tax_types)}</b>"
+        f"{deficit_warning}\n\n"
         f"<b>ОТКРОЙТЕ {len(accounts)} НАКОПИТЕЛЬНЫХ СЧЕТОВ В СВОЁМ БАНКЕ:</b>\n\n"
         f"{accounts_text}\n\n"
         "<b>СТАРТОВЫЙ РЕЖИМ:</b>\n\n"
@@ -4063,6 +4137,7 @@ async def confirm_save(
                 saved_before=Decimal("0"),
                 months=months,
                 monthly_amount=Decimal(str(item.get("monthly", "0"))),
+                due_date=item.get("due_date"),
             )
 
     db.deactivate_all_planned_payments(telegram_id)
