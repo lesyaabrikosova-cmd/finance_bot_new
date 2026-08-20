@@ -1319,6 +1319,12 @@ async def send_distribution_report(
         ),
     )
 
+    add_distribution_line(
+        "🔁",
+        "Межконтрактный резерв",
+        allocations.get("Межконтрактный резерв", ZERO),
+    )
+
     for name in settings.life_categories.keys():
 
         add_distribution_line(
@@ -1543,6 +1549,11 @@ async def send_distribution_report(
         f"{money_plain(state.life_balance)}",
         f"🛡️ <b>Подушка</b> — "
         f"{money_plain(state.pillow_balance)}",
+        *(
+            [f"🔁 <b>Межконтрактный резерв</b> — {money_plain(state.intercontract_reserve)}"]
+            if settings.income_rhythm == "cyclic"
+            else []
+        ),
         f"🆘 <b>До Критического минимума</b> — "
         f"{money_plain(life_remaining)}",
         f"✳️ <b>До Устойчивой жизни</b> — "

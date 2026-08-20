@@ -113,13 +113,54 @@ class ModeTransitionTests(unittest.TestCase):
         self.assert_money(result.allocations["Инвестиции"], "180.00")
         self.assert_money(result.allocations["Цели:Цель"], "320.00")
 
-    def test_cyclic_employee_gets_multi_month_stabilizer(self):
+    def test_cyclic_employee_gets_intercontract_reserve_and_separate_stabilizer(self):
         allocator = self.make_allocator(employment="Наёмный")
         allocator.settings.income_rhythm = "cyclic"
         allocator.settings.income_gap_months = D("3")
         self.assertTrue(allocator.settings.needs_stabilizer)
-        self.assertEqual(allocator.settings.stabilizer_life_limit, D("3000"))
-        self.assertEqual(allocator.settings.stabilizer_full_limit, D("6000"))
+        self.assertEqual(allocator.settings.intercontract_life_limit, D("3000"))
+        self.assertEqual(allocator.settings.intercontract_full_limit, D("6000"))
+        self.assertEqual(allocator.settings.stabilizer_life_limit, D("2000"))
+        self.assertEqual(allocator.settings.stabilizer_full_limit, D("4000"))
+
+    def test_cyclic_income_fills_intercontract_reserve_before_force_majeure(self):
+        allocator = self.make_allocator(employment="Наёмный", force="0")
+        allocator.settings.income_rhythm = "cyclic"
+        allocator.settings.income_gap_months = D("2")
+        result = allocator.process_income(D("1000"), "Тест")
+        self.assert_money(allocator.state.intercontract_reserve, "1000")
+        self.assert_money(allocator.state.pillow_force_majeure, "0")
+        self.assert_money(result.allocations["Межконтрактный резерв"], "1000")
+
+    def test_reliable_gap_income_reduces_intercontract_target(self):
+        allocator = self.make_allocator(employment="Наёмный")
+        allocator.settings.income_rhythm = "cyclic"
+        allocator.settings.income_gap_months = D("3")
+        allocator.settings.reliable_gap_income = D("600")
+        self.assertEqual(allocator.settings.intercontract_life_limit, D("1200"))
+        self.assertEqual(allocator.settings.intercontract_full_limit, D("4200"))
+
+    def test_no_intercontract_reserve_when_gap_income_covers_sustainable_life(self):
+        allocator = self.make_allocator(employment="Наёмный")
+        allocator.settings.income_rhythm = "cyclic"
+        allocator.settings.reliable_gap_income = D("2000")
+        self.assertFalse(allocator.settings.needs_intercontract_reserve)
+        self.assertEqual(allocator.settings.intercontract_full_limit, D("0"))
+
+    def test_intercontract_salary_is_internal_transfer_and_reduces_dynamic_target(self):
+        allocator = self.make_allocator(employment="Наёмный", life="0")
+        allocator.settings.income_rhythm = "cyclic"
+        allocator.settings.income_gap_months = D("2")
+        allocator.state.intercontract_reserve = D("4000")
+        allocator.start_intercontract_break()
+        amount = allocator.pay_intercontract_salary()
+        self.assertEqual(amount, D("2000"))
+        self.assertEqual(allocator.state.life_balance, D("2000"))
+        self.assertEqual(allocator.state.intercontract_reserve, D("2000"))
+        self.assertEqual(allocator.state.intercontract_months_remaining, D("1"))
+        self.assertEqual(allocator.intercontract_current_limit, D("2000"))
+        self.assertEqual(allocator.state.period_income, D("0"))
+        self.assertEqual(allocator.state.period_tax, D("0"))
 
     def test_mode_3_to_maximum_for_employee_keeps_stage_c(self):
         allocator = self.make_allocator(

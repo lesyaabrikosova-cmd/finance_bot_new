@@ -20,6 +20,11 @@ class EditSettingsStates(StatesGroup):
     household_reserve = State()
     average_income = State()
     income_gap_months = State()
+    income_work_months = State()
+    reliable_gap_income = State()
+    force_majeure_months = State()
+    stabilizer_months = State()
+    intercontract_balance = State()
     planned_amount = State()
     planned_due_date = State()
     tax_rate = State()
@@ -98,7 +103,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
 
     goals = ", ".join(f"{g.name} {g.percentage}%" for g in s.goals) if s.goals else "без отдельных категорий"
     categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"
-    rhythm_labels = {"monthly": "ежемесячно", "irregular": "неравномерно", "cyclic": "вахтами или циклами"}
+    rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Контрактный (цикличный)"}
 
     await message.answer(
         "⚙️ <b>РЕДАКТИРОВАНИЕ НАСТРОЕК</b>\n\n"
@@ -108,12 +113,16 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"Ритм дохода: <b>{rhythm_labels.get(s.income_rhythm, s.income_rhythm)}</b>\n"
         f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
         f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
+        + (f"Межконтрактный резерв: <b>{rub(st.intercontract_reserve)}</b> / {rub(s.intercontract_full_limit)}\n" if s.income_rhythm == "cyclic" else "")
+        +
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"
         f"⭐️ Цели: {escape(goals)}\n\n"
         f"Распределение этапа C: ⭐️ цели {s.goals_share_c}% / 🛡️ подушка {s.pillow_share_c}%",
         reply_markup=keyboard([
             [("🛡️ Изменить Подушку", "settings:pillow")],
+            [("ФМ-подушка", "settings:force_months"), ("Стабилизатор", "settings:stabilizer_months")],
+            [("Межконтрактный резерв", "settings:intercontract_balance")],
             [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
             [("💰 Средний доход", "settings:income")],
             [("Ритм поступлений", "settings:rhythm")],
@@ -128,6 +137,89 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("⬅️ Главное меню", "menu:back")],
         ]),
     )
+
+
+@router.callback_query(F.data == "settings:force_months")
+async def edit_force_months(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    s = allocator.settings
+    minimum = Decimal("4") if s.income_rhythm == "irregular" else Decimal("3")
+    if s.income_rhythm == "cyclic" and s.income_gap_months > 1:
+        minimum = Decimal("6")
+    await state.set_state(EditSettingsStates.force_majeure_months)
+    await state.update_data(force_minimum=str(minimum))
+    await callback.message.answer(
+        f"<b>ФОРС-МАЖОРНАЯ ПОДУШКА</b>\n\nВведите количество месяцев от {minimum} до 12."
+    )
+
+
+@router.message(EditSettingsStates.force_majeure_months)
+async def save_force_months_setting(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    data = await state.get_data()
+    minimum = Decimal(data.get("force_minimum", "3"))
+    if value is None or value < minimum or value > 12:
+        await message.answer(f"Введите количество месяцев от {minimum} до 12.")
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    allocator.settings.force_majeure_months = value
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_settings_menu(message, message.from_user.id)
+
+
+@router.callback_query(F.data == "settings:stabilizer_months")
+async def edit_stabilizer_months(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if not allocator.settings.needs_stabilizer:
+        await callback.message.answer("Для Стабильного профиля Стабилизатор не используется.")
+        return
+    await state.set_state(EditSettingsStates.stabilizer_months)
+    await callback.message.answer("<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\nВведите количество месяцев от 1 до 12.")
+
+
+@router.message(EditSettingsStates.stabilizer_months)
+async def save_stabilizer_months_setting(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 12:
+        await message.answer("Введите количество месяцев от 1 до 12.")
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    allocator.settings.stabilizer_target_months = value
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_settings_menu(message, message.from_user.id)
+
+
+@router.callback_query(F.data == "settings:intercontract_balance")
+async def edit_intercontract_balance(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator.settings.income_rhythm != "cyclic":
+        await callback.message.answer("Межконтрактный резерв используется только в Контрактном (цикличном) профиле.")
+        return
+    await state.set_state(EditSettingsStates.intercontract_balance)
+    await callback.message.answer(
+        "<b>БАЛАНС МЕЖКОНТРАКТНОГО РЕЗЕРВА</b>\n\nВведите сумму, которая уже отложена на плановый перерыв."
+    )
+
+
+@router.message(EditSettingsStates.intercontract_balance)
+async def save_intercontract_balance(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    if value > allocator.settings.intercontract_full_limit:
+        await message.answer(f"Текущая цель резерва — {rub(allocator.settings.intercontract_full_limit)}.")
+        return
+    allocator.state.intercontract_reserve = value
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_settings_menu(message, message.from_user.id)
 
 
 async def show_planned_payments(message: Message, telegram_id: int):
@@ -292,11 +384,10 @@ async def edit_income_rhythm(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer(
         "<b>РИТМ ПОСТУПЛЕНИЙ</b>\n\n"
-        "Для циклического дохода Стабилизатор покрывает месяцы между надёжными выплатами.",
+        "Профиль определяется совокупным денежным потоком, а не профессией или источником денег.",
         reply_markup=keyboard([
-            [("Каждый месяц", "settingsrhythm:monthly")],
-            [("Неравномерно", "settingsrhythm:irregular")],
-            [("Вахтами или циклами", "settingsrhythm:cyclic")],
+            [("Стабильный", "settingsrhythm:monthly"), ("Сдельный", "settingsrhythm:irregular")],
+            [("Контрактный (цикличный)", "settingsrhythm:cyclic")],
             [("Отмена", "settings:open")],
         ]),
     )
@@ -316,7 +407,11 @@ async def save_income_rhythm_setting(callback: CallbackQuery, state: FSMContext)
         )
         return
     allocator.settings.income_rhythm = rhythm
+    allocator.settings.employment_type = "Наёмный" if rhythm == "monthly" else "Фрилансер"
     allocator.settings.income_gap_months = Decimal("1")
+    allocator.settings.income_work_months = Decimal("1")
+    allocator.settings.reliable_gap_income = Decimal("0")
+    allocator.settings.stabilizer_target_months = Decimal("1")
     db.save_allocator(callback.from_user.id, allocator)
     await show_settings_menu(callback.message, callback.from_user.id)
 
@@ -327,9 +422,36 @@ async def save_income_gap_setting(message: Message, state: FSMContext):
     if value is None or value < 1 or value > 24 or value != value.to_integral_value():
         await message.answer("Введите целое число от 1 до 24.")
         return
+    await state.update_data(settings_gap_months=str(value))
+    await state.set_state(EditSettingsStates.income_work_months)
+    await message.answer("Сколько месяцев обычно длится рабочая часть цикла? Введите число от 1 до 24.")
+
+
+@router.message(EditSettingsStates.income_work_months)
+async def save_income_work_setting(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 24:
+        await message.answer("Введите количество месяцев от 1 до 24.")
+        return
+    await state.update_data(settings_work_months=str(value))
+    await state.set_state(EditSettingsStates.reliable_gap_income)
+    await message.answer("Сколько денег надёжно приходит в месяц во время перерыва? Если нисколько — отправьте 0.")
+
+
+@router.message(EditSettingsStates.reliable_gap_income)
+async def save_reliable_gap_setting(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
+        return
+    data = await state.get_data()
     allocator = db.load_allocator(message.from_user.id)
     allocator.settings.income_rhythm = "cyclic"
-    allocator.settings.income_gap_months = value
+    allocator.settings.employment_type = "Фрилансер"
+    allocator.settings.income_gap_months = Decimal(data["settings_gap_months"])
+    allocator.settings.income_work_months = Decimal(data["settings_work_months"])
+    allocator.settings.reliable_gap_income = value
+    allocator.settings.stabilizer_target_months = max(Decimal("2"), allocator.settings.stabilizer_target_months)
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
     await show_settings_menu(message, message.from_user.id)

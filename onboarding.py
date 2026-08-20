@@ -59,6 +59,10 @@ class SetupStates(StatesGroup):
     average_income = State()
     income_rhythm = State()
     income_gap_months = State()
+    income_work_months = State()
+    reliable_gap_income = State()
+    income_payout_schedule = State()
+    work_cost_coverage = State()
     income_method = State()
     income_month_amount = State()
 
@@ -134,6 +138,7 @@ class SetupStates(StatesGroup):
 
     # Текущее состояние
     current_pillow = State()
+    current_intercontract = State()
     current_life_balance = State()
     current_minimum_payments = State()
 
@@ -616,7 +621,8 @@ BR_CATEGORIES = {
 
 
 def route_total(data: dict) -> int:
-    return 9 if data.get("has_debts") else 8
+    base = 10 if data.get("has_debts") else 9
+    return base + (5 if data.get("income_rhythm") == "cyclic" else 0)
 
 
 def progress_bar(done: int, total: int) -> str:
@@ -625,7 +631,7 @@ def progress_bar(done: int, total: int) -> str:
 
 
 def setup_progress(data: dict, done: int) -> str:
-    return progress_bar(done, route_total(data))
+    return progress_bar(done + int(data.get("progress_offset", 0)), route_total(data))
 
 
 def money2(value: Decimal) -> Decimal:
@@ -855,46 +861,12 @@ async def setup_start(callback: CallbackQuery, state: FSMContext):
         km_storage_items=[],
         br_items=[],
     )
-    await state.set_state(SetupStates.employment)
-
-    caption = (
-        f"{progress_bar(1, 2)}\n\n"
-        "<b>КАК ВЫ ПОЛУЧАЕТЕ ОСНОВНОЙ ДОХОД?</b>\n\n"
-        "Выберите <b>Наёмный</b>, если у вас регулярная зарплата от работодателя.\n\n"
-        "Выберите <b>Фрилансер</b>, если доход заметно меняется от месяца к месяцу:\n"
-        "- Проекты\n"
-        "- Заказы\n"
-        "- Самозанятость\n"
-        "- Небольшой бизнес и др."
-    )
-
-    await callback.message.answer_photo(
-        photo=FSInputFile(FINANCIAL_PROFILE_IMAGE),
-        caption=caption,
-        reply_markup=keyboard([
-            [("Наёмный", "employment:employee"), ("Фрилансер", "employment:freelancer")],
-        ]),
-    )
-
-
-@router.callback_query(SetupStates.employment, F.data.startswith("employment:"))
-async def save_employment(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await remove_setup_button(callback)
-
-    employment = "Наёмный" if callback.data == "employment:employee" else "Фрилансер"
-    await state.update_data(employment_type=employment)
     await state.set_state(SetupStates.has_debts)
-
     await callback.message.answer(
-        f"{progress_bar(2, 2)}\n\n"
+        f"{progress_bar(1, 2)}\n\n"
         "<b>ЕСТЬ КРЕДИТЫ ИЛИ ДОЛГИ?</b>\n\n"
-        "- Потребительский кредит\n"
-        "- Автокредит\n"
-        "- Рассрочка\n"
-        "- Микрозайм\n"
-        "- Долги людям\n"
-        "- Задолженность по кредитке\n\n"
+        "- Потребительский кредит\n- Автокредит\n- Рассрочка\n- Микрозайм\n"
+        "- Долги людям\n- Задолженность по кредитке\n\n"
         "Кредитная карта без задолженности долгом не считается.",
         reply_markup=keyboard([
             [("Есть", "debts:yes"), ("Нет", "debts:no")],
@@ -908,8 +880,8 @@ async def save_debts(callback: CallbackQuery, state: FSMContext):
     await remove_setup_button(callback)
 
     has_debts = callback.data == "debts:yes"
-    await state.update_data(has_debts=has_debts, credits=[])
-    await ask_income(callback.message, state)
+    await state.update_data(has_debts=has_debts, credits=[], progress_offset=0)
+    await ask_income_rhythm(callback.message, state)
 
 
 async def ask_income(message: Message, state: FSMContext):
@@ -917,7 +889,7 @@ async def ask_income(message: Message, state: FSMContext):
     await state.set_state(SetupStates.average_income)
     bar = setup_progress(data, 3)
 
-    if data["employment_type"] == "Наёмный":
+    if data.get("income_rhythm") == "monthly":
         text = (
             f"{bar}\n\n"
             "<b>КАКОЙ ДОХОД ВЫ СТАБИЛЬНО ПОЛУЧАЕТЕ КАЖДЫЙ МЕСЯЦ?</b>\n\n"
@@ -953,19 +925,43 @@ async def save_average_income(message: Message, state: FSMContext):
         return
 
     await state.update_data(average_income=str(money2(value)))
-    await ask_income_rhythm(message, state)
+    await ask_tax(message, state)
 
 
 async def ask_income_rhythm(message: Message, state: FSMContext):
     await state.set_state(SetupStates.income_rhythm)
-    await message.answer(
-        "<b>КАК ЧАСТО ПРИХОДИТ ОСНОВНОЙ ДОХОД?</b>\n\n"
-        "Это не связано с оформлением работы. Наёмный сотрудник тоже может "
-        "получать деньги вахтами, а фрилансер — стабильно каждый месяц.",
+    await message.answer_photo(
+        photo=FSInputFile(FINANCIAL_PROFILE_IMAGE),
+        caption=(
+            f"{progress_bar(2, 2)}\n\n"
+            "<b>ЕСЛИ СЛОЖИТЬ ВСЕ ВАШИ ДОХОДЫ, КАК ОНИ ОБЫЧНО ПРИХОДЯТ?</b>\n\n"
+            "Учитывайте зарплату, подработки, контракты и другие деньги, которыми располагаете. "
+            "Источник сейчас неважен — Аллокатор оценивает общий денежный поток."
+        ),
         reply_markup=keyboard([
-            [("Каждый месяц", "rhythm:monthly")],
-            [("Неравномерно", "rhythm:irregular")],
-            [("Вахтами или циклами", "rhythm:cyclic")],
+            [("Стабильный", "rhythm:monthly"), ("Сдельный", "rhythm:irregular")],
+            [("Контрактный (цикличный)", "rhythm:cyclic")],
+            [("Помогите выбрать", "rhythm:help")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.income_rhythm, F.data == "rhythm:help")
+async def show_income_rhythm_help(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "<b>КАК ВЫБРАТЬ ФИНАНСОВЫЙ ЦИКЛ</b>\n\n"
+        "<b>Стабильный</b> — сотрудник с постоянным окладом, пенсионер, студент с регулярной "
+        "стипендией, получатель стабильного пособия или вахтовик, которому достаточная сумма "
+        "приходит каждый календарный месяц.\n\n"
+        "<b>Сдельный</b> — фрилансер, самозанятый, преподаватель с оплатой за урок, музыкант, "
+        "мастер или продавец с комиссией: деньги приходят большую часть года, но сумма меняется.\n\n"
+        "<b>Контрактный (цикличный)</b> — моряк, сезонный работник, артист по контракту или "
+        "вахтовик, у которого заранее бывают периоды с недостаточным доходом.\n\n"
+        "Профиль определяет движение всех денег, а не название профессии.",
+        reply_markup=keyboard([
+            [("Стабильный", "rhythm:monthly"), ("Сдельный", "rhythm:irregular")],
+            [("Контрактный (цикличный)", "rhythm:cyclic")],
         ]),
     )
 
@@ -975,14 +971,39 @@ async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     rhythm = callback.data.split(":", 1)[1]
     if rhythm != "cyclic":
-        await state.update_data(income_rhythm=rhythm, income_gap_months="1")
-        await ask_tax(callback.message, state)
+        await state.update_data(
+            income_rhythm=rhythm,
+            employment_type="Наёмный" if rhythm == "monthly" else "Фрилансер",
+            income_gap_months="1",
+            income_work_months="1",
+            reliable_gap_income="0",
+            income_payout_schedule="monthly",
+            work_cost_coverage="self",
+            stabilizer_target_months="1",
+        )
+        await ask_income(callback.message, state)
         return
-    await state.set_state(SetupStates.income_gap_months)
+    await state.update_data(income_rhythm="cyclic", employment_type="Фрилансер")
+    await state.set_state(SetupStates.income_work_months)
     await callback.message.answer(
-        "<b>СКОЛЬКО МЕСЯЦЕВ МОЖЕТ НЕ БЫТЬ НАДЁЖНОГО ДОХОДА?</b>\n\n"
-        "Аллокатор создаст Стабилизатор дохода на этот промежуток. "
-        "Если выплаты продолжаются и во время отдыха, выберите 1 месяц.",
+        f"{setup_progress(await state.get_data(), 3)}\n\n"
+        "<b>СКОЛЬКО ОБЫЧНО ДЛИТСЯ РАБОЧАЯ ЧАСТЬ ЦИКЛА?</b>\n\n"
+        "Введите количество месяцев числом. Четыре недели можно считать одним месяцем."
+    )
+
+
+@router.message(SetupStates.income_work_months)
+async def save_income_work_months(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 24:
+        await message.answer("Введите количество месяцев от 1 до 24.")
+        return
+    await state.update_data(income_work_months=str(value))
+    await state.set_state(SetupStates.income_gap_months)
+    await message.answer(
+        f"{setup_progress(await state.get_data(), 4)}\n\n"
+        "<b>СКОЛЬКО ОБЫЧНО ДЛИТСЯ ПЕРИОД С НЕДОСТАТОЧНЫМ ДОХОДОМ?</b>\n\n"
+        "Укажите плановую нерабочую часть цикла. Непредвиденная задержка будет защищена Стабилизатором.",
         reply_markup=keyboard([
             [("1 месяц", "gap:1"), ("2 месяца", "gap:2")],
             [("3 месяца", "gap:3"), ("6 месяцев", "gap:6")],
@@ -999,7 +1020,7 @@ async def save_income_gap_button(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Введите количество полных месяцев без надёжного дохода.")
         return
     await state.update_data(income_rhythm="cyclic", income_gap_months=value)
-    await ask_tax(callback.message, state)
+    await ask_cyclic_payout(callback.message, state)
 
 
 @router.message(SetupStates.income_gap_months)
@@ -1009,7 +1030,63 @@ async def save_income_gap_text(message: Message, state: FSMContext):
         await message.answer("Введите целое число от 1 до 24.")
         return
     await state.update_data(income_rhythm="cyclic", income_gap_months=str(value))
-    await ask_tax(message, state)
+    await ask_cyclic_payout(message, state)
+
+
+async def ask_cyclic_payout(message: Message, state: FSMContext):
+    await state.set_state(SetupStates.income_payout_schedule)
+    await message.answer(
+        f"{setup_progress(await state.get_data(), 5)}\n\n<b>КАК ПРИХОДИТ ОСНОВНАЯ ВЫПЛАТА?</b>",
+        reply_markup=keyboard([
+            [("Каждый календарный месяц", "payout:monthly")],
+            [("Только в рабочие месяцы", "payout:work_only")],
+            [("Частями", "payout:parts"), ("В конце работы", "payout:end")],
+            [("Смешанно", "payout:mixed")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.income_payout_schedule, F.data.startswith("payout:"))
+async def save_cyclic_payout(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(income_payout_schedule=callback.data.split(":", 1)[1])
+    await state.set_state(SetupStates.work_cost_coverage)
+    await callback.message.answer(
+        f"{setup_progress(await state.get_data(), 6)}\n\n<b>КТО ОПЛАЧИВАЕТ ЖИЗНЬ ВО ВРЕМЯ РАБОТЫ?</b>\n\n"
+        "Домашние обязательства, которые продолжаются во время работы, всё равно учитываются.",
+        reply_markup=keyboard([
+            [("Всё оплачиваю самостоятельно", "coverage:self")],
+            [("Оплачивают жильё", "coverage:housing")],
+            [("Оплачивают жильё и питание", "coverage:housing_food")],
+            [("Основные расходы покрывает контракт", "coverage:main")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.work_cost_coverage, F.data.startswith("coverage:"))
+async def save_work_cost_coverage(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(work_cost_coverage=callback.data.split(":", 1)[1])
+    await state.set_state(SetupStates.reliable_gap_income)
+    await callback.message.answer(
+        f"{setup_progress(await state.get_data(), 7)}\n\n"
+        "<b>СКОЛЬКО ДЕНЕГ НАДЁЖНО ПРИХОДИТ ВО ВРЕМЯ ПЕРЕРЫВА?</b>\n\n"
+        "Сложите все гарантированные поступления. Если их нет — отправьте <code>0</code>."
+    )
+
+
+@router.message(SetupStates.reliable_gap_income)
+async def save_reliable_gap_income(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
+        return
+    await state.update_data(
+        reliable_gap_income=str(money2(value)),
+        stabilizer_target_months="2",
+        progress_offset=5,
+    )
+    await ask_income(message, state)
 
 
 async def ask_tax(message: Message, state: FSMContext):
@@ -2816,12 +2893,19 @@ async def save_minimum_months(callback: CallbackQuery, state: FSMContext):
 
 async def show_force_majeure_question_new(message: Message, state: FSMContext):
     data = await state.get_data()
-    if data["employment_type"] == "Фрилансер":
+    rhythm = data.get("income_rhythm", "monthly")
+    gap = Decimal(str(data.get("income_gap_months", "1")))
+    if rhythm == "cyclic" and gap > 1:
+        minimum = 6
         buttons = [[("6 месяцев", "fmmonths:6"), ("9 месяцев", "fmmonths:9")], [("12 месяцев", "fmmonths:12"), ("Свой вариант", "fmmonths:custom")]]
-        hint = "Для фрилансера рекомендуется накопить <b>6–12 месяцев Критического минимума</b>."
+    elif rhythm == "irregular":
+        minimum = 4
+        buttons = [[("4 месяца", "fmmonths:4"), ("6 месяцев", "fmmonths:6")], [("9 месяцев", "fmmonths:9"), ("12 месяцев", "fmmonths:12")], [("Свой вариант", "fmmonths:custom")]]
     else:
+        minimum = 3
         buttons = [[("3 месяца", "fmmonths:3"), ("4 месяца", "fmmonths:4")], [("6 месяцев", "fmmonths:6"), ("Свой вариант", "fmmonths:custom")]]
-        hint = "Ориентир для финансовой подушки — <b>3–6 месяцев Критического минимума</b>."
+    await state.update_data(force_majeure_minimum=str(minimum))
+    hint = f"Допустимый диапазон для вашего профиля — <b>{minimum}–12 месяцев Критического минимума</b>."
 
     await message.answer(
         f"{setup_progress(data, 7)}\n\n"
@@ -2846,6 +2930,12 @@ async def save_force_months_callback(callback: CallbackQuery, state: FSMContext)
             f"{setup_progress(data, 7)}\n\nВведите количество месяцев числом."
         )
         return
+    data = await state.get_data()
+    minimum = Decimal(str(data.get("force_majeure_minimum", "3")))
+    numeric = Decimal(value)
+    if numeric < minimum or numeric > 12:
+        await callback.message.answer(f"Выберите значение от {minimum} до 12 месяцев.")
+        return
     await state.update_data(force_majeure_months=value)
     await after_pillow_policy(callback.message, state)
 
@@ -2853,8 +2943,10 @@ async def save_force_months_callback(callback: CallbackQuery, state: FSMContext)
 @router.message(SetupStates.force_majeure_months)
 async def save_force_months_text(message: Message, state: FSMContext):
     value = parse_decimal(message.text)
-    if value is None or value <= 0:
-        await message.answer("Введите количество месяцев больше нуля.")
+    data = await state.get_data()
+    minimum = Decimal(str(data.get("force_majeure_minimum", "3")))
+    if value is None or value < minimum or value > 12:
+        await message.answer(f"Введите количество месяцев от {minimum} до 12.")
         return
     await state.update_data(force_majeure_months=str(value))
     await after_pillow_policy(message, state)
@@ -3390,6 +3482,22 @@ async def start_current_state(
     state: FSMContext,
 ):
 
+    data = await state.get_data()
+    step = 9 if data.get("has_debts") else 8
+
+    if data.get("income_rhythm") == "cyclic":
+        await state.set_state(SetupStates.current_intercontract)
+        await message.answer(
+            f"{setup_progress(data, step)}\n\n"
+            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В МЕЖКОНТРАКТНОМ РЕЗЕРВЕ?</b>\n\n"
+            "Это деньги на плановую жизнь во время следующего перерыва. Если резерва пока нет — отправьте <code>0</code>."
+        )
+        return
+
+    await ask_current_pillow(message, state)
+
+
+async def ask_current_pillow(message: Message, state: FSMContext):
     await state.set_state(SetupStates.current_pillow)
     data = await state.get_data()
     step = 9 if data.get("has_debts") else 8
@@ -3401,6 +3509,16 @@ async def start_current_state(
         "Не отпуск, не новый телефон и не сумму, которую вы просто стараетесь не трогать.\n\n"
         "Если Подушки пока нет — отправьте <code>0</code>."
     )
+
+
+@router.message(SetupStates.current_intercontract)
+async def save_current_intercontract(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
+        return
+    await state.update_data(current_intercontract=str(value))
+    await ask_current_pillow(message, state)
 
 
 @router.message(
@@ -3823,6 +3941,11 @@ def build_settings_from_data(
 
         income_rhythm=data.get("income_rhythm", "monthly"),
         income_gap_months=Decimal(str(data.get("income_gap_months", "1"))),
+        income_work_months=Decimal(str(data.get("income_work_months", "1"))),
+        reliable_gap_income=Decimal(str(data.get("reliable_gap_income", "0"))),
+        income_payout_schedule=data.get("income_payout_schedule", "monthly"),
+        work_cost_coverage=data.get("work_cost_coverage", "self"),
+        stabilizer_target_months=Decimal(str(data.get("stabilizer_target_months", "1"))),
 
         tax_rate=Decimal(
             data["tax_rate"]
@@ -3905,6 +4028,7 @@ def build_state_from_data(
     # --------------------------------------------------------
 
     pillow_minimum = Decimal("0")
+    intercontract_reserve = Decimal("0")
     pillow_force = Decimal("0")
     pillow_stabilizer = Decimal("0")
 
@@ -3922,6 +4046,11 @@ def build_state_from_data(
         )
 
         remaining -= pillow_minimum
+
+    intercontract_reserve = min(
+        Decimal(data.get("current_intercontract", "0")),
+        settings.intercontract_full_limit,
+    )
 
     force_limit = (
         settings.force_majeure_limit
@@ -3963,6 +4092,9 @@ def build_state_from_data(
 
         pillow_minimum=
             pillow_minimum,
+
+        intercontract_reserve=
+            intercontract_reserve,
 
         pillow_force_majeure=
             pillow_force,

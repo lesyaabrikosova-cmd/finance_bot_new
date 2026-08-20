@@ -38,6 +38,12 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
     if has_active_debts:
         rows.append([("Кредиты", "menu:credits")])
 
+    if allocator and allocator.settings.income_rhythm == "cyclic":
+        if allocator.state.intercontract_months_remaining > 0:
+            rows.append([("Зарплата из резерва", "intercontract:salary")])
+        else:
+            rows.append([("Начать перерыв", "intercontract:start")])
+
     rows.extend([
         [("Новый расчетный период", "period:new")],
     ])

@@ -147,19 +147,24 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 3,
+        "version": 4,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
         },
         "rhythm": settings.income_rhythm,
         "gap_months": decimal_to_string(settings.income_gap_months),
+        "work_months": decimal_to_string(settings.income_work_months),
+        "reliable_gap_income": decimal_to_string(settings.reliable_gap_income),
+        "payout_schedule": settings.income_payout_schedule,
+        "work_cost_coverage": settings.work_cost_coverage,
+        "stabilizer_months": decimal_to_string(settings.stabilizer_target_months),
     })
 
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -169,14 +174,20 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
     return legacy_types, {name: legacy_rate for name in legacy_types}
 
 
-def deserialize_income_rhythm(value) -> tuple[str, Decimal]:
+def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") == 3:
-        return (
-            str(raw.get("rhythm", "monthly")),
-            max(Decimal("1"), string_to_decimal(raw.get("gap_months", "1"))),
-        )
-    return "monthly", Decimal("1")
+    if isinstance(raw, dict) and raw.get("version") in {3, 4}:
+        rhythm = str(raw.get("rhythm", "monthly"))
+        return {
+            "income_rhythm": rhythm,
+            "income_gap_months": max(Decimal("1"), string_to_decimal(raw.get("gap_months", "1"))),
+            "income_work_months": max(Decimal("1"), string_to_decimal(raw.get("work_months", "1"))),
+            "reliable_gap_income": max(Decimal("0"), string_to_decimal(raw.get("reliable_gap_income", "0"))),
+            "income_payout_schedule": str(raw.get("payout_schedule", "monthly")),
+            "work_cost_coverage": str(raw.get("work_cost_coverage", "self")),
+            "stabilizer_target_months": max(Decimal("1"), string_to_decimal(raw.get("stabilizer_months", "1" if rhythm != "cyclic" else "2"))),
+        }
+    return {"income_rhythm": "monthly", "income_gap_months": Decimal("1")}
 
 
 # ============================================================
@@ -367,6 +378,8 @@ class Database:
                 accumulated_minimum_payments TEXT NOT NULL,
 
                 pillow_minimum TEXT NOT NULL,
+                intercontract_reserve TEXT NOT NULL DEFAULT '0',
+                intercontract_months_remaining TEXT NOT NULL DEFAULT '0',
                 pillow_force_majeure TEXT NOT NULL,
                 pillow_stabilizer TEXT NOT NULL,
 
@@ -487,6 +500,19 @@ class Database:
         }
         if "due_date" not in tax_columns:
             cursor.execute("ALTER TABLE tax_obligations ADD COLUMN due_date TEXT")
+
+        state_columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(state)").fetchall()
+        }
+        if "intercontract_reserve" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN intercontract_reserve TEXT NOT NULL DEFAULT '0'"
+            )
+        if "intercontract_months_remaining" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN intercontract_months_remaining TEXT NOT NULL DEFAULT '0'"
+            )
 
         # ----------------------------------------------------
         # Индексы
@@ -1040,7 +1066,7 @@ class Database:
             row["taxable_income_types"],
             legacy_tax_rate,
         )
-        income_rhythm, income_gap_months = deserialize_income_rhythm(
+        income_cycle = deserialize_income_rhythm(
             row["taxable_income_types"]
         )
 
@@ -1068,8 +1094,7 @@ class Database:
                     row["average_income"]
                 ),
 
-            income_rhythm=income_rhythm,
-            income_gap_months=income_gap_months,
+            **income_cycle,
 
             tax_rate=legacy_tax_rate,
 
@@ -1179,6 +1204,8 @@ class Database:
                 accumulated_minimum_payments,
 
                 pillow_minimum,
+                intercontract_reserve,
+                intercontract_months_remaining,
                 pillow_force_majeure,
                 pillow_stabilizer,
 
@@ -1197,7 +1224,7 @@ class Database:
             VALUES (
                 ?,
                 ?, ?,
-                ?, ?, ?,
+                ?, ?, ?, ?, ?,
                 ?, ?,
                 ?, ?,
                 ?, ?,
@@ -1215,6 +1242,12 @@ class Database:
 
                 pillow_minimum =
                     excluded.pillow_minimum,
+
+                intercontract_reserve =
+                    excluded.intercontract_reserve,
+
+                intercontract_months_remaining =
+                    excluded.intercontract_months_remaining,
 
                 pillow_force_majeure =
                     excluded.pillow_force_majeure,
@@ -1256,6 +1289,14 @@ class Database:
 
                 decimal_to_string(
                     state.pillow_minimum
+                ),
+
+                decimal_to_string(
+                    state.intercontract_reserve
+                ),
+
+                decimal_to_string(
+                    state.intercontract_months_remaining
                 ),
 
                 decimal_to_string(
@@ -1334,6 +1375,16 @@ class Database:
             pillow_minimum=
                 string_to_decimal(
                     row["pillow_minimum"]
+                ),
+
+            intercontract_reserve=
+                string_to_decimal(
+                    row["intercontract_reserve"]
+                ),
+
+            intercontract_months_remaining=
+                string_to_decimal(
+                    row["intercontract_months_remaining"]
                 ),
 
             pillow_force_majeure=

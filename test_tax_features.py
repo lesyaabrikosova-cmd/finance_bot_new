@@ -152,12 +152,27 @@ class TaxFeatureTests(unittest.TestCase):
             average_income=Decimal("3000"),
             income_rhythm="cyclic",
             income_gap_months=Decimal("6"),
+            income_work_months=Decimal("5"),
+            reliable_gap_income=Decimal("12000"),
+            income_payout_schedule="end",
+            work_cost_coverage="housing_food",
+            stabilizer_target_months=Decimal("3"),
             income_type_tax_rates={"Вахта": Decimal("0")},
         )
-        db.save_allocator(telegram_id, FinancialAllocator(settings))
+        allocator = FinancialAllocator(settings)
+        allocator.state.intercontract_reserve = Decimal("3456")
+        allocator.state.intercontract_months_remaining = Decimal("4")
+        db.save_allocator(telegram_id, allocator)
         loaded = db.load_allocator(telegram_id)
         self.assertEqual(loaded.settings.income_rhythm, "cyclic")
         self.assertEqual(loaded.settings.income_gap_months, Decimal("6"))
+        self.assertEqual(loaded.settings.income_work_months, Decimal("5"))
+        self.assertEqual(loaded.settings.reliable_gap_income, Decimal("12000"))
+        self.assertEqual(loaded.settings.income_payout_schedule, "end")
+        self.assertEqual(loaded.settings.work_cost_coverage, "housing_food")
+        self.assertEqual(loaded.settings.stabilizer_target_months, Decimal("3"))
+        self.assertEqual(loaded.state.intercontract_reserve, Decimal("3456"))
+        self.assertEqual(loaded.state.intercontract_months_remaining, Decimal("4"))
 
     def test_unknown_income_type_is_rejected_when_profile_has_types(self):
         settings = UserSettings(

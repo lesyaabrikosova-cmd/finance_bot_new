@@ -212,6 +212,11 @@ class UserSettings:
     # cyclic: между рабочими циклами бывают месяцы без надёжного дохода.
     income_rhythm: str = "monthly"
     income_gap_months: Decimal = Decimal("1")
+    income_work_months: Decimal = Decimal("1")
+    reliable_gap_income: Decimal = Decimal("0")
+    income_payout_schedule: str = "monthly"
+    work_cost_coverage: str = "self"
+    stabilizer_target_months: Decimal = Decimal("1")
 
     # ----------------------------
     # Налог
@@ -281,6 +286,9 @@ class UserSettings:
         self.household_reserve = D(self.household_reserve)
         self.average_income = D(self.average_income)
         self.income_gap_months = max(ONE, D(self.income_gap_months))
+        self.income_work_months = max(ONE, D(self.income_work_months))
+        self.reliable_gap_income = max(ZERO, D(self.reliable_gap_income))
+        self.stabilizer_target_months = max(ONE, D(self.stabilizer_target_months))
 
         self.tax_rate = D(self.tax_rate)
         self.income_type_tax_rates = {
@@ -390,11 +398,33 @@ class UserSettings:
 
     @property
     def needs_stabilizer(self) -> bool:
-        return self.employment_type == "Фрилансер" or self.income_rhythm == "cyclic"
+        return self.income_rhythm in {"irregular", "cyclic"} or self.employment_type == "Фрилансер"
 
     @property
     def stabilizer_months(self) -> Decimal:
-        return self.income_gap_months if self.needs_stabilizer else ONE
+        if self.income_rhythm == "cyclic":
+            return max(Decimal("2"), self.stabilizer_target_months)
+        return self.stabilizer_target_months if self.needs_stabilizer else ONE
+
+    @property
+    def needs_intercontract_reserve(self) -> bool:
+        return self.income_rhythm == "cyclic" and self.intercontract_full_limit > ZERO
+
+    @property
+    def intercontract_life_limit(self) -> Decimal:
+        """Плановая нехватка КМ на всю неоплачиваемую часть цикла."""
+        if self.income_rhythm != "cyclic":
+            return ZERO
+        monthly_gap = max(ZERO, self.critical_life - self.reliable_gap_income)
+        return monthly_gap * self.income_gap_months
+
+    @property
+    def intercontract_full_limit(self) -> Decimal:
+        """Плановая нехватка УЖ на всю неоплачиваемую часть цикла."""
+        if self.income_rhythm != "cyclic":
+            return ZERO
+        monthly_gap = max(ZERO, self.household_life - self.reliable_gap_income)
+        return monthly_gap * self.income_gap_months
 
     @property
     def total_goals_percentage(self) -> Decimal:
@@ -482,6 +512,15 @@ class UserSettings:
         if self.income_gap_months < ONE:
             errors.append("Период без дохода должен быть не меньше одного месяца.")
 
+        if self.income_work_months < ONE:
+            errors.append("Рабочая часть цикла должна быть не меньше одного месяца.")
+
+        if self.income_payout_schedule not in {"monthly", "work_only", "parts", "end", "mixed"}:
+            errors.append("Неизвестная схема выплаты циклического дохода.")
+
+        if self.work_cost_coverage not in {"self", "housing", "housing_food", "main"}:
+            errors.append("Неизвестный способ покрытия расходов во время работы.")
+
         if self.debt_strategy not in {
             "Лавина",
             "Снежный ком",
@@ -515,6 +554,8 @@ class AllocatorState:
     # ----------------------------
 
     pillow_minimum: Decimal = ZERO
+    intercontract_reserve: Decimal = ZERO
+    intercontract_months_remaining: Decimal = ZERO
     pillow_force_majeure: Decimal = ZERO
     pillow_stabilizer: Decimal = ZERO
 
@@ -583,6 +624,8 @@ class AllocatorState:
         )
 
         self.pillow_minimum = D(self.pillow_minimum)
+        self.intercontract_reserve = D(self.intercontract_reserve)
+        self.intercontract_months_remaining = max(ZERO, D(self.intercontract_months_remaining))
         self.pillow_force_majeure = D(
             self.pillow_force_majeure
         )
@@ -848,6 +891,9 @@ class FinancialAllocator:
         if layer == "МП":
             return self.settings.minimum_reserve_limit
 
+        if layer == "МР":
+            return self.intercontract_current_limit
+
         if layer == "ФМ":
             return self.settings.force_majeure_limit
 
@@ -865,6 +911,9 @@ class FinancialAllocator:
 
         if layer == "МП":
             return self.state.pillow_minimum
+
+        if layer == "МР":
+            return self.state.intercontract_reserve
 
         if layer == "ФМ":
             return self.state.pillow_force_majeure
@@ -911,6 +960,9 @@ class FinancialAllocator:
         if layer == "МП":
             self.state.pillow_minimum += actual
 
+        elif layer == "МР":
+            self.state.intercontract_reserve += actual
+
         elif layer == "ФМ":
             self.state.pillow_force_majeure += actual
 
@@ -932,7 +984,7 @@ class FinancialAllocator:
         """
         Водопад:
 
-        МП → ФМ → СтабД
+        МП → МР → ФМ → СтабД
 
         Возвращает остаток, если вся Подушка заполнена.
         """
@@ -942,7 +994,7 @@ class FinancialAllocator:
         if amount <= ZERO:
             return ZERO
 
-        layers = ["МП", "ФМ", "СтабД"]
+        layers = ["МП", "МР", "ФМ", "СтабД"]
 
         try:
             start_index = layers.index(start_layer)
@@ -968,6 +1020,39 @@ class FinancialAllocator:
     # ОПРЕДЕЛЕНИЕ РЕЖИМА
     # ========================================================
 
+    @property
+    def intercontract_monthly_salary(self) -> Decimal:
+        return max(ZERO, self.settings.household_life - self.settings.reliable_gap_income)
+
+    @property
+    def intercontract_current_limit(self) -> Decimal:
+        if self.settings.income_rhythm != "cyclic":
+            return ZERO
+        if self.state.intercontract_months_remaining > ZERO:
+            return self.intercontract_monthly_salary * self.state.intercontract_months_remaining
+        return self.settings.intercontract_full_limit
+
+    def start_intercontract_break(self) -> dict:
+        if self.settings.income_rhythm != "cyclic":
+            raise ValueError("Межконтрактный период доступен только циклическому профилю.")
+        self.state.intercontract_months_remaining = self.settings.income_gap_months
+        return {
+            "months_remaining": self.state.intercontract_months_remaining,
+            "monthly_salary": self.intercontract_monthly_salary,
+        }
+
+    def pay_intercontract_salary(self) -> Decimal:
+        if self.state.intercontract_months_remaining <= ZERO:
+            raise ValueError("Сначала начните межконтрактный период.")
+        missing_life = max(ZERO, self.settings.household_life - self.state.life_balance)
+        if missing_life <= ZERO:
+            raise ValueError("Баланс жизни этого периода уже заполнен. Сначала начните новый расчётный период.")
+        amount = min(self.intercontract_monthly_salary, missing_life, self.state.intercontract_reserve)
+        self.state.intercontract_reserve -= amount
+        self.state.life_balance += amount
+        self.state.intercontract_months_remaining -= ONE
+        return amount
+
     def active_mode(self) -> int:
         """
         Определяет финансовый режим пользователя.
@@ -991,8 +1076,8 @@ class FinancialAllocator:
             return MODE_2
 
         if (
-            self.state.pillow_force_majeure
-            < self.settings.force_majeure_limit
+            self.state.intercontract_reserve < self.intercontract_current_limit
+            or self.state.pillow_force_majeure < self.settings.force_majeure_limit
         ):
             return MODE_3
 
@@ -1049,10 +1134,9 @@ class FinancialAllocator:
                 candidates.append((MODE_3, total_debt))
 
         elif current_mode == MODE_3:
-            remaining = max(
-                ZERO,
-                s.force_majeure_limit
-                - st.pillow_force_majeure,
+            remaining = (
+                max(ZERO, self.intercontract_current_limit - st.intercontract_reserve)
+                + max(ZERO, s.force_majeure_limit - st.pillow_force_majeure)
             )
 
             if remaining > ZERO:
@@ -1144,7 +1228,7 @@ class FinancialAllocator:
         mapping = {
             MODE_1: "МП",
             MODE_2: "Досрочное",
-            MODE_3: "ФМ",
+            MODE_3: "МР" if self.settings.needs_intercontract_reserve else "ФМ",
             MODE_4: "СтабД",
             MODE_5: "Инвест",
             MODE_6: "Инвест",
@@ -1287,13 +1371,16 @@ class FinancialAllocator:
         up_target = self.bracket_up_target(mode)
         final_overflow = ZERO
 
-        if up_target in {"МП", "ФМ", "СтабД"}:
+        if up_target in {"МП", "МР", "ФМ", "СтабД"}:
+            intercontract_before = st.intercontract_reserve
             final_overflow = self.waterfall_pillow(
                 up_calculated,
                 up_target,
             )
             actual_up = up_calculated - final_overflow
-            allocations["Подушка"] += actual_up
+            intercontract_added = st.intercontract_reserve - intercontract_before
+            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Подушка"] += actual_up - intercontract_added
 
         elif up_target == "Инвест":
             st.investments += up_calculated
@@ -1427,13 +1514,16 @@ class FinancialAllocator:
         up_target = self.bracket_up_target(mode)
         final_overflow = ZERO
 
-        if up_target in {"МП", "ФМ", "СтабД"}:
+        if up_target in {"МП", "МР", "ФМ", "СтабД"}:
+            intercontract_before = st.intercontract_reserve
             final_overflow = self.waterfall_pillow(
                 up_calculated,
                 up_target,
             )
             actual_up = up_calculated - final_overflow
-            allocations["Подушка"] += actual_up
+            intercontract_added = st.intercontract_reserve - intercontract_before
+            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Подушка"] += actual_up - intercontract_added
 
         elif up_target == "Инвест":
             st.investments += up_calculated
@@ -1535,14 +1625,17 @@ class FinancialAllocator:
                 mode,
                 ONE,
             )
+            intercontract_before = st.intercontract_reserve
             overflow = self.waterfall_pillow(
                 part,
-                "ФМ",
+                "МР" if s.needs_intercontract_reserve else "ФМ",
             )
 
             actual = part - overflow
 
-            allocations["Подушка"] += actual
+            intercontract_added = st.intercontract_reserve - intercontract_before
+            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Подушка"] += actual - intercontract_added
 
             return amount - part + overflow
 
@@ -1859,14 +1952,16 @@ class FinancialAllocator:
                 mode,
                 ONE,
             )
+            intercontract_before = self.state.intercontract_reserve
             overflow = self.waterfall_pillow(
                 part,
-                "ФМ",
+                "МР" if s.needs_intercontract_reserve else "ФМ",
             )
 
-            allocations[
-                "Подушка"
-            ] += part - overflow
+            actual = part - overflow
+            intercontract_added = self.state.intercontract_reserve - intercontract_before
+            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Подушка"] += actual - intercontract_added
 
             return amount - part + overflow
 
@@ -2414,6 +2509,14 @@ class FinancialAllocator:
                     self.state.pillow_stabilizer,
             },
 
+            "intercontract_reserve": {
+                "balance": self.state.intercontract_reserve,
+                "critical_target": self.settings.intercontract_life_limit,
+                "full_target": self.settings.intercontract_full_limit,
+                "current_target": self.intercontract_current_limit,
+                "months_remaining": self.state.intercontract_months_remaining,
+            },
+
             "investments":
                 self.state.investments,
 
@@ -2480,6 +2583,9 @@ class FinancialAllocator:
         pillow_ok = (
             st.pillow_minimum
             <= s.minimum_reserve_limit
+            + CENT
+            and st.intercontract_reserve
+            <= max(s.intercontract_full_limit, self.intercontract_current_limit)
             + CENT
             and st.pillow_force_majeure
             <= s.force_majeure_limit

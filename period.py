@@ -9,6 +9,44 @@ from ui import keyboard, main_menu_keyboard
 
 router = Router()
 
+
+@router.callback_query(F.data == "intercontract:start")
+async def start_intercontract_period(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or allocator.settings.income_rhythm != "cyclic":
+        await callback.message.answer("Межконтрактный период недоступен для этого профиля.")
+        return
+    result = allocator.start_intercontract_break()
+    db.save_allocator(callback.from_user.id, allocator)
+    await callback.message.answer(
+        "<b>МЕЖКОНТРАКТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
+        f"Месяцев: <b>{result['months_remaining']}</b>\n"
+        f"Плановая зарплата себе: <b>{result['monthly_salary']} ₽</b>.\n\n"
+        "Используйте кнопку «Зарплата из резерва» в начале каждого месяца.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data == "intercontract:salary")
+async def pay_intercontract_salary(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    try:
+        amount = allocator.pay_intercontract_salary()
+    except ValueError as error:
+        await callback.message.answer(str(error))
+        return
+    db.save_allocator(callback.from_user.id, allocator)
+    await callback.message.answer(
+        f"Из Межконтрактного резерва в Баланс жизни переведено <b>{amount} ₽</b>.\n\n"
+        "Это внутренний перевод: налог и повторное распределение не рассчитываются.\n"
+        f"Осталось месяцев: <b>{allocator.state.intercontract_months_remaining}</b>.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
 @router.callback_query(F.data == "period:new")
 async def ask_new_period(callback: CallbackQuery):
     await callback.answer()

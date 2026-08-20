@@ -244,11 +244,16 @@ async def send_state(
         else "без долгов"
     )
 
+    profile_names = {
+        "monthly": "Стабильный",
+        "irregular": "Сдельный",
+        "cyclic": "Контрактный (цикличный)",
+    }
     text = (
         "🧭 <b>ТЕКУЩЕЕ СОСТОЯНИЕ</b>\n\n"
 
         f"👤 Профиль: "
-        f"<b>{settings.employment_type}, "
+        f"<b>{profile_names.get(settings.income_rhythm, settings.employment_type)}, "
         f"{profile_debt}</b>\n\n"
 
         f"⚙️ Активный режим: "
@@ -274,6 +279,13 @@ async def send_state(
         f"<b>{fmt_money(state.early_repayment)} ₽</b>"
     )
 
+    if settings.income_rhythm == "cyclic":
+        text += (
+            "\n\n<b>Межконтрактный резерв</b>: "
+            f"<b>{fmt_money(state.intercontract_reserve)} ₽</b> / "
+            f"{fmt_money(settings.intercontract_full_limit)} ₽"
+        )
+
     if next_info:
 
         text += (
@@ -291,6 +303,10 @@ async def send_state(
             f"{fmt_money(state.pillow_minimum)} ₽ "
             f"/ "
             f"{fmt_money(settings.minimum_reserve_limit)} ₽\n"
+
+            f"Межконтрактный резерв: "
+            f"{fmt_money(state.intercontract_reserve)} ₽ / "
+            f"{fmt_money(settings.intercontract_full_limit)} ₽\n"
 
             f"Форс-мажорная: "
             f"{fmt_money(state.pillow_force_majeure)} ₽ "
