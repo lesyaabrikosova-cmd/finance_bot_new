@@ -422,7 +422,7 @@ async def intro_step_2(
         "Каждый раз, когда приходят деньги, я рассчитываю, <b>сколько и куда отправить</b>.\n\n"
         "Вы переводите эти суммы по отдельным <b>накопительным счетам</b> в своём банке — "
         "финансовым «конвертам» (это бесплатно).\n\n"
-        "Некоторые покажутся очевидными. <b>Другие вы, скорее всего, сами бы не создали. "
+        "Некоторые покажутся очевидными. <b>Другие конверты, скорее всего, сами бы не создали. "
         "И вот тут начинается самое интересное</b>."
     )
 
@@ -862,14 +862,21 @@ async def setup_start(callback: CallbackQuery, state: FSMContext):
         br_items=[],
     )
     await state.set_state(SetupStates.has_debts)
-    await callback.message.answer(
+    await callback.message.answer_photo(
+        photo=FSInputFile(FINANCIAL_PROFILE_IMAGE),
+        caption=(
         f"{progress_bar(1, 2)}\n\n"
         "<b>ЕСТЬ КРЕДИТЫ ИЛИ ДОЛГИ?</b>\n\n"
-        "- Потребительский кредит\n- Автокредит\n- Рассрочка\n- Микрозайм\n"
-        "- Долги людям\n- Задолженность по кредитке\n\n"
-        "Кредитная карта без задолженности долгом не считается.",
+        "• Потребительский кредит\n"
+        "• Автокредит\n"
+        "• Рассрочка\n"
+        "• Микрозайм\n"
+        "• Задолженность по кредитке\n"
+        "• Долги людям\n\n"
+        "(Кредитка без задолженности долгом не считается)"
+        ),
         reply_markup=keyboard([
-            [("Есть", "debts:yes"), ("Нет", "debts:no")],
+            [("Есть долги", "debts:yes"), ("Нет долгов", "debts:no")],
         ]),
     )
 
@@ -930,18 +937,15 @@ async def save_average_income(message: Message, state: FSMContext):
 
 async def ask_income_rhythm(message: Message, state: FSMContext):
     await state.set_state(SetupStates.income_rhythm)
-    await message.answer_photo(
-        photo=FSInputFile(FINANCIAL_PROFILE_IMAGE),
-        caption=(
+    await message.answer(
+        (
             f"{progress_bar(2, 2)}\n\n"
-            "<b>ЕСЛИ СЛОЖИТЬ ВСЕ ВАШИ ДОХОДЫ, КАК ОНИ ОБЫЧНО ПРИХОДЯТ?</b>\n\n"
-            "Учитывайте зарплату, подработки, контракты и другие деньги, которыми располагаете. "
-            "Источник сейчас неважен — Аллокатор оценивает общий денежный поток."
+            "<b>ОХАРАКТЕРИЗУЙТЕ ВАШ ОСНОВНОЙ ДОХОД, КОТОРЫЙ ПРИНОСИТ ВАМ БОЛЬШЕ ВСЕГО ДЕНЕГ</b>"
         ),
         reply_markup=keyboard([
             [("Стабильный", "rhythm:monthly"), ("Сдельный", "rhythm:irregular")],
-            [("Контрактный (цикличный)", "rhythm:cyclic")],
-            [("Помогите выбрать", "rhythm:help")],
+            [("Цикличный (контрактный)", "rhythm:cyclic")],
+            [("ℹ️", "rhythm:help")],
         ]),
     )
 
@@ -988,7 +992,12 @@ async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"{setup_progress(await state.get_data(), 3)}\n\n"
         "<b>СКОЛЬКО ОБЫЧНО ДЛИТСЯ РАБОЧАЯ ЧАСТЬ ЦИКЛА?</b>\n\n"
-        "Введите количество месяцев числом. Четыре недели можно считать одним месяцем."
+        "ℹ️ Цикл — это полный повторяющийся отрезок: рабочая часть + нерабочая часть.\n\n"
+        "Поэтому:\n"
+        "• Маша работает 5 месяцев и 7 месяцев живёт до следующего контракта — цикл 12 месяцев;\n"
+        "• Петя работает месяц и месяц отдыхает — цикл 2 месяца.\n\n"
+        "——————\n"
+        "<b>→ Введите количество рабочих месяцев числом.</b>"
     )
 
 
@@ -1003,7 +1012,8 @@ async def save_income_work_months(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(await state.get_data(), 4)}\n\n"
         "<b>СКОЛЬКО ОБЫЧНО ДЛИТСЯ ПЕРИОД С НЕДОСТАТОЧНЫМ ДОХОДОМ?</b>\n\n"
-        "Укажите плановую нерабочую часть цикла. Непредвиденная задержка будет защищена Стабилизатором.",
+        "——————\n"
+        "<b>→ Укажите плановую нерабочую часть цикла.</b>",
         reply_markup=keyboard([
             [("1 месяц", "gap:1"), ("2 месяца", "gap:2")],
             [("3 месяца", "gap:3"), ("6 месяцев", "gap:6")],
@@ -1038,11 +1048,24 @@ async def ask_cyclic_payout(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(await state.get_data(), 5)}\n\n<b>КАК ПРИХОДИТ ОСНОВНАЯ ВЫПЛАТА?</b>",
         reply_markup=keyboard([
-            [("Каждый календарный месяц", "payout:monthly")],
             [("Только в рабочие месяцы", "payout:work_only")],
-            [("Частями", "payout:parts"), ("В конце работы", "payout:end")],
-            [("Смешанно", "payout:mixed")],
+            [("Каждый календарный месяц", "payout:monthly")],
+            [("В конце работы", "payout:end"), ("Частями", "payout:parts")],
+            [("Смешанно", "payout:mixed"), ("ℹ️", "payouthelp")],
         ]),
+    )
+
+
+@router.callback_query(SetupStates.income_payout_schedule, F.data == "payouthelp")
+async def show_cyclic_payout_help(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "<b>КАК ВЫБРАТЬ СХЕМУ ВЫПЛАТЫ</b>\n\n"
+        "<b>Только в рабочие месяцы</b> — деньги приходят, пока вы работаете, а во время отдыха выплат нет.\n\n"
+        "<b>Каждый календарный месяц</b> — выплаты продолжаются и во время работы, и во время отдыха.\n\n"
+        "<b>В конце работы</b> — основную сумму выплачивают после завершения вахты или контракта.\n\n"
+        "<b>Частями</b> — несколько выплат в разные моменты работы.\n\n"
+        "<b>Смешанно</b> — например, ежемесячные выплаты и отдельная финальная сумма."
     )
 
 
