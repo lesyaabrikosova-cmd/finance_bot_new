@@ -41,6 +41,8 @@ INTRO_IMAGE_2 = INTRO_IMAGES_DIR / "intro_2.png"
 INTRO_IMAGE_3 = INTRO_IMAGES_DIR / "intro_3.png"
 INTRO_IMAGE_4 = INTRO_IMAGES_DIR / "intro_4.png"
 FINANCIAL_PROFILE_IMAGE = INTRO_IMAGES_DIR / "financial_profile.png"
+CRITICAL_MINIMUM_IMAGE = INTRO_IMAGES_DIR / "critical_minimum.png"
+HOUSEHOLD_RESERVE_IMAGE = INTRO_IMAGES_DIR / "household_reserve.png"
 
 # Стандартный эффект Telegram «Праздник / конфетти». Эффекты работают только
 # в личных чатах и могут быть недоступны в отдельных версиях клиента.
@@ -962,25 +964,26 @@ async def ask_income(message: Message, state: FSMContext):
             "<b>Например:</b> <code>180000</code>"
         )
     elif data.get("income_rhythm") == "cyclic":
-        work_months = data.get("income_work_months", "рабочая часть")
-        gap_months = data.get("income_gap_months", "перерыв")
         text = (
             f"{bar}\n\n"
-            "<b>КАКОЙ СРЕДНЕМЕСЯЧНЫЙ ДОХОД ПОЛУЧАЕТСЯ ЗА ВЕСЬ ФИНАНСОВЫЙ ЦИКЛ?</b>\n\n"
-            "Это не сумма ежемесячной выплаты. Нужен ориентир для всего цикла: рабочая часть + перерыв.\n\n"
-            "Сложите весь доход, которым вы лично располагаете за полный цикл, до покупок и переводов "
-            "в накопления. Деньги, которыми работодатель оплачивает жильё или питание напрямую, не добавляйте. "
+            "<b>СРЕДНЕМЕСЯЧНЫЙ ДОХОД ЗА ВЕСЬ ФИНАНСОВЫЙ ЦИКЛ</b>\n\n"
+            "Сложите весь доход, которым вы лично располагаете за полный цикл, <b>до покупок и переводов "
+            "в накопления</b>. "
             "Если доход приходит в другой валюте, сначала переведите всю сумму в примерный "
             "рублёвый эквивалент. Все расчёты Аллокатора ведутся в рублях.\n\n"
-            f"Разделите результат на <b>{work_months} + {gap_months} мес.</b>\n\n"
-            "Например, Надя за 5 рабочих месяцев получила 840 000 рупий. Затем 7 месяцев дохода нет. "
-            "Её цикл — 12 месяцев. Сначала Надя переводит все 840 000 рупий в примерный рублёвый "
-            "эквивалент, затем делит получившуюся сумму в рублях на 12.\n\n"
+            "<b>Например:</b>\n"
+            "• Петя — механик, работает вахтами. За 1 рабочий месяц получил <b>150 000 ₽</b>. "
+            "Затем 1 месяц не работал. Его цикл — <b>2</b> месяца. Петя делит 150 000 на 2 и "
+            "получившуюся сумму округляет в <b>меньшую</b> сторону.\n\n"
+            "• Маша — артист на контракте за рубежом. За 5 рабочих месяцев получила $8200. "
+            "Затем 7 месяцев дохода в России нет. Её цикл — 12 месяцев. Сначала Маша навскидку "
+            "переводит $8200 в примерный <b>рублёвый эквивалент</b> и делит на 12. Получившуюся "
+            "сумму Маша округляет в <b>меньшую</b> сторону.\n\n"
             "Эта цифра помогает отличать обычную часть дохода от сверхдохода и не означает, "
             "что деньги действительно приходят каждый месяц.\n\n"
             "——————\n"
-            "<b>→ Введите среднемесячный доход за полный цикл.</b>\n"
-            "<b>Введите результат в рублях.</b>"
+            "<b>→ Введите среднемесячный доход за полный цикл в рублях.</b>\n"
+            "<b>Например:</b> <code>57000</code>"
         )
     else:
         text = (
@@ -1089,7 +1092,8 @@ async def save_income_work_months(message: Message, state: FSMContext):
         f"{setup_progress(await state.get_data(), 4)}\n\n"
         "<b>СКОЛЬКО ОБЫЧНО ДЛИТСЯ ПЕРИОД С НЕДОСТАТОЧНЫМ ДОХОДОМ?</b>\n\n"
         "——————\n"
-        "<b>→ Укажите плановую нерабочую часть цикла.</b>",
+        "→ Укажите плановую <b>нерабочую</b> часть цикла.\n"
+        "<b>Например:</b> <code>7</code>",
         reply_markup=keyboard([
             [("1 месяц", "gap:1"), ("2 месяца", "gap:2")],
             [("3 месяца", "gap:3"), ("6 месяцев", "gap:6")],
@@ -1439,12 +1443,25 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
     if items:
         rows.insert(-1, [("Редактировать", "kmedit:list")])
 
-    await message.answer(
+    text = (
         f"{setup_progress(data, 5)}\n\n"
         "<b>ПОСЧИТАЕМ ВАШ КРИТИЧЕСКИЙ МИНИМУМ</b>"
         + intro_text
-        + summary,
-        reply_markup=keyboard(rows),
+        + summary
+    )
+    reply_markup = keyboard(rows)
+
+    if intro and CRITICAL_MINIMUM_IMAGE.exists() and len(text) <= 1024:
+        await message.answer_photo(
+            photo=FSInputFile(CRITICAL_MINIMUM_IMAGE),
+            caption=text,
+            reply_markup=reply_markup,
+        )
+        return
+
+    await message.answer(
+        text,
+        reply_markup=reply_markup,
     )
 
 
@@ -2626,7 +2643,26 @@ async def show_br_menu(message: Message, state: FSMContext, intro: bool = False)
     if items:
         rows.append([("Редактировать расходы", "bredit:list")])
     rows.append([("Рассчитать Бытовой резерв", "br:finish")])
-    await message.answer(f"{setup_progress(data, 6)}\n\n<b>ПОСЧИТАЕМ ВАШ БЫТОВОЙ РЕЗЕРВ</b>" + intro_text + summary, reply_markup=keyboard(rows))
+    text = (
+        f"{setup_progress(data, 6)}\n\n"
+        "<b>ПОСЧИТАЕМ ВАШ БЫТОВОЙ РЕЗЕРВ</b>"
+        + intro_text
+        + summary
+    )
+    reply_markup = keyboard(rows)
+
+    if intro and HOUSEHOLD_RESERVE_IMAGE.exists() and len(text) <= 1024:
+        await message.answer_photo(
+            photo=FSInputFile(HOUSEHOLD_RESERVE_IMAGE),
+            caption=text,
+            reply_markup=reply_markup,
+        )
+        return
+
+    await message.answer(
+        text,
+        reply_markup=reply_markup,
+    )
 
 
 @router.callback_query(SetupStates.br_menu, F.data.startswith("brcat:"))
