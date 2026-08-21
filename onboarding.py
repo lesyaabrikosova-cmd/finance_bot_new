@@ -6,6 +6,7 @@ from html import escape
 from pathlib import Path
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,6 +41,10 @@ INTRO_IMAGE_2 = INTRO_IMAGES_DIR / "intro_2.png"
 INTRO_IMAGE_3 = INTRO_IMAGES_DIR / "intro_3.png"
 INTRO_IMAGE_4 = INTRO_IMAGES_DIR / "intro_4.png"
 FINANCIAL_PROFILE_IMAGE = INTRO_IMAGES_DIR / "financial_profile.png"
+
+# Стандартный эффект Telegram «Праздник / конфетти». Эффекты работают только
+# в личных чатах и могут быть недоступны в отдельных версиях клиента.
+PARTY_POPPER_EFFECT_ID = "5046509860389126442"
 
 
 # ============================================================
@@ -290,24 +295,41 @@ async def start(
     )
 
     if existing is not None:
-
-        await message.answer(
+        text = (
             "<b>ФИНАНСОВЫЙ ПРОФИЛЬ УЖЕ НАСТРОЕН</b>\n\n"
             "Изменить отдельные параметры можно в <b>Настройках</b>.\n\n"
-            "Чтобы пройти настройку с нуля, нажмите <b>Настроить заново</b>.",
-            reply_markup=keyboard([
-                [
-                    (
-                        "Настройки",
-                        "settings:open",
-                    ),
-                    (
-                        "Настроить заново",
-                        "setup:restart",
-                    )
-                ]
-            ]),
+            "Чтобы пройти настройку с нуля, нажмите <b>Настроить заново</b>."
         )
+        reply_markup = keyboard([
+            [
+                (
+                    "Настройки",
+                    "settings:open",
+                ),
+                (
+                    "Настроить заново",
+                    "setup:restart",
+                )
+            ]
+        ])
+
+        try:
+            await message.answer(
+                text,
+                reply_markup=reply_markup,
+                message_effect_id=(
+                    PARTY_POPPER_EFFECT_ID
+                    if message.chat.type == "private"
+                    else None
+                ),
+            )
+        except TelegramBadRequest:
+            # Если Telegram изменит или отключит эффект, /start всё равно
+            # должен вернуть пользователю основное сообщение.
+            await message.answer(
+                text,
+                reply_markup=reply_markup,
+            )
 
         return
 
