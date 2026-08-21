@@ -527,7 +527,7 @@ KM_CATEGORIES = {
         "• Еда вне дома\n"
         "• Доставки, если это необходимо\n"
         "• Другое питание, без которого нельзя нормально прожить месяц.\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Вода, Супермаркет, Столовка",
     ),
@@ -539,7 +539,7 @@ KM_CATEGORIES = {
         "• Необходимые подписки с ежемесячной оплатой\n\n"
         "<b>Совет:</b> если вы оплачиваете подписку НЕ каждый месяц, то лучше добавьте её "
         "в Бытовой резерв. В противном случае система предложит создать отдельный конверт «Подписки».\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> МТС, Домашний интернет, Яндекс Плюс",
     ),
@@ -575,14 +575,14 @@ KM_CATEGORIES = {
         "- Школа\n"
         "- Питание\n"
         "- Секции и другие действительно <b>обязательные ежемесячные</b> расходы на детей.\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Музыкальная школа, Питание",
     ),
     "pets": (
         "Питомцы",
         "• Корм\n• Наполнитель\n• Пелёнки\n• Аксессуары\n• Ветеринар\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Кошачий корм, Ветеринарка, Пелёнки собаке",
     ),
@@ -596,7 +596,7 @@ KM_CATEGORIES = {
         "- Витамины и др.\n\n"
         "Если трата повторяется нерегулярно, укажите сумму за несколько месяцев или "
         "за год — Аллокатор сам приведёт её к среднемесячной.\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Стоматолог, Анализы, Лекарства",
     ),
@@ -935,8 +935,29 @@ async def ask_income(message: Message, state: FSMContext):
             "Премии, годовые бонусы, гранты, случайные подработки и другие нерегулярные поступления — нет. "
             "Для Аллокатора это сверхдоход.\n\n"
             "Не оценивайте сумму по памяти. Откройте историю поступлений за последние 6–12 месяцев и найдите устойчивую месячную базу.\n\n"
-            "Введите сумму.\n\n"
-            "Например: <code>180000</code>"
+            "——————\n"
+            "<b>→ Введите сумму.</b>\n"
+            "<b>Например:</b> <code>180000</code>"
+        )
+    elif data.get("income_rhythm") == "cyclic":
+        work_months = data.get("income_work_months", "рабочая часть")
+        gap_months = data.get("income_gap_months", "перерыв")
+        text = (
+            f"{bar}\n\n"
+            "<b>КАКОЙ СРЕДНЕМЕСЯЧНЫЙ ДОХОД ПОЛУЧАЕТСЯ ЗА ВЕСЬ ФИНАНСОВЫЙ ЦИКЛ?</b>\n\n"
+            "Это не сумма ежемесячной выплаты. Нужен ориентир для всего цикла: рабочая часть + перерыв.\n\n"
+            "Сложите весь доход, которым вы лично располагаете за полный цикл, до покупок и переводов "
+            "в накопления. Деньги, которыми работодатель оплачивает жильё или питание напрямую, не добавляйте. "
+            "Для дохода в другой валюте используйте примерный рублёвый эквивалент.\n\n"
+            f"Разделите результат на <b>{work_months} + {gap_months} мес.</b>\n\n"
+            "Например, Надя за 5 рабочих месяцев получила 840 000 рупий. Затем 7 месяцев дохода нет. "
+            "Её цикл — 12 месяцев, поэтому средняя база составляет 70 000 рупий в месяц. "
+            "Для Аллокатора она указывает примерный рублёвый эквивалент этой суммы.\n\n"
+            "Эта цифра помогает отличать обычную часть дохода от сверхдохода и не означает, "
+            "что деньги действительно приходят каждый месяц.\n\n"
+            "——————\n"
+            "<b>→ Введите среднемесячный доход за полный цикл.</b>\n"
+            "<b>Например:</b> <code>70000</code>"
         )
     else:
         text = (
@@ -946,7 +967,7 @@ async def ask_income(message: Message, state: FSMContext):
             "Лучший месяц не считается вашей новой нормой.\n\n"
             "В банковском приложении посмотрите ваш доход за период и разделите на количество "
             "месяцев. <b>Округлите в меньшую сторону</b>.\n\n"
-            "—————\n"
+            "——————\n"
             "<b>→ Введите среднемесячный доход.</b>\n"
             "<b>Например:</b> <code>180000</code>"
         )
@@ -1076,7 +1097,8 @@ async def ask_reliable_gap_income(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(await state.get_data(), 5)}\n\n"
         "<b>СКОЛЬКО ДЕНЕГ НАДЁЖНО ПРИХОДИТ ВО ВРЕМЯ ПЕРЕРЫВА?</b>\n\n"
-        "Сложите все гарантированные поступления. Если их нет — отправьте <code>0</code>."
+        "——————\n"
+        "<b>→ Сложите все гарантированные поступления за месяц.</b> Если их нет — отправьте <code>0</code>."
     )
 
 
@@ -1091,8 +1113,9 @@ async def save_reliable_gap_income(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(await state.get_data(), 6)}\n\n"
         "<b>НА СКОЛЬКО МОЖЕТ УВЕЛИЧИТЬСЯ ПЕРЕРЫВ МЕЖДУ КОНТРАКТАМИ?</b>\n\n"
-        "Межконтрактный резерв покрывает плановый перерыв. Стабилизатор нужен, если следующий "
-        "контракт задержится, отменится или предыдущий закончится раньше по независящим от вас причинам.",
+        "Я сформирую <b>Стабилизатор дохода</b>, который защитит вас, если следующий контракт "
+        "задержится, отменится или предыдущий закончится раньше.\n\n"
+        "Рекомендую выбрать 2 месяца.",
         reply_markup=keyboard([
             [("1 месяц", "stabilizermonths:1"), ("2 месяца", "stabilizermonths:2")],
             [("3 месяца", "stabilizermonths:3"), ("6 месяцев", "stabilizermonths:6")],
@@ -1142,7 +1165,7 @@ async def show_income_types_setup(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(data, 4)}\n\n"
         "<b>ТИПЫ ДОХОДОВ</b>\n\n"
-        "Добавьте поступления, которые получаете или планируете учитывать. Они станут кнопками "
+        "Добавьте свои названия доходов, которые планируете учитывать. Они станут кнопками "
         "при добавлении нового дохода. Для каждого типа можно отдельно указать налог.\n\n"
         + ("\n".join(lines) if lines else "Пока ничего не добавлено."),
         reply_markup=keyboard(rows),
@@ -1154,7 +1177,7 @@ async def profile_income_add(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(SetupStates.income_type_name)
     await callback.message.answer(
-        "<b>НОВЫЙ ТИП ДОХОДА</b>\n\n—————\n"
+        "<b>НОВЫЙ ТИП ДОХОДА</b>\n\n——————\n"
         "<b>→ Введите короткое название.</b>\n"
         "<b>Например:</b> Зарплата, Заказ ФЛ, Консультация",
         reply_markup=keyboard([[("Отмена", "profileincome:back")]]),
@@ -1191,7 +1214,7 @@ async def profile_income_tax_choice(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(SetupStates.income_type_rate)
     await callback.message.answer(
-        "<b>СТАВКА НАЛОГА</b>\n\n—————\n"
+        "<b>СТАВКА НАЛОГА</b>\n\n——————\n"
         "<b>→ Введите число без знака %.</b>\n"
         "<b>Например:</b> <code>4</code>"
     )
@@ -1370,9 +1393,9 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
         intro_text = (
             "\n\nКритический минимум — обязательная стоимость вашей жизни. "
             "Не угадывайте суммы: открывайте банковскую аналитику, договоры и тарифы.\n\n"
-            "Если при резком падении дохода от расхода можно без серьёзных последствий отказаться на несколько месяцев, "
-            "скорее всего, ему место в Бытовом резерве, а не здесь.\n\n"
-            "<b>Одну и ту же кнопку можно нажимать несколько раз.</b> Например, в «Жильё, Аренда, ЖКХ» "
+            "Если при резком падении дохода от этих расходов можно отказаться на несколько месяцев "
+            "без серьёзных последствий, отнесите их в Бытовой резерв.\n\n"
+            "<b>Одну и ту же кнопку можно нажимать несколько раз.</b> Например, в «НЕДВИЖИМОСТЬ» "
             "можно отдельно добавить Квартиру, ЖКХ, Ипотеку, Студию и др."
         )
 
@@ -1500,7 +1523,7 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     prompt = hint
     if "→ Введите название расхода" not in prompt:
-        prompt += "\n\n—————\n<b>→ Введите название расхода.</b>"
+        prompt += "\n\n——————\n<b>→ Введите название расхода.</b>"
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(label.upper())}</b>\n\n"
@@ -1539,7 +1562,7 @@ async def choose_housing_subcategory(callback: CallbackQuery, state: FSMContext)
             "налогоплательщика на сайте ФНС или на Госуслугах. В уведомлении указаны объект, "
             "начисленная сумма и дата платежа.\n\n"
             "Можно указать точную сумму или осторожную оценку, если уведомление ещё не пришло.\n\n"
-            "—————\n"
+            "——————\n"
             "<b>→ Введите название объекта.</b>\n"
             f"<b>Например:</b> {examples[subtype]}",
             reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
@@ -1548,7 +1571,7 @@ async def choose_housing_subcategory(callback: CallbackQuery, state: FSMContext)
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n"
         "<b>ЖИЛЬЁ, АРЕНДА, ЖКХ</b>\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Квартира, Студия, Коммуналка и т.п.",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
@@ -1583,7 +1606,7 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
             "налогоплательщика на сайте ФНС или на Госуслугах. В уведомлении указаны объект, "
             "начисленная сумма и дата платежа.\n\n"
             "Можно указать точную сумму или осторожную оценку, если уведомление ещё не пришло.\n\n"
-            "—————\n"
+            "——————\n"
             "<b>→ Введите название автомобиля.</b>\n"
             "<b>Например:</b> Автомобиль, Лада, Volkswagen",
             reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
@@ -1592,7 +1615,7 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(labels[subtype].upper())}</b>\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         f"<b>Например:</b> {escape(labels[subtype])}",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
@@ -1605,7 +1628,7 @@ async def ask_preset_km_amount(message: Message, state: FSMContext, name: str):
     data = await state.get_data()
     await message.answer(
         f"{setup_progress(data, 5)}\n\n<b>{escape(name.upper())}</b>\n\n"
-        "—————\n<b>→ Введите сумму.</b>",
+        "——————\n<b>→ Введите сумму.</b>",
         reply_markup=keyboard([[("Отмена", "km:cancel")]]),
     )
 
@@ -1644,7 +1667,7 @@ async def choose_quick_km_subcategory(callback: CallbackQuery, state: FSMContext
     if subtype == "other":
         await state.set_state(SetupStates.km_item_name)
         await callback.message.answer(
-            f"<b>{escape(category_labels[category].upper())}</b>\n\n—————\n"
+            f"<b>{escape(category_labels[category].upper())}</b>\n\n——————\n"
             "<b>→ Введите название расхода.</b>",
             reply_markup=keyboard([[("← Назад", "km:cancel")]]),
         )
@@ -1673,7 +1696,7 @@ async def choose_communication_subcategory(callback: CallbackQuery, state: FSMCo
     if subtype == "other":
         await state.set_state(SetupStates.km_item_name)
         await callback.message.answer(
-            "<b>ДРУГОЙ РАСХОД НА СВЯЗЬ</b>\n\n—————\n"
+            "<b>ДРУГОЙ РАСХОД НА СВЯЗЬ</b>\n\n——————\n"
             "<b>→ Введите название расхода.</b>",
             reply_markup=keyboard([[("Отмена", "km:cancel")]]),
         )
@@ -1701,7 +1724,7 @@ async def choose_education_subcategory(callback: CallbackQuery, state: FSMContex
     if subtype == "other":
         await state.set_state(SetupStates.km_item_name)
         await callback.message.answer(
-            "<b>ДРУГОЙ РАСХОД НА ОБРАЗОВАНИЕ</b>\n\n—————\n"
+            "<b>ДРУГОЙ РАСХОД НА ОБРАЗОВАНИЕ</b>\n\n——————\n"
             "<b>→ Введите название расхода.</b>",
             reply_markup=keyboard([[("Отмена", "km:cancel")]]),
         )
@@ -1719,7 +1742,7 @@ async def choose_education_subcategory(callback: CallbackQuery, state: FSMContex
             "<b>КРУПНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ</b>\n\n"
             "Укажите не полную стоимость обучения, а сумму, которую должны внести именно вы. "
             "Не учитывайте часть, которую оплачивают родители, работодатель, грант или другое лицо.\n\n"
-            "—————\n<b>→ Какую сумму вам нужно внести самостоятельно?</b>",
+            "——————\n<b>→ Какую сумму вам нужно внести самостоятельно?</b>",
             reply_markup=keyboard([[("← Назад", "km:cancel")]]),
         )
         return
@@ -1745,7 +1768,7 @@ async def km_item_name(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(name.upper())}</b>\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите сумму.</b>\n"
         + (
             "(Срок уплаты укажем следующим сообщением)"
@@ -1827,7 +1850,7 @@ async def km_item_amount(message: Message, state: FSMContext):
             "<b>КОГДА НУЖНО УПЛАТИТЬ НАЛОГ?</b>\n\n"
             f"Сегодня — <b>{current_date.strftime('%d.%m.%Y')}</b>. Бот сам рассчитает, "
             "сколько нужно откладывать каждый месяц до срока платежа.\n\n"
-            "—————\n"
+            "——————\n"
             "<b>→ Введите точную или ориентировочную дату.</b>\n"
             f"<b>Например:</b> <code>01.12.{example_year}</code>",
             reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
@@ -1867,7 +1890,7 @@ async def education_lesson_count(callback: CallbackQuery, state: FSMContext):
     if value == "custom":
         await state.set_state(SetupStates.km_education_custom_count)
         await callback.message.answer(
-            "<b>СКОЛЬКО ЗАНЯТИЙ БЫВАЕТ В МЕСЯЦ?</b>\n\n—————\n"
+            "<b>СКОЛЬКО ЗАНЯТИЙ БЫВАЕТ В МЕСЯЦ?</b>\n\n——————\n"
             "<b>→ Введите целое число.</b>",
             reply_markup=keyboard([[("← Назад", "km:cancel")]]),
         )
@@ -1898,7 +1921,7 @@ async def education_due_choice(callback: CallbackQuery, state: FSMContext):
     value = callback.data.split(":", 1)[1]
     if value == "date":
         await callback.message.answer(
-            "—————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
+            "——————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
             reply_markup=keyboard([[("← Назад", "km:cancel")]]),
         )
         return
@@ -1944,11 +1967,11 @@ async def education_payment_confirm(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if action == "amount":
         await state.set_state(SetupStates.km_item_amount)
-        await callback.message.answer("—————\n<b>→ Введите исправленную сумму.</b>")
+        await callback.message.answer("——————\n<b>→ Введите исправленную сумму.</b>")
         return
     if action == "due":
         await state.set_state(SetupStates.km_education_due_date)
-        await callback.message.answer("—————\n<b>→ Введите исправленную дату в формате ДД.ММ.ГГГГ.</b>")
+        await callback.message.answer("——————\n<b>→ Введите исправленную дату в формате ДД.ММ.ГГГГ.</b>")
         return
     await state.update_data(pending_km_one_time=True)
     await save_km_item(callback.message, state, Decimal(data["pending_km_payment_months"]))
@@ -2064,7 +2087,7 @@ async def education_payment_next(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(
             "<b>КРУПНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ</b>\n\n"
             "Укажите сумму, которую должны внести именно вы.\n\n"
-            "—————\n<b>→ Какую сумму вам нужно внести самостоятельно?</b>",
+            "——————\n<b>→ Какую сумму вам нужно внести самостоятельно?</b>",
             reply_markup=keyboard([[("← Назад", "km:cancel")]]),
         )
         return
@@ -2295,7 +2318,7 @@ async def km_edit_period_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer(); index=int(callback.data.rsplit(":",1)[1]); data=await state.get_data(); items=list(data.get("km_items",[])); await state.update_data(pending_km_edit_index=index)
     if 0 <= index < len(items) and items[index].get("subcategory") in {"property_tax", "land_tax", "tax", "large"}:
         await state.set_state(SetupStates.km_edit_tax_due_date)
-        await callback.message.answer("<b>НОВЫЙ СРОК ПЛАТЕЖА</b>\n\n—————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>", reply_markup=keyboard([[('Отмена','km:cancel')]]))
+        await callback.message.answer("<b>НОВЫЙ СРОК ПЛАТЕЖА</b>\n\n——————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>", reply_markup=keyboard([[('Отмена','km:cancel')]]))
         return
     await state.set_state(SetupStates.km_edit_period)
     await callback.message.answer("<b>НОВЫЙ ПЕРИОД</b>", reply_markup=keyboard([[('1 месяц','kmeditperiod:1'),('3 месяца','kmeditperiod:3')],[('6 месяцев','kmeditperiod:6'),('12 месяцев','kmeditperiod:12')],[('Другой','kmeditperiod:custom')],[('Отмена','km:cancel')]]))
@@ -2596,7 +2619,7 @@ async def choose_br_category(callback: CallbackQuery, state: FSMContext):
         f"{setup_progress(data, 6)}\n\n"
         f"<b>{escape(label.upper())}</b>\n\n"
         f"{escape(hint)}\n\n"
-        "—————\n"
+        "——————\n"
         "<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Зимняя обувь или Абонемент.",
         reply_markup=keyboard([[('Отмена','br:cancel')]]),
@@ -2620,6 +2643,7 @@ async def br_item_name(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(data, 6)}\n\n"
         f"<b>{escape(name.upper())}</b>\n\n"
+        "——————\n"
         "<b>→ Введите сумму.</b>\n"
         "(Период укажем следующим сообщением)\n\n"
         "Например: <code>12000</code>.",
