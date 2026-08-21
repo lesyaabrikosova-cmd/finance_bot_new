@@ -102,7 +102,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
 
     goals = ", ".join(f"{g.name} {g.percentage}%" for g in s.goals) if s.goals else "без отдельных категорий"
     categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"
-    rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Контрактный (цикличный)"}
+    rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Цикличный (контрактный)"}
 
     await message.answer(
         "⚙️ <b>РЕДАКТИРОВАНИЕ НАСТРОЕК</b>\n\n"
@@ -202,7 +202,7 @@ async def edit_intercontract_balance(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
     if allocator.settings.income_rhythm != "cyclic":
-        await callback.message.answer("Фонд Зарплаты используется только в Контрактном (цикличном) профиле.")
+        await callback.message.answer("Фонд Зарплаты используется только в Цикличном (контрактном) профиле.")
         return
     await state.set_state(EditSettingsStates.intercontract_balance)
     await callback.message.answer(
@@ -391,7 +391,7 @@ async def edit_income_rhythm(callback: CallbackQuery, state: FSMContext):
         "Профиль определяется совокупным денежным потоком, а не профессией или источником денег.",
         reply_markup=keyboard([
             [("Стабильный", "settingsrhythm:monthly"), ("Сдельный", "settingsrhythm:irregular")],
-            [("Контрактный (цикличный)", "settingsrhythm:cyclic")],
+            [("Цикличный (контрактный)", "settingsrhythm:cyclic")],
             [("Отмена", "settings:open")],
         ]),
     )
@@ -833,7 +833,7 @@ async def show_income_type_confirmation(message: Message, state: FSMContext):
         f"Название — <b>{escape(name)}</b>\n"
         + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
         reply_markup=keyboard([
-            [("Сохранить", "incomesettings:save"), ("Исправить", fix_callback)],
+            [("Исправить", fix_callback), ("✔️ Сохранить", "incomesettings:save")],
             [("Отмена", "incomesettings:cancel")],
         ]),
     )

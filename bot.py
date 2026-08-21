@@ -249,7 +249,7 @@ async def send_state(
     profile_names = {
         "monthly": "Стабильный",
         "irregular": "Сдельный",
-        "cyclic": "Контрактный (цикличный)",
+        "cyclic": "Цикличный (контрактный)",
     }
     text = (
         "🧭 <b>ТЕКУЩЕЕ СОСТОЯНИЕ</b>\n\n"

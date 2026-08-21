@@ -477,7 +477,7 @@ async def save_custom_income_type(message: Message, state: FSMContext, telegram_
         f"Название — <b>{escape(name)}</b>\n"
         + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
         reply_markup=keyboard([
-            [("Сохранить", "newincome:save"), ("Исправить", "newincome:fix")],
+            [("Исправить", "newincome:fix"), ("✔️ Сохранить", "newincome:save")],
             [("Отмена", "income:cancel")],
         ]),
     )
