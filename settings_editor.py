@@ -21,7 +21,6 @@ class EditSettingsStates(StatesGroup):
     average_income = State()
     income_gap_months = State()
     income_work_months = State()
-    reliable_gap_income = State()
     force_majeure_months = State()
     stabilizer_months = State()
     intercontract_balance = State()
@@ -112,12 +111,13 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
         f"Ритм дохода: <b>{rhythm_labels.get(s.income_rhythm, s.income_rhythm)}</b>\n"
         + (f"Финансовый цикл: <b>{s.income_work_months} / {s.income_gap_months}</b>\n" if s.income_rhythm == "cyclic" else "")
+        + (f"Доход текущего цикла: <b>{rub(st.cycle_income)}</b> / {rub(s.cycle_regular_income_limit)}\n" if s.income_rhythm == "cyclic" else "")
         + (f"Стабилизатор: <b>{s.stabilizer_target_months} мес.</b>\n" if s.needs_stabilizer else "")
         + (f"Обязательства на время контракта: <b>{rub(s.contract_obligations_total)}</b>\n" if s.income_rhythm == "cyclic" else "")
         +
         f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
         f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
-        + (f"Межконтрактный резерв: <b>{rub(st.intercontract_reserve)}</b> / {rub(s.intercontract_full_limit)}\n" if s.income_rhythm == "cyclic" else "")
+        + (f"Фонд Зарплаты: <b>{rub(st.intercontract_reserve)}</b> / {rub(s.intercontract_full_limit)}\n" if s.income_rhythm == "cyclic" else "")
         +
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"
@@ -126,7 +126,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         reply_markup=keyboard([
             [("🛡️ Изменить Подушку", "settings:pillow")],
             [("ФМ-подушка", "settings:force_months"), ("Стабилизатор", "settings:stabilizer_months")],
-            [("Межконтрактный резерв", "settings:intercontract_balance")],
+            [("Фонд Зарплаты", "settings:intercontract_balance")],
             [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
             [("💰 Средний доход", "settings:income")],
             [("Ритм поступлений", "settings:rhythm")],
@@ -202,11 +202,11 @@ async def edit_intercontract_balance(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
     if allocator.settings.income_rhythm != "cyclic":
-        await callback.message.answer("Межконтрактный резерв используется только в Контрактном (цикличном) профиле.")
+        await callback.message.answer("Фонд Зарплаты используется только в Контрактном (цикличном) профиле.")
         return
     await state.set_state(EditSettingsStates.intercontract_balance)
     await callback.message.answer(
-        "<b>БАЛАНС МЕЖКОНТРАКТНОГО РЕЗЕРВА</b>\n\nВведите сумму, которая уже отложена на плановый перерыв."
+        "<b>БАЛАНС ФОНДА ЗАРПЛАТЫ</b>\n\nВведите сумму, которая уже отложена на плановый перерыв."
     )
 
 
@@ -218,7 +218,7 @@ async def save_intercontract_balance(message: Message, state: FSMContext):
         return
     allocator = db.load_allocator(message.from_user.id)
     if value > allocator.settings.intercontract_full_limit:
-        await message.answer(f"Текущая цель резерва — {rub(allocator.settings.intercontract_full_limit)}.")
+        await message.answer(f"Текущая цель Фонда Зарплаты — {rub(allocator.settings.intercontract_full_limit)}.")
         return
     allocator.state.intercontract_reserve = value
     db.save_allocator(message.from_user.id, allocator)
@@ -434,27 +434,17 @@ async def save_income_gap_setting(message: Message, state: FSMContext):
 @router.message(EditSettingsStates.income_work_months)
 async def save_income_work_setting(message: Message, state: FSMContext):
     value = parse_decimal(message.text)
-    if value is None or value < 1 or value > 24:
-        await message.answer("Введите количество месяцев от 1 до 24.")
+    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
+        await message.answer("Введите целое количество месяцев от 1 до 24.")
         return
     await state.update_data(settings_work_months=str(value))
-    await state.set_state(EditSettingsStates.reliable_gap_income)
-    await message.answer("Сколько денег надёжно приходит в месяц во время перерыва? Если нисколько — отправьте 0.")
-
-
-@router.message(EditSettingsStates.reliable_gap_income)
-async def save_reliable_gap_setting(message: Message, state: FSMContext):
-    value = parse_decimal(message.text)
-    if value is None or value < 0:
-        await message.answer("Введите сумму от 0 ₽ и выше.")
-        return
     data = await state.get_data()
     allocator = db.load_allocator(message.from_user.id)
     allocator.settings.income_rhythm = "cyclic"
     allocator.settings.employment_type = "Фрилансер"
     allocator.settings.income_gap_months = Decimal(data["settings_gap_months"])
     allocator.settings.income_work_months = Decimal(data["settings_work_months"])
-    allocator.settings.reliable_gap_income = value
+    allocator.settings.reliable_gap_income = Decimal("0")
     allocator.settings.stabilizer_target_months = max(Decimal("2"), allocator.settings.stabilizer_target_months)
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()

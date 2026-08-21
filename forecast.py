@@ -173,7 +173,7 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
         lines.extend([
             "",
             f"⚠️ На покупки и обязательства не хватает <b>{rub(shortfall)}</b>. "
-            "При таком сценарии Аллокатору нечего направить в Межконтрактный резерв, Подушку и другие конверты.",
+            "При таком сценарии Аллокатору нечего направить в Фонд Зарплаты, Подушку и другие конверты.",
         ])
     lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>"])
     for name, amount in allocations.items():
@@ -187,7 +187,11 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
         "",
     ])
     if simulated.settings.income_rhythm == "cyclic":
-        lines.append(f"Межконтрактный резерв после прогноза — <b>{rub(simulated.state.intercontract_reserve)}</b> / {rub(simulated.settings.intercontract_full_limit)}")
+        lines.append(
+            f"Доход текущего цикла после прогноза — <b>{rub(simulated.state.cycle_income)}</b> "
+            f"/ {rub(simulated.settings.cycle_regular_income_limit)}"
+        )
+        lines.append(f"Фонд Зарплаты после прогноза — <b>{rub(simulated.state.intercontract_reserve)}</b> / {rub(simulated.settings.intercontract_full_limit)}")
     lines.extend([
         f"ФМ-подушка после прогноза — <b>{rub(simulated.state.pillow_force_majeure)}</b> / {rub(simulated.settings.force_majeure_limit)}",
         f"Стабилизатор после прогноза — <b>{rub(simulated.state.pillow_stabilizer)}</b> / {rub(simulated.settings.stabilizer_full_limit)}" if simulated.settings.needs_stabilizer else "",
@@ -235,7 +239,7 @@ def simulate_cyclic_forecast(
 
     # Доход ожидается к окончанию рабочей части. Текущий рабочий месяц не должен
     # повторно забирать деньги на российскую жизнь: её плановая нехватка уже
-    # целиком представлена Межконтрактным резервом.
+    # целиком представлена Фондом Зарплаты.
     simulated.state.life_balance = simulated.settings.household_life
     simulated.state.period_income = Decimal("0")
     simulated.state.period_allocations = {}

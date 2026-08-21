@@ -283,7 +283,7 @@ async def send_state(
 
     if settings.income_rhythm == "cyclic":
         text += (
-            "\n\n<b>Межконтрактный резерв</b>: "
+            "\n\n<b>Фонд Зарплаты</b>: "
             f"<b>{fmt_money(state.intercontract_reserve)} ₽</b> / "
             f"{fmt_money(settings.intercontract_full_limit)} ₽"
         )
@@ -306,7 +306,7 @@ async def send_state(
             f"/ "
             f"{fmt_money(settings.minimum_reserve_limit)} ₽\n"
 
-            f"Межконтрактный резерв: "
+            f"Фонд Зарплаты: "
             f"{fmt_money(state.intercontract_reserve)} ₽ / "
             f"{fmt_money(settings.intercontract_full_limit)} ₽\n"
 

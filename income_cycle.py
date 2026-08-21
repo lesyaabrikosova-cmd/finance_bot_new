@@ -31,8 +31,8 @@ def profile_route(profile: str, include_debt_stages: bool = True) -> tuple[str, 
             "ФМ-подушка", "Стабилизатор-КМ", "Стабилизатор-УЖ", "Максимальный режим"
         ),
         CYCLIC: (
-            "Межконтрактный резерв-КМ",
-            "Межконтрактный резерв-УЖ",
+            "Фонд Зарплаты-КМ",
+            "Фонд Зарплаты-УЖ",
             "ФМ-подушка",
             "Стабилизатор-КМ",
             "Стабилизатор-УЖ",
@@ -110,8 +110,8 @@ class CyclicIncomePlan:
             raise ValueError("Доступная сумма не может быть отрицательной.")
         result: dict[str, Decimal] = {}
         layers = (
-            ("Межконтрактный резерв-КМ", self.intercontract_critical),
-            ("Межконтрактный резерв-УЖ", self.intercontract_full - self.intercontract_critical),
+            ("Фонд Зарплаты-КМ", self.intercontract_critical),
+            ("Фонд Зарплаты-УЖ", self.intercontract_full - self.intercontract_critical),
             ("ФМ-подушка", self.force_majeure),
             ("Стабилизатор-КМ", self.stabilizer_critical),
             ("Стабилизатор-УЖ", self.stabilizer_full - self.stabilizer_critical),

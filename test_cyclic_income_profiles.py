@@ -85,9 +85,9 @@ def run_portrait(test_case: unittest.TestCase, portrait: ShiftPortrait):
     test_case.assertEqual(sum(allocation.values(), D("0")), D(portrait.payout))
     test_case.assertTrue(all(value >= 0 for value in allocation.values()))
     if allocation["Свободный остаток"] > 0:
-        test_case.assertEqual(allocation["Межконтрактный резерв-КМ"], plan.intercontract_critical)
+        test_case.assertEqual(allocation["Фонд Зарплаты-КМ"], plan.intercontract_critical)
         test_case.assertEqual(
-            allocation["Межконтрактный резерв-КМ"] + allocation["Межконтрактный резерв-УЖ"],
+            allocation["Фонд Зарплаты-КМ"] + allocation["Фонд Зарплаты-УЖ"],
             plan.intercontract_full,
         )
         test_case.assertEqual(allocation["ФМ-подушка"], plan.force_majeure)

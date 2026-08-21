@@ -60,7 +60,7 @@ class SetupStates(StatesGroup):
     income_rhythm = State()
     income_gap_months = State()
     income_work_months = State()
-    reliable_gap_income = State()
+    fund_salary_intro = State()
     stabilizer_target_months = State()
     contract_obligations_menu = State()
     income_method = State()
@@ -652,7 +652,7 @@ BR_CATEGORIES = {
 
 def route_total(data: dict) -> int:
     base = 10 if data.get("has_debts") else 9
-    return base + (5 if data.get("income_rhythm") == "cyclic" else 0)
+    return base + (4 if data.get("income_rhythm") == "cyclic" else 0)
 
 
 def progress_bar(done: int, total: int) -> str:
@@ -948,16 +948,17 @@ async def ask_income(message: Message, state: FSMContext):
             "Это не сумма ежемесячной выплаты. Нужен ориентир для всего цикла: рабочая часть + перерыв.\n\n"
             "Сложите весь доход, которым вы лично располагаете за полный цикл, до покупок и переводов "
             "в накопления. Деньги, которыми работодатель оплачивает жильё или питание напрямую, не добавляйте. "
-            "Для дохода в другой валюте используйте примерный рублёвый эквивалент.\n\n"
+            "Если доход приходит в другой валюте, сначала переведите всю сумму в примерный "
+            "рублёвый эквивалент. Все расчёты Аллокатора ведутся в рублях.\n\n"
             f"Разделите результат на <b>{work_months} + {gap_months} мес.</b>\n\n"
             "Например, Надя за 5 рабочих месяцев получила 840 000 рупий. Затем 7 месяцев дохода нет. "
-            "Её цикл — 12 месяцев, поэтому средняя база составляет 70 000 рупий в месяц. "
-            "Для Аллокатора она указывает примерный рублёвый эквивалент этой суммы.\n\n"
+            "Её цикл — 12 месяцев. Сначала Надя переводит все 840 000 рупий в примерный рублёвый "
+            "эквивалент, затем делит получившуюся сумму в рублях на 12.\n\n"
             "Эта цифра помогает отличать обычную часть дохода от сверхдохода и не означает, "
             "что деньги действительно приходят каждый месяц.\n\n"
             "——————\n"
             "<b>→ Введите среднемесячный доход за полный цикл.</b>\n"
-            "<b>Например:</b> <code>70000</code>"
+            "<b>Введите результат в рублях.</b>"
         )
     else:
         text = (
@@ -1045,16 +1046,20 @@ async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
         "Поэтому:\n"
         "• Маша работает 5 месяцев и 7 месяцев живёт до следующего контракта — цикл 12 месяцев;\n"
         "• Петя работает месяц и месяц отдыхает — цикл 2 месяца.\n\n"
+        "Если число рабочих месяцев не целое, округляйте по правилам арифметики. Например:\n"
+        "5 месяцев 2 недели → 6\n"
+        "5 месяцев и 1 неделя → 5\n\n"
         "——————\n"
-        "<b>→ Введите количество рабочих месяцев числом.</b>"
+        "→ Введите количество <b>рабочих</b> месяцев числом.\n"
+        "<b>Например:</b> <code>2</code>."
     )
 
 
 @router.message(SetupStates.income_work_months)
 async def save_income_work_months(message: Message, state: FSMContext):
     value = parse_decimal(message.text)
-    if value is None or value < 1 or value > 24:
-        await message.answer("Введите количество месяцев от 1 до 24.")
+    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
+        await message.answer("Введите целое количество месяцев от 1 до 24.")
         return
     await state.update_data(income_work_months=str(value))
     await state.set_state(SetupStates.income_gap_months)
@@ -1079,7 +1084,7 @@ async def save_income_gap_button(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Введите количество полных месяцев без надёжного дохода.")
         return
     await state.update_data(income_rhythm="cyclic", income_gap_months=value)
-    await ask_reliable_gap_income(callback.message, state)
+    await show_fund_salary_intro(callback.message, state)
 
 
 @router.message(SetupStates.income_gap_months)
@@ -1089,29 +1094,31 @@ async def save_income_gap_text(message: Message, state: FSMContext):
         await message.answer("Введите целое число от 1 до 24.")
         return
     await state.update_data(income_rhythm="cyclic", income_gap_months=str(value))
-    await ask_reliable_gap_income(message, state)
+    await show_fund_salary_intro(message, state)
 
 
-async def ask_reliable_gap_income(message: Message, state: FSMContext):
-    await state.set_state(SetupStates.reliable_gap_income)
+async def show_fund_salary_intro(message: Message, state: FSMContext):
+    await state.set_state(SetupStates.fund_salary_intro)
     await message.answer(
-        f"{setup_progress(await state.get_data(), 5)}\n\n"
-        "<b>СКОЛЬКО ДЕНЕГ НАДЁЖНО ПРИХОДИТ ВО ВРЕМЯ ПЕРЕРЫВА?</b>\n\n"
-        "——————\n"
-        "<b>→ Сложите все гарантированные поступления за месяц.</b> Если их нет — отправьте <code>0</code>."
+        f"{setup_progress(await state.get_data(), 4)}\n\n"
+        "<b>ФОНД ЗАРПЛАТЫ</b>\n\n"
+        "Во время перерыва между контрактами вы будете платить зарплату самому себе.\n\n"
+        "Аллокатор рассчитает необходимую сумму и поможет проводить ежемесячные выплаты.",
+        reply_markup=keyboard([[("Понятно →", "fundsalary:intro")]]),
     )
 
 
-@router.message(SetupStates.reliable_gap_income)
-async def save_reliable_gap_income(message: Message, state: FSMContext):
-    value = parse_decimal(message.text)
-    if value is None or value < 0:
-        await message.answer("Введите сумму от 0 ₽ и выше.")
-        return
-    await state.update_data(reliable_gap_income=str(money2(value)))
+@router.callback_query(SetupStates.fund_salary_intro, F.data == "fundsalary:intro")
+async def continue_after_fund_salary_intro(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(reliable_gap_income="0")
+    await ask_stabilizer_target(callback.message, state)
+
+
+async def ask_stabilizer_target(message: Message, state: FSMContext):
     await state.set_state(SetupStates.stabilizer_target_months)
     await message.answer(
-        f"{setup_progress(await state.get_data(), 6)}\n\n"
+        f"{setup_progress(await state.get_data(), 5)}\n\n"
         "<b>НА СКОЛЬКО МОЖЕТ УВЕЛИЧИТЬСЯ ПЕРЕРЫВ МЕЖДУ КОНТРАКТАМИ?</b>\n\n"
         "Я сформирую <b>Стабилизатор дохода</b>, который защитит вас, если следующий контракт "
         "задержится, отменится или предыдущий закончится раньше.\n\n"
@@ -1131,7 +1138,7 @@ async def save_stabilizer_target_button(callback: CallbackQuery, state: FSMConte
     if value == "custom":
         await callback.message.answer("Введите количество месяцев от 1 до 12.")
         return
-    await state.update_data(stabilizer_target_months=value, progress_offset=4)
+    await state.update_data(stabilizer_target_months=value, progress_offset=3)
     await ask_income(callback.message, state)
 
 
@@ -1141,7 +1148,7 @@ async def save_stabilizer_target_text(message: Message, state: FSMContext):
     if value is None or value < 1 or value > 12:
         await message.answer("Введите количество месяцев от 1 до 12.")
         return
-    await state.update_data(stabilizer_target_months=str(value), progress_offset=4)
+    await state.update_data(stabilizer_target_months=str(value), progress_offset=3)
     await ask_income(message, state)
 
 
@@ -2961,7 +2968,7 @@ async def toggle_contract_obligation(callback: CallbackQuery, state: FSMContext)
                 obligations[item["name"]] = str(
                     Decimal(obligations.get(item["name"], "0")) + amount
                 )
-        await state.update_data(contract_obligations=obligations, progress_offset=5)
+        await state.update_data(contract_obligations=obligations, progress_offset=4)
         await ask_pillow_policy(callback.message, state)
         return
     selected = set((await state.get_data()).get("contract_obligation_keys", []))
@@ -3613,8 +3620,8 @@ async def start_current_state(
         await state.set_state(SetupStates.current_intercontract)
         await message.answer(
             f"{setup_progress(data, step)}\n\n"
-            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В МЕЖКОНТРАКТНОМ РЕЗЕРВЕ?</b>\n\n"
-            "Это деньги на плановую жизнь во время следующего перерыва. Если резерва пока нет — отправьте <code>0</code>."
+            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В ФОНДЕ ЗАРПЛАТЫ?</b>\n\n"
+            "Это деньги на плановую жизнь во время следующего перерыва. Если Фонда пока нет — отправьте <code>0</code>."
         )
         return
 
@@ -4272,6 +4279,9 @@ async def show_confirmation(
     if any(rate > 0 for rate in settings.income_type_tax_rates.values()) or "Налоги" in settings.life_categories:
         accounts.append(("🏛️", "Налоги"))
 
+    if settings.income_rhythm == "cyclic":
+        accounts.append(("🏦", "Фонд Зарплаты"))
+
     accounts.append(("🛡️", "Подушка"))
 
     for name in settings.life_categories.keys():
@@ -4312,6 +4322,7 @@ async def show_confirmation(
             f"\nФинансовый цикл — <b>{settings.income_work_months} / {settings.income_gap_months}</b> "
             f"({settings.income_work_months} мес. работы · {settings.income_gap_months} мес. перерыва)\n"
             f"Стабилизатор — <b>{settings.stabilizer_target_months} мес.</b>\n"
+            f"Цель Фонда Зарплаты — <b>{rub(settings.intercontract_full_limit)}</b>\n"
             f"Обязательства на время контракта — <b>{rub(settings.contract_obligations_total)}</b>"
         )
 

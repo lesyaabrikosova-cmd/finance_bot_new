@@ -384,6 +384,7 @@ class Database:
                 pillow_minimum TEXT NOT NULL,
                 intercontract_reserve TEXT NOT NULL DEFAULT '0',
                 intercontract_months_remaining TEXT NOT NULL DEFAULT '0',
+                intercontract_break_active INTEGER NOT NULL DEFAULT 0,
                 pillow_force_majeure TEXT NOT NULL,
                 pillow_stabilizer TEXT NOT NULL,
 
@@ -394,6 +395,7 @@ class Database:
                 period_life_topups TEXT NOT NULL,
 
                 period_income TEXT NOT NULL,
+                cycle_income TEXT NOT NULL DEFAULT '0',
                 period_tax TEXT NOT NULL,
 
                 period_started_at TEXT,
@@ -516,6 +518,14 @@ class Database:
         if "intercontract_months_remaining" not in state_columns:
             cursor.execute(
                 "ALTER TABLE state ADD COLUMN intercontract_months_remaining TEXT NOT NULL DEFAULT '0'"
+            )
+        if "cycle_income" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN cycle_income TEXT NOT NULL DEFAULT '0'"
+            )
+        if "intercontract_break_active" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN intercontract_break_active INTEGER NOT NULL DEFAULT 0"
             )
 
         # ----------------------------------------------------
@@ -1210,6 +1220,7 @@ class Database:
                 pillow_minimum,
                 intercontract_reserve,
                 intercontract_months_remaining,
+                intercontract_break_active,
                 pillow_force_majeure,
                 pillow_stabilizer,
 
@@ -1220,6 +1231,7 @@ class Database:
                 period_life_topups,
 
                 period_income,
+                cycle_income,
                 period_tax,
 
                 period_started_at
@@ -1228,10 +1240,10 @@ class Database:
             VALUES (
                 ?,
                 ?, ?,
-                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
                 ?, ?,
                 ?, ?,
-                ?, ?,
+                ?, ?, ?,
                 ?
             )
 
@@ -1253,6 +1265,9 @@ class Database:
                 intercontract_months_remaining =
                     excluded.intercontract_months_remaining,
 
+                intercontract_break_active =
+                    excluded.intercontract_break_active,
+
                 pillow_force_majeure =
                     excluded.pillow_force_majeure,
 
@@ -1273,6 +1288,9 @@ class Database:
 
                 period_income =
                     excluded.period_income,
+
+                cycle_income =
+                    excluded.cycle_income,
 
                 period_tax =
                     excluded.period_tax,
@@ -1303,6 +1321,8 @@ class Database:
                     state.intercontract_months_remaining
                 ),
 
+                int(state.intercontract_break_active),
+
                 decimal_to_string(
                     state.pillow_force_majeure
                 ),
@@ -1329,6 +1349,10 @@ class Database:
 
                 decimal_to_string(
                     state.period_income
+                ),
+
+                decimal_to_string(
+                    state.cycle_income
                 ),
 
                 decimal_to_string(
@@ -1391,6 +1415,9 @@ class Database:
                     row["intercontract_months_remaining"]
                 ),
 
+            intercontract_break_active=
+                bool(row["intercontract_break_active"]),
+
             pillow_force_majeure=
                 string_to_decimal(
                     row["pillow_force_majeure"]
@@ -1426,6 +1453,11 @@ class Database:
             period_income=
                 string_to_decimal(
                     row["period_income"]
+                ),
+
+            cycle_income=
+                string_to_decimal(
+                    row["cycle_income"]
                 ),
 
             period_tax=

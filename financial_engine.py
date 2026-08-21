@@ -415,23 +415,30 @@ class UserSettings:
 
     @property
     def intercontract_life_limit(self) -> Decimal:
-        """Плановая нехватка КМ на всю неоплачиваемую часть цикла."""
+        """Критическая часть Фонда Зарплаты на весь плановый перерыв."""
         if self.income_rhythm != "cyclic":
             return ZERO
-        monthly_gap = max(ZERO, self.critical_life - self.reliable_gap_income)
-        return monthly_gap * self.income_gap_months
+        return self.critical_life * self.income_gap_months
 
     @property
     def intercontract_full_limit(self) -> Decimal:
-        """Плановая нехватка УЖ на всю неоплачиваемую часть цикла."""
+        """Полный Фонд Зарплаты: Устойчивая жизнь на каждый месяц перерыва."""
         if self.income_rhythm != "cyclic":
             return ZERO
-        monthly_gap = max(ZERO, self.household_life - self.reliable_gap_income)
-        return monthly_gap * self.income_gap_months
+        return self.household_life * self.income_gap_months
 
     @property
     def contract_obligations_total(self) -> Decimal:
         return sum(self.contract_obligations.values(), ZERO)
+
+    @property
+    def cycle_regular_income_limit(self) -> Decimal:
+        """Ожидаемая обычная доходная база полного финансового цикла."""
+        if self.income_rhythm != "cyclic":
+            return self.average_income
+        return self.average_income * (
+            self.income_work_months + self.income_gap_months
+        )
 
     @property
     def total_goals_percentage(self) -> Decimal:
@@ -557,6 +564,7 @@ class AllocatorState:
     pillow_minimum: Decimal = ZERO
     intercontract_reserve: Decimal = ZERO
     intercontract_months_remaining: Decimal = ZERO
+    intercontract_break_active: bool = False
     pillow_force_majeure: Decimal = ZERO
     pillow_stabilizer: Decimal = ZERO
 
@@ -588,6 +596,9 @@ class AllocatorState:
     # ----------------------------
 
     period_income: Decimal = ZERO
+    # Валовой доход с начала текущего финансового цикла. Для циклического
+    # профиля не сбрасывается вместе с обычным расчётным периодом.
+    cycle_income: Decimal = ZERO
     period_tax: Decimal = ZERO
 
     # Все направления распределения
@@ -627,6 +638,7 @@ class AllocatorState:
         self.pillow_minimum = D(self.pillow_minimum)
         self.intercontract_reserve = D(self.intercontract_reserve)
         self.intercontract_months_remaining = max(ZERO, D(self.intercontract_months_remaining))
+        self.intercontract_break_active = bool(self.intercontract_break_active)
         self.pillow_force_majeure = D(
             self.pillow_force_majeure
         )
@@ -640,6 +652,7 @@ class AllocatorState:
         )
 
         self.period_income = D(self.period_income)
+        self.cycle_income = D(self.cycle_income)
         self.period_tax = D(self.period_tax)
 
         self.goal_balances = {
@@ -1023,7 +1036,7 @@ class FinancialAllocator:
 
     @property
     def intercontract_monthly_salary(self) -> Decimal:
-        return max(ZERO, self.settings.household_life - self.settings.reliable_gap_income)
+        return self.settings.household_life
 
     @property
     def intercontract_current_limit(self) -> Decimal:
@@ -1036,6 +1049,9 @@ class FinancialAllocator:
     def start_intercontract_break(self) -> dict:
         if self.settings.income_rhythm != "cyclic":
             raise ValueError("Межконтрактный период доступен только циклическому профилю.")
+        if self.state.intercontract_break_active:
+            raise ValueError("Межконтрактный период уже начат.")
+        self.state.intercontract_break_active = True
         self.state.intercontract_months_remaining = self.settings.income_gap_months
         return {
             "months_remaining": self.state.intercontract_months_remaining,
@@ -1043,16 +1059,24 @@ class FinancialAllocator:
         }
 
     def pay_intercontract_salary(self) -> Decimal:
-        if self.state.intercontract_months_remaining <= ZERO:
+        if not self.state.intercontract_break_active:
             raise ValueError("Сначала начните межконтрактный период.")
+        if self.state.intercontract_months_remaining <= ZERO:
+            raise ValueError("Все месяцы перерыва уже проведены. Начните новую рабочую часть.")
         missing_life = max(ZERO, self.settings.household_life - self.state.life_balance)
-        if missing_life <= ZERO:
-            raise ValueError("Баланс жизни этого периода уже заполнен. Сначала начните новый расчётный период.")
         amount = min(self.intercontract_monthly_salary, missing_life, self.state.intercontract_reserve)
         self.state.intercontract_reserve -= amount
         self.state.life_balance += amount
         self.state.intercontract_months_remaining -= ONE
         return amount
+
+    def start_new_work_phase(self) -> None:
+        if not self.state.intercontract_break_active:
+            raise ValueError("Межконтрактный период ещё не начат.")
+        if self.state.intercontract_months_remaining > ZERO:
+            raise ValueError("Сначала проведите все запланированные месяцы перерыва.")
+        self.state.intercontract_break_active = False
+        self.state.cycle_income = ZERO
 
     def active_mode(self) -> int:
         """
@@ -1380,7 +1404,7 @@ class FinancialAllocator:
             )
             actual_up = up_calculated - final_overflow
             intercontract_added = st.intercontract_reserve - intercontract_before
-            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Фонд Зарплаты"] = allocations.get("Фонд Зарплаты", ZERO) + intercontract_added
             allocations["Подушка"] += actual_up - intercontract_added
 
         elif up_target == "Инвест":
@@ -1523,7 +1547,7 @@ class FinancialAllocator:
             )
             actual_up = up_calculated - final_overflow
             intercontract_added = st.intercontract_reserve - intercontract_before
-            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Фонд Зарплаты"] = allocations.get("Фонд Зарплаты", ZERO) + intercontract_added
             allocations["Подушка"] += actual_up - intercontract_added
 
         elif up_target == "Инвест":
@@ -1635,7 +1659,7 @@ class FinancialAllocator:
             actual = part - overflow
 
             intercontract_added = st.intercontract_reserve - intercontract_before
-            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Фонд Зарплаты"] = allocations.get("Фонд Зарплаты", ZERO) + intercontract_added
             allocations["Подушка"] += actual - intercontract_added
 
             return amount - part + overflow
@@ -1961,7 +1985,7 @@ class FinancialAllocator:
 
             actual = part - overflow
             intercontract_added = self.state.intercontract_reserve - intercontract_before
-            allocations["Межконтрактный резерв"] = allocations.get("Межконтрактный резерв", ZERO) + intercontract_added
+            allocations["Фонд Зарплаты"] = allocations.get("Фонд Зарплаты", ZERO) + intercontract_added
             allocations["Подушка"] += actual - intercontract_added
 
             return amount - part + overflow
@@ -2166,10 +2190,16 @@ class FinancialAllocator:
         # Налог делится пропорционально, поэтому части после налога всегда
         # сходятся с фактической суммой к распределению.
         if self.settings.average_income > ZERO:
-            regular_gross_capacity = max(
-                ZERO,
-                self.settings.average_income - self.state.period_income,
-            )
+            if self.settings.income_rhythm == "cyclic":
+                regular_gross_capacity = max(
+                    ZERO,
+                    self.settings.cycle_regular_income_limit - self.state.cycle_income,
+                )
+            else:
+                regular_gross_capacity = max(
+                    ZERO,
+                    self.settings.average_income - self.state.period_income,
+                )
             regular_gross = min(income, regular_gross_capacity)
             regular_net = amount * regular_gross / income
         else:
@@ -2279,6 +2309,8 @@ class FinancialAllocator:
         # --------------------------------------------
 
         self.state.period_income += income
+        if self.settings.income_rhythm == "cyclic":
+            self.state.cycle_income += income
         self.state.period_tax += tax
 
         # --------------------------------------------
@@ -2498,6 +2530,9 @@ class FinancialAllocator:
 
             "life_balance":
                 self.state.life_balance,
+
+            "cycle_income": self.state.cycle_income,
+            "cycle_regular_income_limit": self.settings.cycle_regular_income_limit,
 
             "pillow": {
                 "total":

@@ -1321,8 +1321,8 @@ async def send_distribution_report(
 
     add_distribution_line(
         "🔁",
-        "Межконтрактный резерв",
-        allocations.get("Межконтрактный резерв", ZERO),
+        "Фонд Зарплаты",
+        allocations.get("Фонд Зарплаты", ZERO),
     )
 
     for name in settings.life_categories.keys():
@@ -1550,7 +1550,7 @@ async def send_distribution_report(
         f"🛡️ <b>Подушка</b> — "
         f"{money_plain(state.pillow_balance)}",
         *(
-            [f"🔁 <b>Межконтрактный резерв</b> — {money_plain(state.intercontract_reserve)}"]
+            [f"🏦 <b>Фонд Зарплаты</b> — {money_plain(state.intercontract_reserve)}"]
             if settings.income_rhythm == "cyclic"
             else []
         ),
