@@ -382,7 +382,9 @@ async def tax_obligation_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(TaxStates.obligation_type)
     await callback.message.answer(
-        "<b>КАКОЙ НАЛОГ НУЖНО НАКОПИТЬ?</b>",
+        "<b>КАКОЙ НАЛОГ НУЖНО НАКОПИТЬ?</b>\n\n"
+        "Все виды налогов учитываются внутри одного общего конверта «Налоги». "
+        "Здесь вы добавляете отдельное обязательство для расчёта суммы и срока.",
         reply_markup=keyboard([
             [("Налог на имущество", "taxgoal:type:property")],
             [("Транспортный налог", "taxgoal:type:transport")],
@@ -443,7 +445,8 @@ async def tax_obligation_amount(message: Message, state: FSMContext):
     await state.set_state(TaxStates.obligation_saved)
     await message.answer(
         "<b>УЖЕ НАКОПЛЕНО</b>\n\n"
-        "Введите сумму, которая уже лежит в конверте на этот налог. Если пока ничего нет, отправьте 0."
+        "Введите часть общего конверта «Налоги», которая уже относится к этому обязательству. "
+        "Если пока ничего не накоплено, отправьте 0."
     )
 
 

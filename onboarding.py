@@ -720,7 +720,6 @@ def default_km_storage(item: dict) -> dict:
     """
     category = item.get("category")
     name = (item.get("name") or item.get("category_label") or "Расход").strip()
-    lowered = name.lower()
     months = Decimal(str(item.get("months", "1")))
     subtype = item.get("subcategory")
 
@@ -735,25 +734,15 @@ def default_km_storage(item: dict) -> dict:
         storage = "separate"
         envelope_name = "Питомцы"
 
-    # Аренда жилья — отдельный конверт независимо от периодичности.
+    # Все обязательства по недвижимости хранятся вместе. Налоги остаются
+    # частью КЖ, но физически направляются в общий налоговый конверт.
     elif category == "housing":
         if subtype in {"property_tax", "land_tax"}:
             storage = "separate"
             envelope_name = "Налоги"
-        elif "ипотек" in lowered:
+        else:
             storage = "separate"
-            envelope_name = "Ипотека"
-        elif any(token in lowered for token in ("студи", "кабинет", "офис", "рабоч")):
-            storage = "separate"
-            envelope_name = name
-        elif "аренд" in lowered or ("квартир" in lowered and "жкх" not in lowered):
-            storage = "separate"
-            envelope_name = "Квартира"
-        elif any(token in lowered for token in ("жкх", "коммун", "свет", "электр", "вода", "газ")):
-            storage = "salary"
-        elif months > 1:
-            storage = "separate"
-            envelope_name = name
+            envelope_name = "Недвижимость"
 
     # Продукты обычно тратятся прямо в течение месяца.
     elif category == "food":
@@ -766,23 +755,36 @@ def default_km_storage(item: dict) -> dict:
             storage = "separate"
             envelope_name = "Подписки"
 
-    # Для транспорта, детей, образования и прочих расходов периодичность
-    # даёт хорошую рекомендацию: крупный будущий платёж лучше копить отдельно.
-    elif category in {"transport", "children", "education", "other"}:
-        if category == "transport" and subtype == "tax":
+    # Для транспорта учитываем назначение расхода, а не период, за который
+    # пользователь ввёл сумму. Период общественного транспорта может быть
+    # выбран только для усреднения и не должен создавать лишний конверт.
+    elif category == "transport":
+        if subtype == "tax":
             storage = "separate"
             envelope_name = "Налоги"
-        elif category == "transport" and subtype == "pass":
+        elif subtype == "pass":
             storage = "separate"
             envelope_name = "Проездной"
-        elif category == "transport" and subtype == "car":
+        elif subtype == "car":
             storage = "separate"
             envelope_name = "Автомобиль"
+        elif subtype in {"public", "taxi"}:
+            storage = "salary"
         elif months > 1:
             storage = "separate"
+            envelope_name = "Транспорт"
+
+    # Расходы на детей образуют общий критический фонд.
+    elif category == "children":
+        storage = "separate"
+        envelope_name = "Дети"
+
+    # Для образования и прочих расходов периодичность
+    # даёт хорошую рекомендацию: крупный будущий платёж лучше копить отдельно.
+    elif category in {"education", "other"}:
+        if months > 1:
+            storage = "separate"
             defaults = {
-                "transport": "Транспорт",
-                "children": "Дети",
                 "education": "Образование",
             }
             envelope_name = defaults.get(category, name)
@@ -811,9 +813,13 @@ def build_default_km_storage(items: list[dict]) -> list[dict]:
 def life_categories_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in storage_items:
-        if item.get("storage") != "separate":
+        is_tax = item.get("subcategory") in {"tax", "property_tax", "land_tax"}
+        if item.get("storage") != "separate" and not is_tax:
             continue
-        envelope = (item.get("envelope_name") or item.get("item_name") or "Конверт").strip()
+        if is_tax:
+            envelope = "Налоги"
+        else:
+            envelope = (item.get("envelope_name") or item.get("item_name") or "Конверт").strip()
         amount = Decimal(item["monthly"])
         result[envelope] = money2(result.get(envelope, Decimal("0")) + amount)
     return result
@@ -865,7 +871,7 @@ def km_storage_summary(storage_items: list[dict], critical_life: Decimal) -> str
     salary = money2(critical_life - separate_sum)
 
     separate_lines = [
-        f"• {escape(name)} — {rub(amount)}"
+        f"• <b>{escape(name.upper())}</b> — {rub(amount)}"
         for name, amount in separate.items()
     ]
 
@@ -875,12 +881,63 @@ def km_storage_summary(storage_items: list[dict], critical_life: Decimal) -> str
         if item.get("storage") == "salary"
     ]
 
-    text = "<b>Отдельные конверты</b>\n"
-    text += "\n".join(separate_lines) if separate_lines else "• нет"
-    text += "\n\n<b>Зарплата</b> — " + rub(salary)
+    text = "Давайте утвердим отдельные конверты:\n\n"
+    if separate_lines:
+        text += "\n".join(separate_lines) + "\n"
+    text += "• <b>ЗАРПЛАТА</b> — " + rub(salary)
     if salary_items:
-        text += "\n" + "• " + "\n• ".join(escape(name) for name in salary_items)
+        text += "\n  — " + "\n  — ".join(escape(name) for name in salary_items)
     return text
+
+
+def km_storage_help_text(storage_items: list[dict]) -> str:
+    separate = list(life_categories_from_storage(storage_items))
+    salary_items = [
+        item["item_name"]
+        for item in storage_items
+        if item.get("storage") == "salary"
+    ]
+
+    lines = [
+        "<b>КАК ФОРМИРУЮТСЯ КОНВЕРТЫ</b>",
+        "",
+        "Отдельный конверт нужен, когда обязательные деньги важно сохранить до момента оплаты: "
+        "расход может быть крупным, нерегулярным или особенно ответственным.",
+        "",
+        "Все налоги объединяются в одном конверте «Налоги». Повседневные и небольшие "
+        "ежемесячные расходы можно оставить на операционном счёте «Зарплата».",
+    ]
+    if separate:
+        lines.extend([
+            "",
+            "<b>В вашей рекомендации отдельно:</b> "
+            + ", ".join(escape(name) for name in separate)
+            + ".",
+        ])
+    if salary_items:
+        lines.extend([
+            "",
+            "<b>На «Зарплате»:</b> "
+            + ", ".join(escape(name) for name in salary_items)
+            + ".",
+        ])
+    lines.extend([
+        "",
+        "Это рекомендация, а не запрет. Например, регулярное ЖКХ можно вернуть на «Зарплату», "
+        "если отдельный конверт создаёт лишнюю сложность.",
+    ])
+    return "\n".join(lines)
+
+
+def km_storage_item_display_name(item: dict) -> str:
+    tax_labels = {
+        "tax": "Транспортный налог",
+        "property_tax": "Налог на имущество",
+        "land_tax": "Земельный налог",
+    }
+    name = item.get("item_name") or "Расход"
+    tax_label = tax_labels.get(item.get("subcategory"))
+    return f"{tax_label} · {name}" if tax_label else name
 
 
 def br_group_totals(items: list[dict]) -> dict[str, Decimal]:
@@ -1653,6 +1710,8 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
             "налогоплательщика на сайте ФНС или на Госуслугах. В уведомлении указаны объект, "
             "начисленная сумма и дата платежа.\n\n"
             "Можно указать точную сумму или осторожную оценку, если уведомление ещё не пришло.\n\n"
+            "Отдельный конверт «Транспортный налог» не создаётся. Эта сумма будет учитываться "
+            "в общем конверте «Налоги» вместе с другими налоговыми обязательствами.\n\n"
             "——————\n"
             "<b>→ Введите название автомобиля.</b>\n"
             "<b>Например:</b> Автомобиль, Лада, Volkswagen",
@@ -2440,9 +2499,19 @@ async def show_km_storage_review(message: Message, state: FSMContext):
         + km_storage_summary(storage_items, critical)
         + "\n\nЭто рекомендуемая структура. Её можно изменить под ваши банковские счета и привычки.",
         reply_markup=keyboard([
-            [("Всё устраивает", "kmstorage:accept")],
-            [("Изменить", "kmstorage:edit")],
+            [("Изменить", "kmstorage:edit"), ("✔️ Всё устраивает", "kmstorage:accept")],
+            [("ℹ️", "kmstorage:help")],
         ]),
+    )
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data == "kmstorage:help")
+async def show_km_storage_help(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    await callback.message.answer(
+        km_storage_help_text(data.get("km_storage_items", [])),
+        reply_markup=keyboard([[('← Назад', 'kmstorage:review')]]),
     )
 
 
@@ -2471,19 +2540,23 @@ async def show_km_storage_edit_menu(message: Message, state: FSMContext):
     rows = []
     for index, item in enumerate(items):
         if item.get("storage") == "separate":
-            destination = item.get("envelope_name") or "Отдельно"
+            destination = (
+                "Налоги"
+                if item.get("subcategory") in {"tax", "property_tax", "land_tax"}
+                else item.get("envelope_name") or "Отдельно"
+            )
         else:
             destination = "Зарплата"
-        label = f"{item['item_name']} → {destination}"
+        label = f"{km_storage_item_display_name(item)} сейчас в конверте {destination.upper()}"
         if len(label) > 50:
             label = label[:47] + "…"
         rows.append([(label, f"kmstorage:item:{index}")])
 
-    rows.append([("Готово", "kmstorage:review")])
+    rows.append([("✔️ Готово", "kmstorage:review")])
 
     await message.answer(
         f"{setup_progress(data, 5)}\n\n"
-        "<b>ИЗМЕНИТЬ СПОСОБ ХРАНЕНИЯ</b>\n\n"
+        "<b>ИЗМЕНИТЬ КОНВЕРТ</b>\n\n"
         "Нажмите на расход, чтобы оставить его на «Зарплате», вынести в отдельный конверт или изменить название конверта.",
         reply_markup=keyboard(rows),
     )
@@ -2499,24 +2572,35 @@ async def km_storage_item(callback: CallbackQuery, state: FSMContext):
         return
 
     item = items[index]
+    is_tax = item.get("subcategory") in {"tax", "property_tax", "land_tax"}
     current = (
-        f"отдельный конверт «{escape(item.get('envelope_name') or item['item_name'])}»"
+        "общий конверт «Налоги»"
+        if is_tax
+        else f"отдельный конверт «{escape(item.get('envelope_name') or item['item_name'])}»"
         if item.get("storage") == "separate"
         else "счёт «Зарплата»"
     )
 
     rows = []
-    if item.get("storage") == "separate":
+    if is_tax:
+        rows.append([("Назад", "kmstorage:edit")])
+    elif item.get("storage") == "separate":
         rows.append([("Оставить на Зарплате", f"kmstorage:salary:{index}")])
         rows.append([("Изменить название конверта", f"kmstorage:rename:{index}")])
     else:
         rows.append([("Создать отдельный конверт", f"kmstorage:separate:{index}")])
-    rows.append([("Назад", "kmstorage:edit")])
+    if not is_tax:
+        rows.append([("Назад", "kmstorage:edit")])
 
     await callback.message.answer(
-        f"<b>{escape(item['item_name'].upper())}</b>\n\n"
+        f"<b>{escape(km_storage_item_display_name(item).upper())}</b>\n\n"
         f"Среднемесячно — <b>{rub(Decimal(item['monthly']))}</b>\n"
-        f"Сейчас: <b>{current}</b>.",
+        f"Сейчас: <b>{current}</b>."
+        + (
+            "\n\nВсе налоговые обязательства хранятся только в общем конверте «Налоги»."
+            if is_tax
+            else ""
+        ),
         reply_markup=keyboard(rows),
     )
 
@@ -2528,6 +2612,10 @@ async def km_storage_to_salary(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     items = list(data.get("km_storage_items", []))
     if 0 <= index < len(items):
+        if items[index].get("subcategory") in {"tax", "property_tax", "land_tax"}:
+            await callback.message.answer("Все налоговые обязательства хранятся в общем конверте «Налоги».")
+            await show_km_storage_edit_menu(callback.message, state)
+            return
         items[index] = dict(items[index])
         items[index]["storage"] = "salary"
         items[index]["envelope_name"] = None
@@ -2546,7 +2634,7 @@ async def km_storage_to_separate(callback: CallbackQuery, state: FSMContext):
         item["storage"] = "separate"
         if not item.get("envelope_name"):
             defaults = {
-                "housing": "Квартира",
+                "housing": "Недвижимость",
                 "transport": "Транспорт",
                 "health": "Здоровье",
                 "pets": "Питомцы",
@@ -2563,6 +2651,12 @@ async def km_storage_to_separate(callback: CallbackQuery, state: FSMContext):
 async def km_storage_rename(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    items = data.get("km_storage_items", [])
+    if 0 <= index < len(items) and items[index].get("subcategory") in {"tax", "property_tax", "land_tax"}:
+        await callback.message.answer("Все налоговые обязательства хранятся в общем конверте «Налоги».")
+        await show_km_storage_edit_menu(callback.message, state)
+        return
     await state.update_data(pending_km_storage_index=index)
     await state.set_state(SetupStates.km_envelope_name)
     await callback.message.answer(
@@ -2994,21 +3088,77 @@ def contract_obligation_amount(item: dict, work_months: Decimal) -> Decimal:
     return money2(Decimal(str(item.get("monthly", "0"))) * work_months)
 
 
+def contract_obligation_button_text(item: dict) -> str:
+    months = Decimal(str(item.get("months", "1")))
+    if months > 1:
+        amount_text = f"{rub(Decimal(str(item.get('amount', '0'))))} / {months} мес."
+    else:
+        amount_text = f"{rub(Decimal(str(item.get('monthly', '0'))))} / мес."
+    label = f"{item['name']} — {amount_text}"
+    return label if len(label) <= 58 else label[:55] + "…"
+
+
+def build_contract_obligations(
+    data: dict,
+) -> tuple[dict[str, str], list[str], Decimal]:
+    selected = set(data.get("contract_obligation_keys", []))
+    work_months = Decimal(str(data.get("income_work_months", "1")))
+    obligations: dict[str, str] = {}
+    lines: list[str] = []
+    total = Decimal("0")
+
+    for item_key, item in contract_obligation_entries(data):
+        if item_key not in selected:
+            continue
+        amount = contract_obligation_amount(item, work_months)
+        obligations[item["name"]] = str(
+            Decimal(obligations.get(item["name"], "0")) + amount
+        )
+        total += amount
+        months = Decimal(str(item.get("months", "1")))
+        if months > 1:
+            calculation = f"платёж за {months} мес."
+        else:
+            calculation = f"{rub(Decimal(str(item.get('monthly', '0'))))} × {work_months} мес."
+        lines.append(
+            f"• <b>{escape(item['name'])}</b> — {calculation} = <b>{rub(amount)}</b>"
+        )
+
+    return obligations, lines, money2(total)
+
+
 async def show_contract_obligations(message: Message, state: FSMContext):
     data = await state.get_data()
     selected = set(data.get("contract_obligation_keys", []))
     rows = []
     for key, item in contract_obligation_entries(data):
         mark = "✔️ " if key in selected else ""
-        rows.append([(f"{mark}{item['name']}", f"contractobligation:{key}")])
+        rows.append([(f"{mark}{contract_obligation_button_text(item)}", f"contractobligation:{key}")])
     rows.append([("✔️ Готово", "contractobligation:done")])
     await state.set_state(SetupStates.contract_obligations_menu)
     await message.answer(
         f"{setup_progress(data, 7)}\n\n"
-        "<b>КАКИЕ РАСХОДЫ НУЖНО ОПЛАЧИВАТЬ, ПОКА ВЫ НА КОНТРАКТЕ?</b>\n\n"
-        "Выберите обязательства в России, которые продолжатся или наступят во время рабочей части: "
-        "например, ЖКХ, связь или годовая подписка. Нажмите повторно, чтобы снять выбор.",
+        "<b>КАКИЕ РАСХОДЫ ПРОДОЛЖАТСЯ ВО ВРЕМЯ РАБОТЫ?</b>\n\n"
+        "Выберите конкретные расходы, которые нужно оплачивать во время рабочей части цикла. "
+        "Аллокатор зарезервирует деньги на весь рабочий период.\n\n"
+        "Например, один номер телефона можно продолжать оплачивать, а другой временно заблокировать.\n\n"
+        "Нажмите на расход повторно, чтобы снять выбор.",
         reply_markup=keyboard(rows),
+    )
+
+
+async def show_contract_obligations_confirmation(message: Message, state: FSMContext):
+    data = await state.get_data()
+    obligations, lines, total = build_contract_obligations(data)
+    await state.update_data(contract_obligations=obligations)
+    await message.answer(
+        f"{setup_progress(data, 7)}\n\n"
+        "<b>ОБЯЗАТЕЛЬСТВА НА РАБОЧУЮ ЧАСТЬ</b>\n\n"
+        + ("\n".join(lines) if lines else "• Нет расходов, которые продолжатся во время работы")
+        + f"\n\nВсего нужно зарезервировать — <b>{rub(total)}</b>",
+        reply_markup=keyboard([
+            [("Изменить", "contractobligation:edit"), ("✔️ Всё верно", "contractobligation:confirm")],
+        ]),
     )
 
 
@@ -3017,17 +3167,13 @@ async def toggle_contract_obligation(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     key = callback.data.split(":", 1)[1]
     if key == "done":
-        data = await state.get_data()
-        selected = set(data.get("contract_obligation_keys", []))
-        work_months = Decimal(str(data.get("income_work_months", "1")))
-        obligations = {}
-        for item_key, item in contract_obligation_entries(data):
-            if item_key in selected:
-                amount = contract_obligation_amount(item, work_months)
-                obligations[item["name"]] = str(
-                    Decimal(obligations.get(item["name"], "0")) + amount
-                )
-        await state.update_data(contract_obligations=obligations, progress_offset=4)
+        await show_contract_obligations_confirmation(callback.message, state)
+        return
+    if key == "edit":
+        await show_contract_obligations(callback.message, state)
+        return
+    if key == "confirm":
+        await state.update_data(progress_offset=4)
         await ask_pillow_policy(callback.message, state)
         return
     selected = set((await state.get_data()).get("contract_obligation_keys", []))

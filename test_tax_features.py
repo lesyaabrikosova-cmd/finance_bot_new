@@ -10,7 +10,9 @@ os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 
 from onboarding import (  # noqa: E402
     add_calendar_months,
+    build_contract_obligations,
     default_km_storage,
+    life_categories_from_storage,
     months_until_due_date,
     parse_tax_due_date,
     planned_taxes_from_storage,
@@ -231,6 +233,80 @@ class TaxFeatureTests(unittest.TestCase):
         storage = default_km_storage(item)
         self.assertEqual(storage["storage"], "separate")
         self.assertEqual(storage["envelope_name"], "Налоги")
+
+    def test_tax_cannot_leave_common_tax_envelope(self):
+        legacy_or_manually_changed = {
+            "category": "transport",
+            "subcategory": "tax",
+            "item_name": "Автомобиль",
+            "monthly": "1000",
+            "storage": "salary",
+            "envelope_name": "Транспортный налог",
+        }
+        categories = life_categories_from_storage([legacy_or_manually_changed])
+        self.assertEqual(categories, {"Налоги": Decimal("1000.00")})
+
+    def test_contract_obligations_can_select_one_phone_but_not_another(self):
+        data = {
+            "income_work_months": "5",
+            "contract_obligation_keys": ["km:0"],
+            "km_items": [
+                {"name": "Мегафон", "amount": "150", "months": "1", "monthly": "150"},
+                {"name": "МТС", "amount": "200", "months": "1", "monthly": "200"},
+            ],
+            "br_items": [],
+        }
+        obligations, lines, total = build_contract_obligations(data)
+        self.assertEqual(obligations, {"Мегафон": "750.00"})
+        self.assertEqual(total, Decimal("750.00"))
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Мегафон", lines[0])
+        self.assertNotIn("МТС", lines[0])
+
+    def test_public_transport_period_is_only_used_for_averaging(self):
+        item = {
+            "category": "transport",
+            "category_label": "Транспорт",
+            "subcategory": "public",
+            "name": "Общественный транспорт",
+            "amount": "9508.50",
+            "months": "6",
+            "monthly": "1584.75",
+        }
+        storage = default_km_storage(item)
+        self.assertEqual(storage["storage"], "salary")
+        self.assertIsNone(storage["envelope_name"])
+
+    def test_unlimited_pass_uses_separate_envelope(self):
+        item = {
+            "category": "transport",
+            "category_label": "Транспорт",
+            "subcategory": "pass",
+            "name": "Безлимитный проездной",
+            "amount": "12000",
+            "months": "6",
+            "monthly": "2000",
+        }
+        storage = default_km_storage(item)
+        self.assertEqual(storage["storage"], "separate")
+        self.assertEqual(storage["envelope_name"], "Проездной")
+
+    def test_housing_obligations_share_real_estate_envelope(self):
+        items = [
+            {
+                "category": "housing",
+                "category_label": "Жильё, Аренда, ЖКХ",
+                "subcategory": "regular",
+                "name": name,
+                "amount": "3000",
+                "months": "1",
+                "monthly": "3000",
+            }
+            for name in ("ЖКХ", "Ипотека", "Студия")
+        ]
+        storage_items = [default_km_storage(item) for item in items]
+        self.assertTrue(all(item["storage"] == "separate" for item in storage_items))
+        self.assertTrue(all(item["envelope_name"] == "Недвижимость" for item in storage_items))
 
     def test_large_education_payment_keeps_deadline_metadata(self):
         item = {
