@@ -91,7 +91,7 @@ def keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=text,
+                    text=("✖️ Отмена" if text == "Отмена" else "+ Другое" if text == "Другое" else text),
                     callback_data=data,
                 )
                 for text, data in row
@@ -704,7 +704,7 @@ async def show_income_confirmation(
             ],
             [
                 (
-                    "❌ Отмена",
+                    "✖️ Отмена",
                     "income:cancel",
                 )
             ],

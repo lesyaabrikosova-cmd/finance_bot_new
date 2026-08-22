@@ -4,11 +4,18 @@ from storage import db
 
 
 def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
+    def normalized(text: str) -> str:
+        if text == "Отмена":
+            return "✖️ Отмена"
+        if text == "Другое":
+            return "+ Другое"
+        return text
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=text,
+                    text=normalized(text),
                     callback_data=data,
                 )
                 for text, data in row

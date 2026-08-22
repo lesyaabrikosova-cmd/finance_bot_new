@@ -181,7 +181,7 @@ def keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=text,
+                    text=("✖️ Отмена" if text == "Отмена" else "+ Другое" if text == "Другое" else text),
                     callback_data=data,
                 )
                 for text, data in row
@@ -551,14 +551,8 @@ KM_CATEGORIES = {
     ),
     "food": (
         "Питание",
-        "• Супермаркеты\n"
-        "• Питьевая вода\n"
-        "• Еда вне дома\n"
-        "• Доставки, если это необходимо\n"
-        "• Другое питание, без которого нельзя нормально прожить месяц.\n\n"
-        "——————\n"
-        "<b>→ Введите название расхода.</b>\n"
-        "<b>Например:</b> Вода, Супермаркет, Столовка",
+        "Для реалистичной средней суммы посмотрите расходы за последние <b>3–6 месяцев</b>. "
+        "Не включайте продукты и доставку, от которых можно отказаться без серьёзных последствий.",
     ),
     "communication": (
         "Связь и подписки",
@@ -593,10 +587,8 @@ KM_CATEGORIES = {
     ),
     "pets": (
         "Питомцы",
-        "• Корм\n• Наполнитель\n• Пелёнки\n• Аксессуары\n• Ветеринар\n\n"
-        "——————\n"
-        "<b>→ Введите название расхода.</b>\n"
-        "<b>Например:</b> Кошачий корм, Ветеринарка, Пелёнки собаке",
+        "Расходы на питомцев меняются по сезонам и из-за визитов к ветеринару. "
+        "Рекомендуем посмотреть банковскую аналитику за <b>12 месяцев</b>.",
     ),
     "health": (
         "Здоровье",
@@ -606,19 +598,17 @@ KM_CATEGORIES = {
         "- Анализы\n"
         "- Аптека\n"
         "- Витамины и др.\n\n"
-        "Если трата повторяется нерегулярно, укажите сумму за несколько месяцев или "
-        "за год — Аллокатор сам приведёт её к среднемесячной.\n\n"
-        "——————\n"
-        "<b>→ Введите название расхода.</b>\n"
-        "<b>Например:</b> Стоматолог, Анализы, Лекарства",
+        "Болезни и плановые расходы зависят от сезона. Рекомендуем посмотреть банковскую "
+        "аналитику за <b>12 месяцев</b>; Аллокатор приведёт сумму к среднемесячной.",
     ),
     "habits": (
         "Вредные привычки",
         "Сигареты, табак, вейпы, алкогольные и безалкогольные напитки или другие привычки, "
         "без которых вы сейчас фактически не обходитесь.\n\n"
         "Здесь важна честность, а не идеальная версия бюджета. В Критический минимум добавляйте только "
-        "реальную обязательную ежемесячную сумму. То, что можно сократить или покупать нерегулярно, "
-        "лучше учитывать в Бытовом резерве.",
+        "реальную обязательную сумму. То, что можно сократить или покупать нерегулярно, "
+        "лучше учитывать в Бытовом резерве. Для честной оценки посмотрите аналитику минимум "
+        "за <b>3 месяца</b>.",
     ),
     "fees": (
         "Комиссии",
@@ -627,8 +617,7 @@ KM_CATEGORIES = {
         "• неизбежные комиссии за переводы;\n"
         "• регулярные почтовые, платёжные и сервисные сборы.\n\n"
         "Госпошлины и другие нерегулярные комиссии обычно удобнее учитывать в Бытовом резерве. "
-        "Если расход возникает раз в несколько месяцев, укажите сумму за весь период — Аллокатор "
-        "приведёт её к среднемесячной.",
+        "Проверьте банковскую аналитику и выписки за <b>12 месяцев</b>: мелкие списания легко не заметить.",
     ),
     "other": (
         "Другое",
@@ -1541,7 +1530,7 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
         [("Транспорт", "kmcat:transport"), ("Дети", "kmcat:children")],
         [("Питание", "kmcat:food"), ("Образование", "kmcat:education")],
         [("Вредные привычки", "kmcat:habits"), ("Комиссии", "kmcat:fees")],
-        [("Другое", "kmcat:other")],
+        [("+ Другое", "kmcat:other")],
     ]
     if items:
         rows.append([("Редактировать", "kmedit:list"), ("✔️ Готово", "km:finish")])
@@ -1622,7 +1611,7 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
             "<b>КАК УСТРОЕНА ОПЛАТА?</b>",
             reply_markup=keyboard([
                 [("За каждое занятие", "kmeducation:lesson"), ("Каждый месяц", "kmeducation:monthly")],
-                [("Крупный платёж", "kmeducation:large"), ("Другое", "kmeducation:other")],
+                [("Крупный платёж", "kmeducation:large"), ("+ Другое", "kmeducation:other")],
                 [("← Назад", "km:cancel")],
             ]),
         )
@@ -1631,22 +1620,30 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         "health": [
             [("Лекарства", "medicine"), ("Стоматолог", "dentist")],
             [("Врачи", "doctors"), ("Анализы", "tests")],
-            [("Витамины", "vitamins"), ("Другое", "other")],
+            [("Витамины", "vitamins"), ("+ Другое", "other")],
         ],
         "pets": [
             [("Корм", "food"), ("Наполнитель", "litter")],
             [("Пелёнки", "pads"), ("Ветеринар", "vet")],
-            [("Аксессуары", "accessories"), ("Другое", "other")],
+            [("Аксессуары", "accessories"), ("+ Другое", "other")],
         ],
         "children": [
             [("Детский сад", "kindergarten"), ("Школа", "school")],
             [("Питание", "food"), ("Секция", "club")],
-            [("Другое", "other")],
+            [("+ Другое", "other")],
         ],
         "food": [
             [("Супермаркет", "supermarket"), ("Питьевая вода", "water")],
             [("Еда вне дома", "outside"), ("Доставка", "delivery")],
-            [("Другое", "other")],
+        ],
+        "habits": [
+            [("Сигареты", "cigarettes"), ("Табак и вейпы", "tobacco")],
+            [("Алкоголь", "alcohol"), ("Безалкогольное", "nonalcohol")],
+        ],
+        "fees": [
+            [("Обслуживание карты", "card"), ("Банковские переводы", "transfers")],
+            [("Платёжные сервисы", "payment"), ("Почтовые сборы", "postal")],
+            [("Госпошлины", "duties")],
         ],
     }
     if key in quick_categories:
@@ -1654,12 +1651,12 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
             [(text, f"kmquick:{key}:{code}") for text, code in row]
             for row in quick_categories[key]
         ]
-        rows.append([("← Назад", "km:cancel")])
+        rows.append([("← Назад", "km:cancel"), ("+ Другое", f"kmquick:{key}:other")])
         await state.set_state(SetupStates.km_menu)
         await callback.message.answer(
             f"{setup_progress(await state.get_data(), 5)}\n\n"
             f"<b>{escape(label.upper())}</b>\n\n"
-            "Выберите расход или добавьте свой.",
+            f"{hint}\n\nВыберите расход или добавьте свой.",
             reply_markup=keyboard(rows),
         )
         return
@@ -1708,8 +1705,7 @@ async def show_housing_expense_types(message: Message, state: FSMContext):
             [("Ипотека", "kmhousingexpense:mortgage"), ("Страхование", "kmhousingexpense:insurance")],
             [("Налог на имущество", "kmhousingexpense:property_tax")],
             [("Земельный налог", "kmhousingexpense:land_tax")],
-            [("+ Свой расход", "kmhousingexpense:custom")],
-            [("← Назад", "kmhousing:landing")],
+            [("+ Другое", "kmhousingexpense:custom"), ("✔️ Готово", "km:cancel")],
         ]),
     )
 
@@ -1786,24 +1782,25 @@ async def ask_housing_amount(message: Message, state: FSMContext):
     await state.update_data(pending_km_item_name=item_name)
     await state.set_state(SetupStates.km_item_amount)
     explanations = {
-        "utilities": "Обязательные коммунальные платежи по выбранному объекту.",
-        "rent": "Обязательная арендная плата. ЖКХ добавьте отдельно, если оно не входит в аренду.",
-        "mortgage": "Только обязательный платёж по ипотеке, без досрочного погашения.",
-        "insurance": "Обязательное страхование недвижимости, включая обязательную страховку по ипотеке.",
+        "utilities": "Посмотрите платежи за <b>6–12 месяцев</b>, чтобы учесть отопительный сезон и другие колебания ЖКХ.",
+        "rent": "Укажите обязательную арендную плату за <b>один месяц</b>. ЖКХ добавьте отдельно, если оно не входит в аренду.",
+        "mortgage": "Укажите только <b>минимальный обязательный месячный платёж</b>, без досрочного погашения.",
+        "insurance": "Обязательное страхование недвижимости, включая страховку по ипотеке. Посмотрите платежи за <b>12 месяцев</b>.",
         "property_tax": "Налог входит в Критический минимум, но будет храниться в общем конверте «Налоги».",
         "land_tax": "Налог входит в Критический минимум, но будет храниться в общем конверте «Налоги».",
         "other": "Обязательный расход по выбранному объекту.",
     }
-    suffix = (
-        "Срок уплаты укажем следующим сообщением"
-        if subtype in {"property_tax", "land_tax"}
-        else "Период укажем следующим сообщением"
-    )
+    fixed_monthly = subtype in {"rent", "mortgage"}
+    suffix = ""
+    if subtype in {"property_tax", "land_tax"}:
+        suffix = "\n(Срок уплаты укажем в следующем сообщении)"
+    elif not fixed_monthly:
+        suffix = "\n(Период укажем в следующем сообщении)"
     await message.answer(
         f"<b>{escape(expense_label.upper())} · {escape(object_name.upper())}</b>\n\n"
         f"{explanations.get(subtype, explanations['other'])}\n\n"
-        "——————\n<b>→ Введите сумму.</b>\n"
-        f"({suffix})",
+        "——————\n<b>→ Введите сумму.</b>"
+        f"{suffix}",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -2032,7 +2029,10 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
     await state.set_state(SetupStates.km_item_amount)
     await callback.message.answer(
         f"{setup_progress(data, 5)}\n\n<b>{escape(labels[subtype].upper())}</b>\n\n"
-        f"{texts[subtype]}\n\n——————\n<b>→ Введите сумму.</b>",
+        f"{texts[subtype]}\n\n"
+        + ("Посмотрите расходы минимум за <b>6 месяцев</b>.\n\n" if subtype != "pass" else "")
+        + "——————\n<b>→ Введите сумму.</b>\n"
+        + ("(Срок укажем в следующем сообщении)" if subtype == "pass" else "(Период укажем в следующем сообщении)"),
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -2087,7 +2087,8 @@ async def choose_car_expense(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SetupStates.km_item_amount)
     await callback.message.answer(
         f"<b>{escape(label.upper())}</b>\n\n{explanations[code]}\n\n"
-        "——————\n<b>→ Введите сумму.</b>\n(Период укажем следующим сообщением)",
+        "Рекомендуем посмотреть расходы минимум за <b>6 месяцев</b>.\n\n"
+        "——————\n<b>→ Введите сумму.</b>\n(Период укажем в следующем сообщении)",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -2125,9 +2126,22 @@ async def ask_preset_km_amount(message: Message, state: FSMContext, name: str):
     await state.update_data(pending_km_item_name=name)
     await state.set_state(SetupStates.km_item_amount)
     data = await state.get_data()
+    category = data.get("pending_km_category")
+    recommendations = {
+        "food": "Посмотрите расходы за <b>3–6 месяцев</b> и введите общую сумму за выбранный период.",
+        "health": "Посмотрите расходы за <b>12 месяцев</b>: это поможет учесть сезонность болезней и плановых врачей.",
+        "pets": "Посмотрите расходы за <b>12 месяцев</b>, включая сезонные покупки и ветеринара.",
+        "transport": "Посмотрите расходы минимум за <b>6 месяцев</b>.",
+        "habits": "Посмотрите фактические расходы минимум за <b>3 месяца</b>.",
+        "fees": "Проверьте банковскую аналитику и выписки за <b>12 месяцев</b>.",
+        "children": "Посмотрите расходы за <b>6–12 месяцев</b>, чтобы не пропустить сезонные платежи.",
+    }
+    recommendation = recommendations.get(category)
     await message.answer(
         f"{setup_progress(data, 5)}\n\n<b>{escape(name.upper())}</b>\n\n"
-        "——————\n<b>→ Введите сумму.</b>",
+        + (f"{recommendation}\n\n" if recommendation else "")
+        + "——————\n<b>→ Введите сумму.</b>\n"
+        "(Период укажем в следующем сообщении)",
         reply_markup=keyboard([[("Отмена", "km:cancel")]]),
     )
 
@@ -2152,9 +2166,19 @@ async def choose_quick_km_subcategory(callback: CallbackQuery, state: FSMContext
             "supermarket": "Супермаркет", "water": "Питьевая вода",
             "outside": "Еда вне дома", "delivery": "Доставка",
         },
+        "habits": {
+            "cigarettes": "Сигареты", "tobacco": "Табак и вейпы",
+            "alcohol": "Алкоголь", "nonalcohol": "Безалкогольные напитки",
+        },
+        "fees": {
+            "card": "Обслуживание карты", "transfers": "Банковские переводы",
+            "payment": "Платёжные сервисы", "postal": "Почтовые сборы",
+            "duties": "Госпошлины",
+        },
     }
     category_labels = {
         "health": "Здоровье", "pets": "Питомцы", "children": "Дети", "food": "Питание",
+        "habits": "Вредные привычки", "fees": "Комиссии",
     }
     if category not in labels or (subtype != "other" and subtype not in labels[category]):
         return
@@ -2338,7 +2362,8 @@ async def ask_communication_amount(message: Message, state: FSMContext):
     }
     await message.answer(
         f"<b>{escape(item_name.upper())}</b>\n\n{texts.get(subtype, texts['other'])}\n\n"
-        "——————\n<b>→ Введите сумму.</b>",
+        "——————\n<b>→ Введите сумму.</b>"
+        + ("" if subtype in {"mobile", "internet"} else "\n(Период укажем в следующем сообщении)"),
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -2505,7 +2530,7 @@ async def km_item_name(message: Message, state: FSMContext):
         + (
             "(Срок уплаты укажем следующим сообщением)"
             if is_tax
-            else "(Период укажем следующим сообщением)"
+            else "(Период укажем в следующем сообщении)"
         ),
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
@@ -2521,19 +2546,19 @@ async def km_item_amount(message: Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("pending_km_category")
     subtype = data.get("pending_km_subcategory")
+    if category == "housing" and subtype in {"rent", "mortgage"}:
+        await save_km_item(message, state, Decimal("1"))
+        return
+    if category == "communication" and subtype in {"mobile", "internet"}:
+        await save_km_item(message, state, Decimal("1"))
+        return
     if category == "communication" and subtype in {"mobile", "internet", "vpn", "subscription", "tv", "other"}:
         await state.set_state(SetupStates.km_item_period)
-        if subtype in {"mobile", "internet"}:
-            rows = [
-                [("Каждый месяц", "kmperiod:1"), ("Другой период", "kmperiod:custom")],
-                [("← Назад", "kmperiod:back")],
-            ]
-        else:
-            rows = [
-                [("Каждый месяц", "kmperiod:1"), ("Раз в 3 месяца", "kmperiod:3")],
-                [("Раз в 6 месяцев", "kmperiod:6"), ("Раз в год", "kmperiod:12")],
-                [("← Назад", "kmperiod:back"), ("Другой период", "kmperiod:custom")],
-            ]
+        rows = [
+            [("Каждый месяц", "kmperiod:1"), ("Раз в 3 месяца", "kmperiod:3")],
+            [("Раз в 6 месяцев", "kmperiod:6"), ("Раз в год", "kmperiod:12")],
+            [("← Назад", "kmperiod:back"), ("Другой период", "kmperiod:custom")],
+        ]
         await message.answer("<b>КАК ЧАСТО ВЫ ОПЛАЧИВАЕТЕ?</b>", reply_markup=keyboard(rows))
         return
     if category == "transport" and subtype == "pass":
@@ -3404,7 +3429,7 @@ async def show_br_menu(message: Message, state: FSMContext, intro: bool = False)
         [("Домашний уют", "brcat:comfort")],
         [("Подписки", "brcat:subscriptions")],
         [("Вредные привычки", "brcat:habits"), ("Комиссии", "brcat:fees")],
-        [("Другое", "brcat:other")],
+        [("+ Другое", "brcat:other")],
     ]
     if items:
         rows.append([("Редактировать расходы", "bredit:list")])
@@ -3476,7 +3501,7 @@ async def br_item_name(message: Message, state: FSMContext):
         f"<b>{escape(name.upper())}</b>\n\n"
         "——————\n"
         "<b>→ Введите сумму.</b>\n"
-        "(Период укажем следующим сообщением)\n\n"
+        "(Период укажем в следующем сообщении)\n\n"
         "Например: <code>12000</code>.",
         reply_markup=keyboard([[('Отмена','br:cancel')]]),
     )
