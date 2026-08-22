@@ -44,6 +44,12 @@ INTRO_IMAGE_4 = INTRO_IMAGES_DIR / "intro_4.png"
 FINANCIAL_PROFILE_IMAGE = INTRO_IMAGES_DIR / "financial_profile.png"
 CRITICAL_MINIMUM_IMAGE = INTRO_IMAGES_DIR / "critical_minimum.png"
 HOUSEHOLD_RESERVE_IMAGE = INTRO_IMAGES_DIR / "household_reserve.png"
+CRITICAL_MINIMUM_CALCULATED_IMAGE = (
+    INTRO_IMAGES_DIR / "critical_minimum_calculated.png"
+)
+HOUSEHOLD_RESERVE_CALCULATED_IMAGE = (
+    INTRO_IMAGES_DIR / "household_reserve_calculated.png"
+)
 
 # Стандартный эффект Telegram «Праздник / конфетти». Эффекты работают только
 # в личных чатах и могут быть недоступны в отдельных версиях клиента.
@@ -2292,19 +2298,36 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
     lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
 
     await state.set_state(SetupStates.km_menu)
-    await callback.message.answer(
+    caption = (
         f"{setup_progress(data, 5)}\n\n"
         "<b>КРИТИЧЕСКИЙ МИНИМУМ РАССЧИТАН</b>\n\n"
         + "\n".join(lines)
         + f"\n\nПо категориям — <b>{rub(exact)}</b>\n"
         + f"Критический минимум — <b>{rub(rounded)}</b>\n\n"
-        "Сумма округлена вверх до ближайшей 1 000 ₽. Можно исправить расходы или увеличить итоговый минимум, если хотите дополнительный запас.",
-        reply_markup=keyboard([
-            [('Продолжить', 'kmfinal:continue')],
-            [('Редактировать расходы', 'kmedit:list')],
-            [('Изменить сумму КМ', 'kmfinal:override')],
-        ]),
+        "Сумма округлена вверх до ближайшей 1 000 ₽. Можно исправить расходы или увеличить итоговый минимум, если хотите дополнительный запас."
     )
+    reply_markup = keyboard([
+        [('Продолжить', 'kmfinal:continue')],
+        [('Редактировать расходы', 'kmedit:list')],
+        [('Изменить сумму КМ', 'kmfinal:override')],
+    ])
+    try:
+        await callback.message.answer_photo(
+            photo=FSInputFile(CRITICAL_MINIMUM_CALCULATED_IMAGE),
+            caption=caption,
+            reply_markup=reply_markup,
+            message_effect_id=(
+                FIRE_EFFECT_ID
+                if callback.message.chat.type == "private"
+                else None
+            ),
+        )
+    except TelegramBadRequest:
+        await callback.message.answer_photo(
+            photo=FSInputFile(CRITICAL_MINIMUM_CALCULATED_IMAGE),
+            caption=caption,
+            reply_markup=reply_markup,
+        )
 
 
 async def clear_pending_km(state: FSMContext):
@@ -2943,20 +2966,37 @@ async def finish_br(callback: CallbackQuery, state: FSMContext):
     lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
 
     await state.set_state(SetupStates.br_menu)
-    await callback.message.answer(
+    caption = (
         f"{setup_progress(data, 6)}\n\n"
         "<b>БЫТОВОЙ РЕЗЕРВ РАССЧИТАН</b>\n\n"
         + "\n".join(lines)
         + f"\n\nПо категориям — <b>{rub(exact)}</b>\n"
         + f"Бытовой резерв — <b>{rub(rounded)}</b>\n"
         + f"Устойчивая жизнь — <b>{rub(sustainable)}</b>\n\n"
-        "Сумма округлена вверх до ближайшей 1 000 ₽. Можно исправить расходы или увеличить итоговый резерв.",
-        reply_markup=keyboard([
-            [('Продолжить', 'brfinal:continue')],
-            [('Редактировать расходы', 'bredit:list')],
-            [('Изменить сумму БР', 'brfinal:override')],
-        ]),
+        "Сумма округлена вверх до ближайшей 1 000 ₽. Можно исправить расходы или увеличить итоговый резерв."
     )
+    reply_markup = keyboard([
+        [('Продолжить', 'brfinal:continue')],
+        [('Редактировать расходы', 'bredit:list')],
+        [('Изменить сумму БР', 'brfinal:override')],
+    ])
+    try:
+        await callback.message.answer_photo(
+            photo=FSInputFile(HOUSEHOLD_RESERVE_CALCULATED_IMAGE),
+            caption=caption,
+            reply_markup=reply_markup,
+            message_effect_id=(
+                FIRE_EFFECT_ID
+                if callback.message.chat.type == "private"
+                else None
+            ),
+        )
+    except TelegramBadRequest:
+        await callback.message.answer_photo(
+            photo=FSInputFile(HOUSEHOLD_RESERVE_CALCULATED_IMAGE),
+            caption=caption,
+            reply_markup=reply_markup,
+        )
 
 
 async def clear_pending_br(state: FSMContext):
