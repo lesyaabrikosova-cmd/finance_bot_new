@@ -12,6 +12,7 @@ from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
     default_km_storage,
+    km_item_display_name,
     km_item_totals_by_name,
     life_categories_from_storage,
     months_until_due_date,
@@ -70,9 +71,29 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(
             km_item_totals_by_name(items),
             [
-                ("Квартира", Decimal("300.00")),
-                ("Квартира", Decimal("200.00")),
+                ("Налог на имущество · Квартира", Decimal("300.00")),
+                ("Налог на имущество · Квартира", Decimal("200.00")),
             ],
+        )
+
+    def test_tax_item_display_name_includes_tax_type(self):
+        self.assertEqual(
+            km_item_display_name(
+                {"name": "квартира", "subcategory": "property_tax"}
+            ),
+            "Налог на имущество · квартира",
+        )
+        self.assertEqual(
+            km_item_display_name(
+                {"name": "Дача", "subcategory": "land_tax"}
+            ),
+            "Земельный налог · Дача",
+        )
+        self.assertEqual(
+            km_item_display_name(
+                {"name": "Лада", "subcategory": "tax"}
+            ),
+            "Транспортный налог · Лада",
         )
 
     def test_calendar_months_preserve_valid_day(self):

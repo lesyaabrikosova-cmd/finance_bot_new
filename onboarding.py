@@ -718,6 +718,18 @@ def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
     return result
 
 
+def km_item_display_name(item: dict) -> str:
+    """Показывает назначение налога, сохраняя внутри чистое имя объекта."""
+    name = (item.get("name") or "Расход").strip()
+    tax_labels = {
+        "property_tax": "Налог на имущество",
+        "land_tax": "Земельный налог",
+        "tax": "Транспортный налог",
+    }
+    tax_label = tax_labels.get(item.get("subcategory"))
+    return f"{tax_label} · {name}" if tax_label else name
+
+
 def km_item_totals_by_name(items: list[dict]) -> list[tuple[str, Decimal]]:
     """Суммирует одноимённые расходы для компактного показа в меню КМ.
 
@@ -736,7 +748,7 @@ def km_item_totals_by_name(items: list[dict]) -> list[tuple[str, Decimal]]:
             str(item.get("due_date") or ""),
             normalized_name,
         )
-        display_names.setdefault(key, name)
+        display_names.setdefault(key, km_item_display_name(item))
         totals[key] = money2(
             totals.get(key, Decimal("0")) + Decimal(item["monthly"])
         )
@@ -2409,7 +2421,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     if item.get("due_date"):
         tax_due_text = f"\nСрок уплаты — <b>{date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}</b>"
     await message.answer(
-        f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес.{tax_due_text}",
+        f"<b>{escape(km_item_display_name(item))}</b> — {rub(monthly)} / мес.{tax_due_text}",
         reply_markup=keyboard([[('Редактировать', f'kmedit:item:{index}'), ('Удалить', f'kmedit:delete:{index}')]])
     )
     if item.get("one_time") and item["category"] == "education":
@@ -2589,7 +2601,7 @@ async def km_edit_list(callback: CallbackQuery, state: FSMContext):
     if not items:
         await callback.message.answer("Пока нечего редактировать.")
         return
-    rows = [[(f"{item['name']} — {rub(Decimal(item['monthly']))}", f"kmedit:item:{i}")] for i, item in enumerate(items)]
+    rows = [[(f"{km_item_display_name(item)} — {rub(Decimal(item['monthly']))}", f"kmedit:item:{i}")] for i, item in enumerate(items)]
     rows.append([("Назад", "kmedit:back")])
     await callback.message.answer("<b>ЧТО ИЗМЕНИТЬ?</b>", reply_markup=keyboard(rows))
 
@@ -2621,7 +2633,7 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
     )
     await state.update_data(pending_km_edit_index=index)
     await callback.message.answer(
-        f"<b>{escape(item['name'])}</b>\n\n"
+        f"<b>{escape(km_item_display_name(item))}</b>\n\n"
         f"Категория — {escape(item['category_label'])}\n"
         f"Исходная сумма — {rub(Decimal(item['amount']))}\n"
         + period_line
