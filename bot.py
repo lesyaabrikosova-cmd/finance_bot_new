@@ -251,6 +251,10 @@ async def send_state(
         "irregular": "Сдельный",
         "cyclic": "Цикличный (контрактный)",
     }
+    stabilizer_line = (
+        f"🛟 Стабилизатор дохода: <b>{fmt_money(state.stabilizer_balance)} ₽</b>\n"
+        if settings.needs_stabilizer else ""
+    )
     text = (
         "🧭 <b>ТЕКУЩЕЕ СОСТОЯНИЕ</b>\n\n"
 
@@ -259,8 +263,8 @@ async def send_state(
         f"{profile_debt}</b>\n\n"
 
         f"⚙️ Активный режим: "
-        f"<b>{MODE_NAMES[mode]} "
-        f"{MODE_TITLES[mode]}</b>\n\n"
+        f"<b>{allocator.mode_display_name(mode)} "
+        f"{allocator.mode_title(mode)}</b>\n\n"
 
         f"💰 Доход за период: "
         f"<b>{fmt_money(state.period_income)} ₽</b>\n"
@@ -274,6 +278,8 @@ async def send_state(
         f"🛡️ Подушка всего: "
         f"<b>{fmt_money(state.pillow_balance)} ₽</b>\n"
 
+        f"{stabilizer_line}"
+
         f"📈 Инвестиции всего: "
         f"<b>{fmt_money(state.investments)} ₽</b>\n"
 
@@ -285,7 +291,10 @@ async def send_state(
         text += (
             "\n\n<b>Фонд Зарплаты</b>: "
             f"<b>{fmt_money(state.intercontract_reserve)} ₽</b> / "
-            f"{fmt_money(settings.intercontract_full_limit)} ₽"
+            f"{fmt_money(settings.intercontract_full_limit)} ₽\n"
+            "<b>Обязательства рабочей части</b>: "
+            f"<b>{fmt_money(state.contract_obligations_reserve)} ₽</b> / "
+            f"{fmt_money(settings.contract_obligations_total)} ₽"
         )
 
     if next_info:
@@ -299,7 +308,7 @@ async def send_state(
     if settings.developer_mode:
 
         text += (
-            "\n\n🛠 <b>СЛОИ ПОДУШКИ</b>\n\n"
+            "\n\n🛠 <b>ЗАЩИТНЫЕ РЕЗЕРВЫ</b>\n\n"
 
             f"Минимальная: "
             f"{fmt_money(state.pillow_minimum)} ₽ "
@@ -315,7 +324,7 @@ async def send_state(
             f"/ "
             f"{fmt_money(settings.force_majeure_limit)} ₽\n"
 
-            f"Стабилизатор: "
+            f"Стабилизатор дохода: "
             f"{fmt_money(state.pillow_stabilizer)} ₽ "
             f"/ "
             f"{fmt_money(settings.stabilizer_full_limit)} ₽"
@@ -566,6 +575,12 @@ async def menu_summary(
         return
 
     state = allocator.state
+    settings = allocator.settings
+    reserve_lines = ""
+    if settings.income_rhythm == "cyclic":
+        reserve_lines += f"🏦 Фонд Зарплаты: <b>{fmt_money(state.intercontract_reserve)} ₽</b>\n"
+    if settings.needs_stabilizer:
+        reserve_lines += f"🛟 Стабилизатор дохода: <b>{fmt_money(state.stabilizer_balance)} ₽</b>\n"
 
     await callback.message.answer(
         "📋 <b>СВОДКА ТЕКУЩЕГО ПЕРИОДА</b>\n\n"
@@ -578,6 +593,8 @@ async def menu_summary(
 
         f"🛡️ Подушка всего: "
         f"<b>{fmt_money(state.pillow_balance)} ₽</b>\n"
+
+        f"{reserve_lines}"
 
         f"📈 Инвестиции всего: "
         f"<b>{fmt_money(state.investments)} ₽</b>\n\n"

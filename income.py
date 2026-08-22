@@ -6,6 +6,7 @@ from html import escape
 from pathlib import Path
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -25,6 +26,7 @@ from financial_engine import (
 )
 
 from storage import db
+from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 from ui import main_menu_keyboard
 from taxes import apply_planned_tax_allocation, refresh_planned_tax_targets
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets
@@ -37,23 +39,21 @@ NEW_INCOME_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "menu" / "n
 INCOME_DISTRIBUTION_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "menu" / "income_distribution.png"
 
 
-MODE_IMAGE_PATHS = {2: Path(__file__).resolve().parent / "assets" / "modes" / "mode_2.png", 3: Path(__file__).resolve().parent / "assets" / "modes" / "mode_3.png", 4: Path(__file__).resolve().parent / "assets" / "modes" / "mode_4.png", 5: Path(__file__).resolve().parent / "assets" / "modes" / "mode_5.png", 6: Path(__file__).resolve().parent / "assets" / "modes" / "mode_6.png"}
-
-async def send_mode_unlock_image(message: Message, result) -> None:
+async def send_mode_unlock_image(message: Message, allocator: FinancialAllocator, result) -> None:
     if result.mode_after <= result.mode_before:
         return
-    image_path = MODE_IMAGE_PATHS.get(result.mode_after)
-    if image_path is None or not image_path.exists():
+    image_path = mode_image_path(allocator.profile_id, result.mode_after)
+    if image_path is None:
         return
-    mode_label = (
-        "МАКСИМАЛЬНЫЙ РЕЖИМ"
-        if result.mode_after == 6
-        else f"РЕЖИМ {result.mode_after}"
-    )
-    await message.answer_photo(
-        photo=FSInputFile(image_path),
-        caption=f"<b>{mode_label}</b>\n{escape(MODE_TITLES[result.mode_after])}",
-    )
+    caption = f"<b>{escape(allocator.mode_title(result.mode_after))}</b>"
+    try:
+        await message.answer_photo(
+            photo=FSInputFile(image_path),
+            caption=caption,
+            message_effect_id=(FIRE_EFFECT_ID if message.chat.type == "private" else None),
+        )
+    except TelegramBadRequest:
+        await message.answer_photo(photo=FSInputFile(image_path), caption=caption)
 
 
 # ============================================================
@@ -438,7 +438,7 @@ async def custom_income_type(
         f"<b>{escape(value.upper())}</b>\n\n"
         "Нужно самостоятельно откладывать налог с этого дохода?",
         reply_markup=keyboard([
-            [("Да", "newincome:tax:yes"), ("Нет", "newincome:tax:no")],
+            [("Есть налог", "newincome:tax:yes"), ("Без налога", "newincome:tax:no")],
             [("Отмена", "income:cancel")],
         ]),
     )
@@ -1240,6 +1240,7 @@ async def confirm_income(
 
     await send_mode_unlock_image(
         callback.message,
+        allocator,
         result,
     )
 
@@ -1324,6 +1325,16 @@ async def send_distribution_report(
         "Фонд Зарплаты",
         allocations.get("Фонд Зарплаты", ZERO),
     )
+
+    add_distribution_line(
+        "🛟",
+        "Стабилизатор дохода",
+        allocations.get("Стабилизатор дохода", ZERO),
+    )
+
+    for key, value in allocations.items():
+        if key.startswith("Рабочие обязательства:"):
+            add_distribution_line("📌", key.split(":", 1)[1], value)
 
     for name in settings.life_categories.keys():
 
@@ -1432,30 +1443,7 @@ async def send_distribution_report(
 
     mode = allocator.active_mode()
 
-    if settings.employment_type == "Фрилансер":
-
-        reward_map = {
-            1: "🏆➖➖➖➖➖",
-            2: "🏆🏆➖➖➖➖",
-            3: "🏆🏆🏆➖➖➖",
-            4: "🏆🏆🏆🏆➖➖",
-            5: "🏆🏆🏆🏆🏆➖",
-            6: "🏆🏆🏆🏆🏆🏆",
-        }
-
-    else:
-
-        reward_map = {
-            1: "🏆➖➖➖",
-            2: "🏆🏆➖➖",
-            3: "🏆🏆🏆➖",
-            6: "🏆🏆🏆🏆",
-        }
-
-    reward = reward_map.get(
-        mode,
-        "",
-    )
+    reward = "🏆" * mode + "➖" * (allocator.profile_mode_total - mode)
 
     next_info = allocator.next_mode_info()
 
@@ -1467,10 +1455,20 @@ async def send_distribution_report(
             next_info["remaining"]
         )
 
-        if settings.employment_type == "Фрилансер":
+        if settings.profile_type == "cyclic":
+            reward_text = {
+                1: f"Отложи на Подушку ещё {remaining} ₽ и защити себя от новых долгов!",
+                2: f"Погаси ещё {remaining} ₽ долгов и начни платить будущему себе!",
+                3: f"Отложи в Фонд Зарплаты ещё {remaining} ₽ и обеспечь обязательную жизнь на время перерыва!",
+                4: f"Отложи в Фонд Зарплаты ещё {remaining} ₽ и обеспечь Устойчивую жизнь на весь перерыв!",
+                5: f"Отложи на Подушку ещё {remaining} ₽ и подготовься к форс-мажорам!",
+                6: f"Отложи в Стабилизатор дохода ещё {remaining} ₽ и защити Критический минимум от задержки контракта!",
+                7: f"Отложи в Стабилизатор дохода ещё {remaining} ₽ и копи на цели ещё быстрее!",
+            }
+        elif settings.profile_type == "piecework":
             reward_text = {
                 1: (
-                    "Отложи на Подушку еще "
+                    "Отложи на Подушку ещё "
                     f"{remaining} ₽ и защити себя от новых долгов!"
                 ),
                 2: (
@@ -1479,15 +1477,15 @@ async def send_distribution_report(
                     "форс-мажорную Подушку!"
                 ),
                 3: (
-                    "Отложи на Подушку еще "
+                    "Отложи на Подушку ещё "
                     f"{remaining} ₽ и открой Стабилизатор дохода!"
                 ),
                 4: (
-                    "Отложи на Подушку еще "
+                    "Отложи в Стабилизатор дохода ещё "
                     f"{remaining} ₽ — и откроются инвестиции и цели!"
                 ),
                 5: (
-                    "Отложи на Подушку еще "
+                    "Отложи в Стабилизатор дохода ещё "
                     f"{remaining} ₽ и копи на цели еще быстрее!"
                 ),
             }
@@ -1552,6 +1550,11 @@ async def send_distribution_report(
         *(
             [f"🏦 <b>Фонд Зарплаты</b> — {money_plain(state.intercontract_reserve)}"]
             if settings.income_rhythm == "cyclic"
+            else []
+        ),
+        *(
+            [f"🛟 <b>Стабилизатор дохода</b> — {money_plain(state.stabilizer_balance)}"]
+            if settings.needs_stabilizer
             else []
         ),
         f"🆘 <b>До Критического минимума</b> — "

@@ -70,6 +70,50 @@ MODE_4 = 4
 MODE_5 = 5
 MODE_6 = 6
 
+PROFILE_STABLE = "stable"
+PROFILE_PIECEWORK = "piecework"
+PROFILE_CYCLIC = "cyclic"
+
+PROFILE_MODE_TITLES = {
+    PROFILE_STABLE: {
+        1: "Небо помогает тому, кто помогает себе.",
+        2: "Ланистеры всегда платят свои долги.",
+        3: "Подготовка к Апокалипсису.",
+        4: "Философский камень найден.",
+    },
+    PROFILE_PIECEWORK: {
+        1: "Небо помогает тому, кто помогает себе.",
+        2: "Ланистеры всегда платят свои долги.",
+        3: "Подготовка к Апокалипсису.",
+        4: "Заказов нет. Паники тоже.",
+        5: "Защита есть. Пора расти.",
+        6: "Философский камень найден.",
+    },
+    PROFILE_CYCLIC: {
+        1: "Небо помогает тому, кто помогает себе.",
+        2: "Ланистеры всегда платят свои долги.",
+        3: "Заплати будущему себе.",
+        4: "Не на хлебе и воде.",
+        5: "Подготовка к Апокалипсису.",
+        6: "Контракт задержался. Паники нет.",
+        7: "Защита есть. Пора расти.",
+        8: "Философский камень найден.",
+    },
+}
+
+
+def normalize_profile_id(profile_type: str | None, employment_type: str, income_rhythm: str) -> str:
+    """Возвращает новый ID профиля и понимает старые сохранённые значения."""
+    if income_rhythm == "cyclic":
+        return PROFILE_CYCLIC
+    if income_rhythm == "irregular":
+        return PROFILE_PIECEWORK
+    if profile_type in {PROFILE_STABLE, PROFILE_PIECEWORK}:
+        return profile_type
+    if employment_type == "Фрилансер":
+        return PROFILE_PIECEWORK
+    return PROFILE_STABLE
+
 
 MODE_NAMES = {
     MODE_1: "🟤 1",
@@ -206,6 +250,10 @@ class UserSettings:
     household_reserve: Decimal
     average_income: Decimal
 
+    # Канонический технический ID. employment_type оставлен для чтения
+    # профилей, созданных до появления трёх финансовых маршрутов.
+    profile_type: str = ""
+
     # Ритм поступлений — отдельная характеристика от формы занятости.
     # monthly: деньги приходят каждый месяц;
     # irregular: сумма меняется, но длинного известного перерыва нет;
@@ -281,6 +329,11 @@ class UserSettings:
     developer_mode: bool = False
 
     def __post_init__(self):
+        self.profile_type = normalize_profile_id(
+            self.profile_type,
+            self.employment_type,
+            self.income_rhythm,
+        )
         self.critical_life = D(self.critical_life)
         self.household_reserve = D(self.household_reserve)
         self.average_income = D(self.average_income)
@@ -401,7 +454,11 @@ class UserSettings:
 
     @property
     def needs_stabilizer(self) -> bool:
-        return self.income_rhythm in {"irregular", "cyclic"} or self.employment_type == "Фрилансер"
+        return normalize_profile_id(
+            self.profile_type,
+            self.employment_type,
+            self.income_rhythm,
+        ) in {PROFILE_PIECEWORK, PROFILE_CYCLIC}
 
     @property
     def stabilizer_months(self) -> Decimal:
@@ -514,10 +571,13 @@ class UserSettings:
         if self.employment_type not in {
             "Фрилансер",
             "Наёмный",
+            PROFILE_STABLE,
+            PROFILE_PIECEWORK,
+            PROFILE_CYCLIC,
         }:
             errors.append(
                 "Форма занятости должна быть "
-                "'Фрилансер' или 'Наёмный'."
+                "старым или новым техническим ID профиля."
             )
 
         if self.income_rhythm not in {"monthly", "irregular", "cyclic"}:
@@ -565,6 +625,7 @@ class AllocatorState:
     intercontract_reserve: Decimal = ZERO
     intercontract_months_remaining: Decimal = ZERO
     intercontract_break_active: bool = False
+    contract_obligations_reserve: Decimal = ZERO
     pillow_force_majeure: Decimal = ZERO
     pillow_stabilizer: Decimal = ZERO
 
@@ -639,6 +700,7 @@ class AllocatorState:
         self.intercontract_reserve = D(self.intercontract_reserve)
         self.intercontract_months_remaining = max(ZERO, D(self.intercontract_months_remaining))
         self.intercontract_break_active = bool(self.intercontract_break_active)
+        self.contract_obligations_reserve = max(ZERO, D(self.contract_obligations_reserve))
         self.pillow_force_majeure = D(
             self.pillow_force_majeure
         )
@@ -673,17 +735,18 @@ class AllocatorState:
     @property
     def pillow_balance(self) -> Decimal:
         """
-        Единый баланс Подушки.
+        Подушка включает только минимальный и форс-мажорный слои.
 
-        Внутри алгоритма слои учитываются отдельно,
-        но пользовательский баланс Подушки является
-        их суммой.
+        Стабилизатор дохода и Фонд Зарплаты — самостоятельные сущности.
         """
         return (
             self.pillow_minimum
             + self.pillow_force_majeure
-            + self.pillow_stabilizer
         )
+
+    @property
+    def stabilizer_balance(self) -> Decimal:
+        return self.pillow_stabilizer
 
     def reset_period(self):
         """
@@ -894,7 +957,7 @@ class FinancialAllocator:
         return income * rate / HUNDRED
 
     # ========================================================
-    # БАЛАНС ПОДУШКИ
+    # БАЛАНСЫ ЗАЩИТНЫХ РЕЗЕРВОВ
     # ========================================================
 
     def pillow_layer_limit(
@@ -945,7 +1008,7 @@ class FinancialAllocator:
         amount: Decimal,
     ) -> Decimal:
         """
-        Добавляет сумму в конкретный слой Подушки.
+        Добавляет сумму в конкретный защитный резерв.
 
         Возвращает переполнение, которое не удалось
         разместить в этом слое.
@@ -996,11 +1059,11 @@ class FinancialAllocator:
         start_layer: str,
     ) -> Decimal:
         """
-        Водопад:
+        Технический водопад защитных сущностей:
 
         МП → МР → ФМ → СтабД
 
-        Возвращает остаток, если вся Подушка заполнена.
+        Возвращает остаток, если все предусмотренные резервы заполнены.
         """
 
         amount = D(amount)
@@ -1053,6 +1116,9 @@ class FinancialAllocator:
             raise ValueError("Межконтрактный период уже начат.")
         self.state.intercontract_break_active = True
         self.state.intercontract_months_remaining = self.settings.income_gap_months
+        # Обязательства рабочей части к этому моменту считаются исполненными.
+        # В следующем рабочем цикле резерв будет сформирован заново.
+        self.state.contract_obligations_reserve = ZERO
         return {
             "months_remaining": self.state.intercontract_months_remaining,
             "monthly_salary": self.intercontract_monthly_salary,
@@ -1078,13 +1144,69 @@ class FinancialAllocator:
         self.state.intercontract_break_active = False
         self.state.cycle_income = ZERO
 
-    def active_mode(self) -> int:
-        """
-        Определяет финансовый режим пользователя.
+    @property
+    def profile_id(self) -> str:
+        return normalize_profile_id(
+            self.settings.profile_type,
+            self.settings.employment_type,
+            self.settings.income_rhythm,
+        )
 
-        Режим 1 зависит от заполненности минимального слоя
-        Подушки, а не от денег, зарезервированных на очередной
-        платёж банку.
+    @property
+    def profile_mode_total(self) -> int:
+        return len(PROFILE_MODE_TITLES[self.profile_id])
+
+    def active_mode(self) -> int:
+        """Номер реальной ступени внутри маршрута конкретного профиля."""
+        s = self.settings
+        st = self.state
+        has_debts = any(credit.active for credit in s.credits)
+
+        if has_debts and st.pillow_minimum < s.minimum_reserve_limit:
+            return 1
+        if has_debts:
+            return 2
+
+        if self.profile_id == PROFILE_CYCLIC:
+            if st.intercontract_reserve < s.intercontract_life_limit:
+                return 3
+            if st.intercontract_reserve < s.intercontract_full_limit:
+                return 4
+            if st.pillow_force_majeure < s.force_majeure_limit:
+                return 5
+            if st.pillow_stabilizer < s.stabilizer_life_limit:
+                return 6
+            if st.pillow_stabilizer < s.stabilizer_full_limit:
+                return 7
+            return 8
+
+        if st.pillow_force_majeure < s.force_majeure_limit:
+            return 3
+        if self.profile_id == PROFILE_STABLE:
+            return 4
+        if st.pillow_stabilizer < s.stabilizer_life_limit:
+            return 4
+        if st.pillow_stabilizer < s.stabilizer_full_limit:
+            return 5
+        return 6
+
+    def mode_title(self, mode: Optional[int] = None) -> str:
+        selected = self.active_mode() if mode is None else mode
+        return PROFILE_MODE_TITLES[self.profile_id][selected]
+
+    def mode_display_name(self, mode: Optional[int] = None) -> str:
+        selected = self.active_mode() if mode is None else mode
+        if selected == self.profile_mode_total:
+            return "🟢 Максимальный режим"
+        colors = {1: "🟤", 2: "🔴", 3: "🟠", 4: "🟣", 5: "🔵", 6: "🟡", 7: "⚪️"}
+        return f"{colors.get(selected, '⚪️')} {selected}"
+
+    def allocation_mode(self) -> int:
+        """
+        Возвращает совместимый режим финансовых правил MODE_1–MODE_6.
+
+        Несколько последовательных ступеней циклического маршрута используют
+        одинаковые правила распределения, но остаются отдельными достижениями.
         """
         has_debts = any(
             credit.active
@@ -1219,17 +1341,12 @@ class FinancialAllocator:
     ) -> Optional[str]:
 
         if before == after:
-            nearest = self.nearest_next_mode(
-                before
-            )
-
-            if nearest:
-                mode, remaining = nearest
-
+            remaining = self.remaining_to_profile_transition()
+            if remaining is not None and remaining > ZERO:
                 return (
                     f"❌ Перехода нет. "
-                    f"Режим: {MODE_NAMES[before]}. "
-                    f"До {MODE_NAMES[mode]} "
+                    f"Режим: {self.mode_display_name(before)}. "
+                    f"До следующего режима "
                     f"осталось {fmt_money(remaining)} ₽."
                 )
 
@@ -1237,9 +1354,39 @@ class FinancialAllocator:
 
         return (
             f"✅ ПЕРЕХОД: "
-            f"{MODE_NAMES[before]} → "
-            f"{MODE_NAMES[after]}"
+            f"{self.mode_display_name(before)} → "
+            f"{self.mode_display_name(after)}"
         )
+
+    def remaining_to_profile_transition(self) -> Optional[Decimal]:
+        """Остаток до следующей профильной ступени."""
+        s = self.settings
+        st = self.state
+        mode = self.active_mode()
+        if mode == self.profile_mode_total:
+            return None
+        if mode == 1:
+            return max(ZERO, s.minimum_reserve_limit - st.pillow_minimum)
+        if mode == 2:
+            return sum((c.principal_balance for c in s.credits if c.active), ZERO)
+        if self.profile_id == PROFILE_CYCLIC:
+            targets = {
+                3: (s.intercontract_life_limit, st.intercontract_reserve),
+                4: (s.intercontract_full_limit, st.intercontract_reserve),
+                5: (s.force_majeure_limit, st.pillow_force_majeure),
+                6: (s.stabilizer_life_limit, st.pillow_stabilizer),
+                7: (s.stabilizer_full_limit, st.pillow_stabilizer),
+            }
+        elif self.profile_id == PROFILE_PIECEWORK:
+            targets = {
+                3: (s.force_majeure_limit, st.pillow_force_majeure),
+                4: (s.stabilizer_life_limit, st.pillow_stabilizer),
+                5: (s.stabilizer_full_limit, st.pillow_stabilizer),
+            }
+        else:
+            targets = {3: (s.force_majeure_limit, st.pillow_force_majeure)}
+        target, balance = targets[mode]
+        return max(ZERO, target - balance)
 
     # ========================================================
     # НАПРАВЛЕНИЕ БРАКЕТА A/B
@@ -1340,7 +1487,7 @@ class FinancialAllocator:
 
         while amount > ZERO:
             previous = amount
-            amount = D(stage(amount, self.active_mode()))
+            amount = D(stage(amount, self.allocation_mode()))
 
             if amount >= previous:
                 break
@@ -2156,6 +2303,9 @@ class FinancialAllocator:
         self._ensure_life_categories()
 
         mode_before = self.active_mode()
+        pillow_before = self.state.pillow_minimum + self.state.pillow_force_majeure
+        fund_salary_before = self.state.intercontract_reserve
+        stabilizer_before = self.state.pillow_stabilizer
 
         if tax_override is None:
 
@@ -2208,6 +2358,8 @@ class FinancialAllocator:
 
         allocations: Dict[str, Decimal] = {
             "Подушка": ZERO,
+            "Фонд Зарплаты": ZERO,
+            "Стабилизатор дохода": ZERO,
             "Инвестиции": ZERO,
             "Досрочное": ZERO,
             "Бытовой резерв": ZERO,
@@ -2226,6 +2378,34 @@ class FinancialAllocator:
         steps.append(
             f"К распределению: {amount}"
         )
+
+        # Известные обязательства, которые продолжатся во время рабочей
+        # части циклического профиля, резервируются раньше всех режимов.
+        if self.settings.income_rhythm == "cyclic":
+            obligation_missing = max(
+                ZERO,
+                self.settings.contract_obligations_total
+                - self.state.contract_obligations_reserve,
+            )
+            obligation_part = min(amount, obligation_missing)
+            if obligation_part > ZERO:
+                total_target = self.settings.contract_obligations_total
+                distributed = ZERO
+                obligation_items = list(self.settings.contract_obligations.items())
+                for index, (name, target) in enumerate(obligation_items):
+                    share = (
+                        obligation_part - distributed
+                        if index == len(obligation_items) - 1
+                        else money(obligation_part * target / total_target)
+                    )
+                    allocations[f"Рабочие обязательства:{name}"] = share
+                    distributed += share
+                self.state.contract_obligations_reserve += obligation_part
+                amount -= obligation_part
+                regular_used = min(regular_net, obligation_part)
+                regular_net -= regular_used
+                super_net -= obligation_part - regular_used
+                steps.append(f"Обязательства рабочей части: {obligation_part}")
 
         # --------------------------------------------
         # ЭТАП A
@@ -2303,6 +2483,14 @@ class FinancialAllocator:
         # --------------------------------------------
 
         mode_after = self.active_mode()
+
+        # Пользовательские сущности не смешиваются, даже если внутри одного
+        # поступления водопад последовательно заполнил несколько защитных слоёв.
+        allocations["Подушка"] = (
+            self.state.pillow_minimum + self.state.pillow_force_majeure - pillow_before
+        )
+        allocations["Фонд Зарплаты"] = self.state.intercontract_reserve - fund_salary_before
+        allocations["Стабилизатор дохода"] = self.state.pillow_stabilizer - stabilizer_before
 
         # --------------------------------------------
         # Периодическая аналитика
@@ -2512,9 +2700,10 @@ class FinancialAllocator:
 
         return {
             "mode": self.active_mode(),
-            "mode_name": MODE_NAMES[
-                self.active_mode()
-            ],
+            "mode_name": self.mode_display_name(),
+            "mode_title": self.mode_title(),
+            "mode_total": self.profile_mode_total,
+            "profile_type": self.profile_id,
 
             "critical_life":
                 self.settings.critical_life,
@@ -2541,8 +2730,17 @@ class FinancialAllocator:
                     self.state.pillow_minimum,
                 "ФМ":
                     self.state.pillow_force_majeure,
-                "СтабД":
-                    self.state.pillow_stabilizer,
+            },
+
+            "stabilizer": {
+                "balance": self.state.pillow_stabilizer,
+                "critical_target": self.settings.stabilizer_life_limit,
+                "full_target": self.settings.stabilizer_full_limit,
+            },
+
+            "contract_obligations_reserve": {
+                "balance": self.state.contract_obligations_reserve,
+                "target": self.settings.contract_obligations_total,
             },
 
             "intercontract_reserve": {
@@ -2588,23 +2786,17 @@ class FinancialAllocator:
 
         current = self.active_mode()
 
-        candidate = (
-            self.nearest_next_mode(current)
-        )
-
-        if not candidate:
+        remaining = self.remaining_to_profile_transition()
+        if remaining is None:
             return None
-
-        mode, remaining = candidate
+        mode = current + 1
 
         return {
             "current_mode": current,
             "next_mode": mode,
             "remaining": remaining,
-            "current_name":
-                MODE_NAMES[current],
-            "next_name":
-                MODE_NAMES[mode],
+            "current_name": self.mode_display_name(current),
+            "next_name": self.mode_display_name(mode),
         }
 
     # ========================================================
@@ -2638,10 +2830,10 @@ class FinancialAllocator:
 
         employment_mode_ok = True
 
-        if s.employment_type == "Наёмный":
+        if s.profile_type == PROFILE_STABLE:
             employment_mode_ok = (
                 self.active_mode()
-                not in {MODE_4, MODE_5}
+                <= self.profile_mode_total
             )
 
         goals_ok = (

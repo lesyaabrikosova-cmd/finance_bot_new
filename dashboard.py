@@ -17,6 +17,7 @@ from financial_engine import (
 )
 from storage import db
 from ui import main_menu_keyboard
+from mode_presentation import mode_image_path
 
 
 router = Router()
@@ -24,12 +25,6 @@ router = Router()
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 INCOME_ANALYSIS_IMAGE_PATH = ASSETS_DIR / "menu" / "income_analysis.png"
-MODE_IMAGE_PATHS = {
-    mode: ASSETS_DIR / "modes" / f"mode_{mode}.png"
-    for mode in range(1, 7)
-}
-
-
 async def send_text_with_image(
     message: Message,
     text: str,
@@ -462,15 +457,39 @@ async def send_mode(
 
     mode = allocator.active_mode()
 
-    mapping = (
-        FREELANCER_MODES
-        if settings.employment_type == "Фрилансер"
-        else EMPLOYEE_MODES
-    )
-
-    reward, description = mapping[
-        mode
-    ]
+    reward = "🏆" * mode + "➖" * (allocator.profile_mode_total - mode)
+    descriptions = {
+        "stable": {
+            1: "Сначала формируется минимальная Подушка.",
+            2: "Свободные деньги направляются на досрочное погашение долгов.",
+            3: "Аллокатор формирует форс-мажорную Подушку.",
+            4: "Защитные резервы сформированы: доступны цели и инвестиции.",
+        },
+        "piecework": {
+            1: "Сначала формируется минимальная Подушка.",
+            2: "Свободные деньги направляются на досрочное погашение долгов.",
+            3: "Аллокатор формирует форс-мажорную Подушку.",
+            4: "Формируется первый уровень Стабилизатора дохода.",
+            5: "Стабилизатор растёт до уровня Устойчивой жизни; открыты цели и инвестиции.",
+            6: "Все защитные резервы сформированы.",
+        },
+        "cyclic": {
+            1: "Сначала формируется минимальная Подушка.",
+            2: "Свободные деньги направляются на досрочное погашение долгов.",
+            3: "Фонд Зарплаты обеспечивает Критический минимум во время перерыва.",
+            4: "Фонд Зарплаты растёт до Устойчивой жизни на весь перерыв.",
+            5: "Аллокатор формирует форс-мажорную Подушку.",
+            6: "Стабилизатор защищает Критический минимум при задержке контракта.",
+            7: "Стабилизатор растёт до Устойчивой жизни; открыты цели и инвестиции.",
+            8: "Фонд Зарплаты и все защитные резервы сформированы.",
+        },
+    }
+    description = descriptions[allocator.profile_id][mode]
+    profile_label = {
+        "stable": "Стабильный",
+        "piecework": "Сдельный",
+        "cyclic": "Цикличный (контрактный)",
+    }[allocator.profile_id]
 
     debt_profile = (
         "с долгами"
@@ -501,12 +520,12 @@ async def send_mode(
     text = (
         "<b>ТЕКУЩИЙ РЕЖИМ</b>\n\n"
         f"Профиль: "
-        f"<b>{escape(settings.employment_type)}, "
+        f"<b>{profile_label}, "
         f"{debt_profile}</b>\n\n"
-        f"Уровень: <b>{MODE_NAMES[mode]}</b>\n"
+        f"Уровень: <b>{allocator.mode_display_name(mode)}</b>\n"
         f"Награда: <b>{reward}</b>\n"
         f"Название: "
-        f"<b>{escape(MODE_TITLES[mode])}</b>\n\n"
+        f"<b>{escape(allocator.mode_title(mode))}</b>\n\n"
         f"{escape(description)}"
         f"{next_text}"
     )
@@ -514,7 +533,7 @@ async def send_mode(
     await send_text_with_image(
         message,
         text,
-        MODE_IMAGE_PATHS.get(mode),
+        mode_image_path(allocator.profile_id, mode),
         reply_markup=main_menu_keyboard(telegram_id),
     )
 
@@ -601,6 +620,8 @@ async def send_balances(
         "Подушка",
         Decimal("0"),
     )
+    stabilizer_period = allocations.get("Стабилизатор дохода", Decimal("0"))
+    fund_salary_period = allocations.get("Фонд Зарплаты", Decimal("0"))
 
     investment_period = allocations.get(
         "Инвестиции",
@@ -665,6 +686,20 @@ async def send_balances(
         f"({pct(pillow_period, income)})",
         f"🛡️ Подушка итого: "
         f"<b>{rub(state.pillow_balance)}</b>",
+        *(
+            [
+                f"🏦 Фонд Зарплаты за период: <b>{rub(fund_salary_period)}</b>",
+                f"🏦 Фонд Зарплаты итого: <b>{rub(state.intercontract_reserve)}</b>",
+            ]
+            if settings.income_rhythm == "cyclic" else []
+        ),
+        *(
+            [
+                f"🛟 Стабилизатор за период: <b>{rub(stabilizer_period)}</b>",
+                f"🛟 Стабилизатор итого: <b>{rub(state.stabilizer_balance)}</b>",
+            ]
+            if settings.needs_stabilizer else []
+        ),
         "",
         f"📈 Инвестиции за период: "
         f"<b>{rub(investment_period)}</b> "
@@ -855,7 +890,7 @@ async def send_balances(
 
         lines.extend([
             "",
-            "<b>СЛОИ ПОДУШКИ — "
+            "<b>ЗАЩИТНЫЕ РЕЗЕРВЫ — "
             "РЕЖИМ РАЗРАБОТЧИКА</b>",
             f"МП: "
             f"{rub(state.pillow_minimum)} / "
@@ -863,7 +898,7 @@ async def send_balances(
             f"ФМ: "
             f"{rub(state.pillow_force_majeure)} / "
             f"{rub(settings.force_majeure_limit)}",
-            f"СтабД: "
+            f"Стабилизатор дохода: "
             f"{rub(state.pillow_stabilizer)} / "
             f"{rub(settings.stabilizer_full_limit)}",
         ])

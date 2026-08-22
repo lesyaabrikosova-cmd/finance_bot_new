@@ -1,8 +1,4 @@
-"""Чистая модель финансовых профилей и циклического дохода.
-
-Модуль пока не подключён к Telegram и financial_engine: он фиксирует формулы,
-которые должны быть подтверждены сценарными тестами до миграции режимов.
-"""
+"""Маршруты финансовых профилей и формулы циклического дохода."""
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -10,15 +6,15 @@ from decimal import Decimal
 
 ZERO = Decimal("0")
 
-STABLE_EMPLOYEE = "stable_employee"
-STABLE_FREELANCER = "stable_freelancer"
+STABLE_EMPLOYEE = "stable"
+STABLE_FREELANCER = "piecework"
 CYCLIC = "cyclic"
 
 
 def financial_profile(employment_type: str, income_rhythm: str) -> str:
     if income_rhythm == "cyclic":
         return CYCLIC
-    if employment_type == "Фрилансер":
+    if employment_type in {"Фрилансер", "piecework"}:
         return STABLE_FREELANCER
     return STABLE_EMPLOYEE
 

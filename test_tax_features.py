@@ -164,6 +164,7 @@ class TaxFeatureTests(unittest.TestCase):
         allocator.state.intercontract_reserve = Decimal("3456")
         allocator.state.intercontract_months_remaining = Decimal("4")
         allocator.state.intercontract_break_active = True
+        allocator.state.contract_obligations_reserve = Decimal("4321")
         allocator.state.cycle_income = Decimal("7890")
         db.save_allocator(telegram_id, allocator)
         loaded = db.load_allocator(telegram_id)
@@ -176,7 +177,9 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(loaded.state.intercontract_reserve, Decimal("3456"))
         self.assertEqual(loaded.state.intercontract_months_remaining, Decimal("4"))
         self.assertTrue(loaded.state.intercontract_break_active)
+        self.assertEqual(loaded.state.contract_obligations_reserve, Decimal("4321"))
         self.assertEqual(loaded.state.cycle_income, Decimal("7890"))
+        self.assertEqual(loaded.settings.profile_type, "cyclic")
 
     def test_unknown_income_type_is_rejected_when_profile_has_types(self):
         settings = UserSettings(

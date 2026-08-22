@@ -28,13 +28,14 @@ from financial_engine import (
 
 from storage import db
 from ui import main_menu_keyboard
+from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 
 
 router = Router()
 
 
 BASE_DIR = Path(__file__).resolve().parent
-INTRO_IMAGES_DIR = BASE_DIR / "images"
+INTRO_IMAGES_DIR = BASE_DIR / "assets" / "onboarding"
 
 INTRO_IMAGE_1 = INTRO_IMAGES_DIR / "intro_1.png"
 INTRO_IMAGE_2 = INTRO_IMAGES_DIR / "intro_2.png"
@@ -145,6 +146,7 @@ class SetupStates(StatesGroup):
 
     # Текущее состояние
     current_pillow = State()
+    current_stabilizer = State()
     current_intercontract = State()
     current_life_balance = State()
     current_minimum_payments = State()
@@ -644,7 +646,10 @@ KM_CATEGORIES = {
     ),
     "other": (
         "Другое",
-        "Любой обязательный расход, которого нет в списке. Если при резком падении дохода от него можно отказаться на несколько месяцев — это, скорее всего, не Критический минимум.",
+        "Здесь можно добавить страховые взносы и другие индивидуальные обязательные ежемесячные "
+        "расходы, которые не подходят ни к одной категории выше.\n\n"
+        "Если при резком падении дохода от расхода можно отказаться на несколько месяцев — "
+        "это, скорее всего, не Критический минимум.",
     ),
 }
 
@@ -1111,6 +1116,7 @@ async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
     if rhythm != "cyclic":
         await state.update_data(
             income_rhythm=rhythm,
+            profile_type="stable" if rhythm == "monthly" else "piecework",
             employment_type="Наёмный" if rhythm == "monthly" else "Фрилансер",
             income_gap_months="1",
             income_work_months="1",
@@ -1119,7 +1125,11 @@ async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
         )
         await ask_income(callback.message, state)
         return
-    await state.update_data(income_rhythm="cyclic", employment_type="Фрилансер")
+    await state.update_data(
+        income_rhythm="cyclic",
+        profile_type="cyclic",
+        employment_type="Фрилансер",
+    )
     await state.set_state(SetupStates.income_work_months)
     await callback.message.answer(
         f"{setup_progress(await state.get_data(), 3)}\n\n"
@@ -1290,7 +1300,7 @@ async def profile_income_name(message: Message, state: FSMContext):
     await message.answer(
         f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
         reply_markup=keyboard([
-            [("Да", "profileincome:tax:yes"), ("Нет", "profileincome:tax:no")],
+            [("Есть налог", "profileincome:tax:yes"), ("Без налога", "profileincome:tax:no")],
             [("Отмена", "profileincome:back")],
         ]),
     )
@@ -1423,7 +1433,7 @@ async def profile_income_edit_tax_start(callback: CallbackQuery, state: FSMConte
     await callback.message.answer(
         f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
         reply_markup=keyboard([
-            [("Да", "profileincome:tax:yes"), ("Нет", "profileincome:tax:no")],
+            [("Есть налог", "profileincome:tax:yes"), ("Без налога", "profileincome:tax:no")],
             [("Отмена", "profileincome:back")],
         ]),
     )
@@ -1490,21 +1500,31 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
             "можно отдельно добавить Квартиру, ЖКХ, Ипотеку, Студию и др."
         )
 
+    debt_note = ""
+    if data.get("has_debts"):
+        debt_note = (
+            "\n\nДолги и платежи по кредитам здесь не указывайте — "
+            "Аллокатор учтёт их отдельно."
+        )
+
     rows = [
-        [("Жильё, Аренда, ЖКХ", "kmcat:housing"), ("Здоровье", "kmcat:health")],
+        [("Недвижимость", "kmcat:housing"), ("Здоровье", "kmcat:health")],
         [("Связь и подписки", "kmcat:communication"), ("Питомцы", "kmcat:pets")],
         [("Транспорт", "kmcat:transport"), ("Дети", "kmcat:children")],
         [("Питание", "kmcat:food"), ("Образование", "kmcat:education")],
         [("Вредные привычки", "kmcat:habits"), ("Комиссии", "kmcat:fees")],
-        [("Другое", "kmcat:other"), ("✔️Готово", "km:finish")],
+        [("Другое", "kmcat:other")],
     ]
     if items:
-        rows.insert(-1, [("Редактировать", "kmedit:list")])
+        rows.append([("Редактировать", "kmedit:list"), ("✔️ Готово", "km:finish")])
+    else:
+        rows.append([("✔️ Готово", "km:finish")])
 
     text = (
         f"{setup_progress(data, 5)}\n\n"
         "<b>ПОСЧИТАЕМ ВАШ КРИТИЧЕСКИЙ МИНИМУМ</b>"
         + intro_text
+        + debt_note
         + summary
     )
     reply_markup = keyboard(rows)
@@ -3879,6 +3899,34 @@ async def save_current_pillow(
         current_pillow=str(value)
     )
 
+    data = await state.get_data()
+    if data.get("profile_type") in {"piecework", "cyclic"}:
+        await state.set_state(SetupStates.current_stabilizer)
+        step = 9 if data.get("has_debts") else 8
+        await message.answer(
+            f"{setup_progress(data, step)}\n\n"
+            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ ДОХОДА?</b>\n\n"
+            "Подушка и Стабилизатор дохода — разные резервы. Укажите только деньги, "
+            "отложенные на случай временного снижения или задержки дохода.\n\n"
+            "Если Стабилизатора пока нет — отправьте <code>0</code>."
+        )
+        return
+
+    await ask_current_life_balance(message, state)
+
+
+@router.message(SetupStates.current_stabilizer)
+async def save_current_stabilizer(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
+        return
+    await state.update_data(current_stabilizer=str(value))
+    await ask_current_life_balance(message, state)
+
+
+async def ask_current_life_balance(message: Message, state: FSMContext):
+
     await state.set_state(
         SetupStates.current_life_balance
     )
@@ -4275,6 +4323,8 @@ def build_settings_from_data(
             data["average_income"]
         ),
 
+        profile_type=data.get("profile_type", ""),
+
         income_rhythm=data.get("income_rhythm", "monthly"),
         income_gap_months=Decimal(str(data.get("income_gap_months", "1"))),
         income_work_months=Decimal(str(data.get("income_work_months", "1"))),
@@ -4390,27 +4440,12 @@ def build_state_from_data(
         settings.intercontract_full_limit,
     )
 
-    force_limit = (
-        settings.force_majeure_limit
-    )
-
-    pillow_force = min(
-        remaining,
-        force_limit,
-    )
-
-    remaining -= pillow_force
+    # Введённая пользователем Подушка целиком остаётся Подушкой, даже если
+    # она уже превышает рекомендуемый ориентир.
+    pillow_force = remaining
 
     if settings.needs_stabilizer:
-
-        stabilizer_limit = (
-            settings.stabilizer_full_limit
-        )
-
-        pillow_stabilizer = min(
-            remaining,
-            stabilizer_limit,
-        )
+        pillow_stabilizer = Decimal(data.get("current_stabilizer", "0"))
 
     return AllocatorState(
         life_balance=Decimal(
@@ -4465,29 +4500,25 @@ async def show_confirmation(
         return
 
     mode = allocator.active_mode()
-    mode_name = {
-        1: "Небо помогает тому, кто помогает себе.",
-        2: "Ланистеры всегда платят свои долги.",
-        3: "Подготовка к Апокалипсису.",
-        4: "Заказов нет. Паники тоже.",
-        5: "Защита есть. Пора расти.",
-        6: "Философский камень найден.",
-    }[mode]
-    mode_progress = "🏆" * mode + "➖" * (6 - mode)
+    mode_name = allocator.mode_title(mode)
+    mode_progress = "🏆" * mode + "➖" * (allocator.profile_mode_total - mode)
 
-    tax_types = ", ".join(
-        f"{name} — {rate}%" if rate > 0 else f"{name} — без налога"
+    tax_types = "\n".join(
+        f"• {escape(name)} — <b>{rate}%</b>" if rate > 0 else f"• {escape(name)} — без налога"
         for name, rate in settings.income_type_tax_rates.items()
-    ) or "нет"
+    ) or "• Нет добавленных типов дохода"
 
     accounts: list[tuple[str, str]] = []
     if any(rate > 0 for rate in settings.income_type_tax_rates.values()) or "Налоги" in settings.life_categories:
         accounts.append(("🏛️", "Налоги"))
 
+    accounts.append(("🛡️", "Подушка"))
+
     if settings.income_rhythm == "cyclic":
         accounts.append(("🏦", "Фонд Зарплаты"))
 
-    accounts.append(("🛡️", "Подушка"))
+    if settings.needs_stabilizer:
+        accounts.append(("🛟", "Стабилизатор дохода"))
 
     for name in settings.life_categories.keys():
         if name == "Налоги":
@@ -4502,11 +4533,7 @@ async def show_confirmation(
         for index, (icon, name) in enumerate(accounts, start=1)
     )
 
-    income_label = (
-        "Стабильный доход"
-        if settings.employment_type == "Наёмный"
-        else "Средний доход"
-    )
+    income_label = "Стабильный доход" if settings.profile_type == "stable" else "Средний доход"
     deficit = settings.total_critical_life - settings.average_income
     deficit_warning = ""
     if deficit > 0:
@@ -4532,7 +4559,7 @@ async def show_confirmation(
         )
 
     await state.set_state(SetupStates.confirmation)
-    await message.answer(
+    confirmation_text = (
         "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
         f"Профиль — <b>{rhythm_labels.get(settings.income_rhythm)}</b>\n"
         f"{income_label} — <b>{rub(settings.average_income)}</b>\n"
@@ -4541,20 +4568,53 @@ async def show_confirmation(
         f"Бытовой резерв — <b>{rub(settings.household_reserve)}</b>\n"
         f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>\n"
         f"Баланс жизни сейчас — <b>{rub(state_object.life_balance)}</b>\n"
-        f"Типы доходов — <b>{escape(tax_types)}</b>"
+        f"\n<b>ТИПЫ ДОХОДОВ</b>\n{tax_types}"
         f"{deficit_warning}\n\n"
-        f"<b>ОТКРОЙТЕ {len(accounts)} НАКОПИТЕЛЬНЫХ СЧЕТОВ В СВОЁМ БАНКЕ:</b>\n\n"
+        "<b>ПОДГОТОВЬТЕ СЧЕТА И ФИНАНСОВЫЕ КОНВЕРТЫ:</b>\n\n"
         f"{accounts_text}\n\n"
         "<b>СТАРТОВЫЙ РЕЖИМ:</b>\n\n"
         f"{mode_progress}\n\n"
         f"{escape(mode_name)}\n\n"
         "<b>P.S.:</b> Цели и инвестиции появятся тогда, когда ваш финансовый режим "
-        "действительно будет готов направлять туда деньги.",
-        reply_markup=keyboard([
-            [("Сохранить профиль", "confirm:save")],
-            [("Начать заново", "confirm:restart")],
-        ]),
+        "действительно будет готов направлять туда деньги."
     )
+    confirmation_markup = keyboard([
+        [("Сохранить профиль", "confirm:save")],
+        [("Начать заново", "confirm:restart")],
+    ])
+    image_path = mode_image_path(allocator.profile_id, mode)
+    if image_path is not None and len(confirmation_text) <= 1024:
+        try:
+            await message.answer_photo(
+                photo=FSInputFile(image_path),
+                caption=confirmation_text,
+                reply_markup=confirmation_markup,
+                message_effect_id=(FIRE_EFFECT_ID if message.chat.type == "private" else None),
+            )
+        except TelegramBadRequest:
+            await message.answer_photo(
+                photo=FSInputFile(image_path),
+                caption=confirmation_text,
+                reply_markup=confirmation_markup,
+            )
+    elif image_path is not None:
+        # У подписи к фотографии жёсткий лимит Telegram — 1024 символа.
+        # Для необычно большого профиля сохраняем и картинку, и полный текст.
+        short_caption = (
+            "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
+            f"{escape(mode_name)}"
+        )
+        try:
+            await message.answer_photo(
+                photo=FSInputFile(image_path),
+                caption=short_caption,
+                message_effect_id=(FIRE_EFFECT_ID if message.chat.type == "private" else None),
+            )
+        except TelegramBadRequest:
+            await message.answer_photo(photo=FSInputFile(image_path), caption=short_caption)
+        await message.answer(confirmation_text, reply_markup=confirmation_markup)
+    else:
+        await message.answer(confirmation_text, reply_markup=confirmation_markup)
 
 # ============================================================
 # СОХРАНЕНИЕ ПРОФИЛЯ

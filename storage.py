@@ -29,6 +29,7 @@ from financial_engine import (
     FinancialAllocator,
     Goal,
     UserSettings,
+    normalize_profile_id,
 )
 
 
@@ -147,12 +148,17 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 4,
+        "version": 5,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
         },
         "rhythm": settings.income_rhythm,
+        "profile_type": normalize_profile_id(
+            settings.profile_type,
+            settings.employment_type,
+            settings.income_rhythm,
+        ),
         "gap_months": decimal_to_string(settings.income_gap_months),
         "work_months": decimal_to_string(settings.income_work_months),
         "reliable_gap_income": decimal_to_string(settings.reliable_gap_income),
@@ -166,7 +172,7 @@ def serialize_income_types(settings: UserSettings) -> str:
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -178,10 +184,11 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
+            "profile_type": str(raw.get("profile_type", "")),
             "income_gap_months": max(Decimal("1"), string_to_decimal(raw.get("gap_months", "1"))),
             "income_work_months": max(Decimal("1"), string_to_decimal(raw.get("work_months", "1"))),
             "reliable_gap_income": max(Decimal("0"), string_to_decimal(raw.get("reliable_gap_income", "0"))),
@@ -385,6 +392,7 @@ class Database:
                 intercontract_reserve TEXT NOT NULL DEFAULT '0',
                 intercontract_months_remaining TEXT NOT NULL DEFAULT '0',
                 intercontract_break_active INTEGER NOT NULL DEFAULT 0,
+                contract_obligations_reserve TEXT NOT NULL DEFAULT '0',
                 pillow_force_majeure TEXT NOT NULL,
                 pillow_stabilizer TEXT NOT NULL,
 
@@ -526,6 +534,10 @@ class Database:
         if "intercontract_break_active" not in state_columns:
             cursor.execute(
                 "ALTER TABLE state ADD COLUMN intercontract_break_active INTEGER NOT NULL DEFAULT 0"
+            )
+        if "contract_obligations_reserve" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN contract_obligations_reserve TEXT NOT NULL DEFAULT '0'"
             )
 
         # ----------------------------------------------------
@@ -1221,6 +1233,7 @@ class Database:
                 intercontract_reserve,
                 intercontract_months_remaining,
                 intercontract_break_active,
+                contract_obligations_reserve,
                 pillow_force_majeure,
                 pillow_stabilizer,
 
@@ -1240,7 +1253,7 @@ class Database:
             VALUES (
                 ?,
                 ?, ?,
-                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
@@ -1267,6 +1280,9 @@ class Database:
 
                 intercontract_break_active =
                     excluded.intercontract_break_active,
+
+                contract_obligations_reserve =
+                    excluded.contract_obligations_reserve,
 
                 pillow_force_majeure =
                     excluded.pillow_force_majeure,
@@ -1322,6 +1338,10 @@ class Database:
                 ),
 
                 int(state.intercontract_break_active),
+
+                decimal_to_string(
+                    state.contract_obligations_reserve
+                ),
 
                 decimal_to_string(
                     state.pillow_force_majeure
@@ -1417,6 +1437,9 @@ class Database:
 
             intercontract_break_active=
                 bool(row["intercontract_break_active"]),
+
+            contract_obligations_reserve=
+                string_to_decimal(row["contract_obligations_reserve"]),
 
             pillow_force_majeure=
                 string_to_decimal(

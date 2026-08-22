@@ -23,6 +23,7 @@ class EditSettingsStates(StatesGroup):
     income_work_months = State()
     force_majeure_months = State()
     stabilizer_months = State()
+    stabilizer_balance = State()
     intercontract_balance = State()
     planned_amount = State()
     planned_due_date = State()
@@ -59,7 +60,6 @@ def distribute_existing_pillow(allocator, total: Decimal) -> None:
 
     st.pillow_minimum = Decimal("0")
     st.pillow_force_majeure = Decimal("0")
-    st.pillow_stabilizer = Decimal("0")
 
     remaining = total
 
@@ -68,16 +68,7 @@ def distribute_existing_pillow(allocator, total: Decimal) -> None:
         st.pillow_minimum = part
         remaining -= part
 
-    part = min(remaining, s.force_majeure_limit)
-    st.pillow_force_majeure = part
-    remaining -= part
-
-    if remaining > 0 and s.needs_stabilizer:
-        normal = min(remaining, s.stabilizer_full_limit)
-        st.pillow_stabilizer = normal
-        remaining -= normal
-
-    st.pillow_stabilizer += remaining
+    st.pillow_force_majeure = remaining
 
 async def show_settings_menu(message: Message, telegram_id: int):
     allocator = db.load_allocator(telegram_id)
@@ -114,9 +105,11 @@ async def show_settings_menu(message: Message, telegram_id: int):
         + (f"Доход текущего цикла: <b>{rub(st.cycle_income)}</b> / {rub(s.cycle_regular_income_limit)}\n" if s.income_rhythm == "cyclic" else "")
         + (f"Стабилизатор: <b>{s.stabilizer_target_months} мес.</b>\n" if s.needs_stabilizer else "")
         + (f"Обязательства на время контракта: <b>{rub(s.contract_obligations_total)}</b>\n" if s.income_rhythm == "cyclic" else "")
+        + (f"Уже зарезервировано на рабочую часть: <b>{rub(st.contract_obligations_reserve)}</b>\n" if s.income_rhythm == "cyclic" else "")
         +
         f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
         f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
+        + (f"🛟 Стабилизатор дохода: <b>{rub(st.stabilizer_balance)}</b> / {rub(s.stabilizer_full_limit)}\n" if s.needs_stabilizer else "")
         + (f"Фонд Зарплаты: <b>{rub(st.intercontract_reserve)}</b> / {rub(s.intercontract_full_limit)}\n" if s.income_rhythm == "cyclic" else "")
         +
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
@@ -126,6 +119,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         reply_markup=keyboard([
             [("🛡️ Изменить Подушку", "settings:pillow")],
             [("ФМ-подушка", "settings:force_months"), ("Стабилизатор", "settings:stabilizer_months")],
+            [("Баланс Стабилизатора", "settings:stabilizer_balance")],
             [("Фонд Зарплаты", "settings:intercontract_balance")],
             [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
             [("💰 Средний доход", "settings:income")],
@@ -192,6 +186,34 @@ async def save_stabilizer_months_setting(message: Message, state: FSMContext):
         return
     allocator = db.load_allocator(message.from_user.id)
     allocator.settings.stabilizer_target_months = value
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_settings_menu(message, message.from_user.id)
+
+
+@router.callback_query(F.data == "settings:stabilizer_balance")
+async def edit_stabilizer_balance(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if not allocator.settings.needs_stabilizer:
+        await callback.message.answer("Для Стабильного профиля Стабилизатор не используется.")
+        return
+    await state.set_state(EditSettingsStates.stabilizer_balance)
+    await callback.message.answer(
+        "<b>ТЕКУЩИЙ БАЛАНС СТАБИЛИЗАТОРА ДОХОДА</b>\n\n"
+        f"Сейчас: <b>{rub(allocator.state.stabilizer_balance)}</b>\n\n"
+        "Введите фактическую сумму в Стабилизаторе дохода."
+    )
+
+
+@router.message(EditSettingsStates.stabilizer_balance)
+async def save_stabilizer_balance(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    allocator.state.pillow_stabilizer = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
     await show_settings_menu(message, message.from_user.id)
@@ -411,6 +433,7 @@ async def save_income_rhythm_setting(callback: CallbackQuery, state: FSMContext)
         )
         return
     allocator.settings.income_rhythm = rhythm
+    allocator.settings.profile_type = "stable" if rhythm == "monthly" else "piecework"
     allocator.settings.employment_type = "Наёмный" if rhythm == "monthly" else "Фрилансер"
     allocator.settings.income_gap_months = Decimal("1")
     allocator.settings.income_work_months = Decimal("1")
@@ -441,6 +464,7 @@ async def save_income_work_setting(message: Message, state: FSMContext):
     data = await state.get_data()
     allocator = db.load_allocator(message.from_user.id)
     allocator.settings.income_rhythm = "cyclic"
+    allocator.settings.profile_type = "cyclic"
     allocator.settings.employment_type = "Фрилансер"
     allocator.settings.income_gap_months = Decimal(data["settings_gap_months"])
     allocator.settings.income_work_months = Decimal(data["settings_work_months"])
@@ -595,6 +619,8 @@ async def confirm_full_reset(
     st.pillow_minimum = Decimal("0")
     st.pillow_force_majeure = Decimal("0")
     st.pillow_stabilizer = Decimal("0")
+    st.intercontract_reserve = Decimal("0")
+    st.contract_obligations_reserve = Decimal("0")
 
     # Накопительные финансовые показатели
     st.investments = Decimal("0")
@@ -792,7 +818,7 @@ async def income_type_add_name(message: Message, state: FSMContext):
     await message.answer(
         f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
         reply_markup=keyboard([
-            [("Да", "incomesettings:tax:yes"), ("Нет", "incomesettings:tax:no")],
+            [("Есть налог", "incomesettings:tax:yes"), ("Без налога", "incomesettings:tax:no")],
             [("Отмена", "incomesettings:cancel")],
         ]),
     )

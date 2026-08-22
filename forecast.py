@@ -192,11 +192,17 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
             f"/ {rub(simulated.settings.cycle_regular_income_limit)}"
         )
         lines.append(f"Фонд Зарплаты после прогноза — <b>{rub(simulated.state.intercontract_reserve)}</b> / {rub(simulated.settings.intercontract_full_limit)}")
+        lines.append(
+            f"Обязательства рабочей части после прогноза — "
+            f"<b>{rub(simulated.state.contract_obligations_reserve)}</b> / "
+            f"{rub(simulated.settings.contract_obligations_total)}"
+        )
     lines.extend([
         f"ФМ-подушка после прогноза — <b>{rub(simulated.state.pillow_force_majeure)}</b> / {rub(simulated.settings.force_majeure_limit)}",
         f"Стабилизатор после прогноза — <b>{rub(simulated.state.pillow_stabilizer)}</b> / {rub(simulated.settings.stabilizer_full_limit)}" if simulated.settings.needs_stabilizer else "",
         "",
-        f"Предполагаемый режим — <b>{MODE_NAMES[simulated.active_mode()]}</b>.",
+        f"Предполагаемый режим — <b>{simulated.mode_display_name()}</b>. "
+        f"{simulated.mode_title()}",
     ])
     await state.clear()
     await message.answer(
