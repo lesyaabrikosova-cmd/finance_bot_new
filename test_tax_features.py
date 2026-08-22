@@ -11,13 +11,16 @@ os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
+    communication_item_name,
     default_km_storage,
     housing_item_name,
     km_item_display_name,
     km_item_totals_by_name,
     life_categories_from_storage,
     matching_housing_total,
+    matching_communication_total,
     months_until_due_date,
+    normalize_pass_months,
     parse_tax_due_date,
     planned_taxes_from_storage,
 )
@@ -33,6 +36,68 @@ from storage import db, deserialize_income_types, serialize_json  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_pass_deadline_uses_complete_months_conservatively(self):
+        self.assertEqual(normalize_pass_months(Decimal("1.5")), Decimal("1"))
+        self.assertEqual(normalize_pass_months(Decimal("9")), Decimal("9"))
+        self.assertEqual(normalize_pass_months(Decimal("0.5")), Decimal("1"))
+
+    def test_car_subcategory_uses_automobile_envelope(self):
+        result = default_km_storage(
+            {
+                "category": "transport",
+                "category_label": "Транспорт",
+                "subcategory": "car_fuel",
+                "name": "Бензин",
+                "amount": "5000",
+                "months": "1",
+                "monthly": "5000",
+            }
+        )
+        self.assertEqual(result["storage"], "separate")
+        self.assertEqual(result["envelope_name"], "Автомобиль")
+
+    def test_communication_item_names_do_not_require_phone_number(self):
+        self.assertEqual(
+            communication_item_name("mobile", "Рабочий"),
+            "Мобильная связь · Рабочий",
+        )
+        self.assertEqual(
+            communication_item_name("subscription", "Облако"),
+            "Подписки · Облако",
+        )
+        self.assertEqual(
+            communication_item_name("tv", "Дом"),
+            "ТВ · Дом",
+        )
+
+    def test_matching_communication_total_sums_same_label(self):
+        items = [
+            {
+                "category": "communication",
+                "subcategory": "mobile",
+                "name": "Мобильная связь · Рабочий",
+                "monthly": "500",
+            },
+            {
+                "category": "communication",
+                "subcategory": "mobile",
+                "name": " мобильная связь · рабочий ",
+                "monthly": "250",
+            },
+            {
+                "category": "communication",
+                "subcategory": "internet",
+                "name": "Домашний интернет · Рабочий",
+                "monthly": "700",
+            },
+        ]
+        self.assertEqual(
+            matching_communication_total(
+                items, "mobile", "Мобильная связь · Рабочий"
+            ),
+            Decimal("750.00"),
+        )
+
     def test_housing_item_name_keeps_tax_object_separate(self):
         self.assertEqual(
             housing_item_name("utilities", "ЖКХ", "Квартира"),

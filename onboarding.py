@@ -85,6 +85,7 @@ class SetupStates(StatesGroup):
     km_item_name = State()
     km_housing_object_name = State()
     km_housing_expense_name = State()
+    km_communication_name = State()
     km_item_amount = State()
     km_item_period = State()
     km_tax_due_date = State()
@@ -573,24 +574,7 @@ KM_CATEGORIES = {
     ),
     "transport": (
         "Транспорт",
-        "<b>Общественный транспорт</b>\n"
-        "• Метро\n• Автобус\n• Трамвай\n• Электричка\n\n"
-        "Если вы часто пользуетесь общественным транспортом, проверьте, есть ли подходящий "
-        "безлимитный или льготный проездной. Во многих случаях он помогает заметно сократить расходы.\n\n"
-        "<b>Безлимитный проездной</b>\n"
-        "Укажите стоимость и через сколько месяцев потребуется купить новый. Бот рассчитает "
-        "ежемесячное пополнение отдельного конверта «Проездной».\n\n"
-        "<b>Такси — необходимое</b>\n"
-        "Укажите обязательные поездки на такси, которые повторяются каждый месяц. Например, если "
-        "каждый вторник вы возите бабушку в поликлинику, ежемесячно отвозите питомца к ветеринару "
-        "или несколько раз в неделю возвращаетесь с работы поздно ночью, когда другого транспорта нет.\n\n"
-        "Редкие поездки — например, до вокзала или аэропорта — относятся к Бытовому резерву. "
-        "Туда же относятся поездки из-за того, что просто не хочется ехать на общественном транспорте.\n\n"
-        "<b>Автомобиль</b>\n"
-        "• Бензин\n• ОСАГО или КАСКО\n• ТО\n• Расходники\n• Автосервис\n"
-        "• Шиномонтаж\n• Платные дороги\n• Мойка\n• Резина\n• Штрафы ГИБДД\n\n"
-        "<b>Транспортный налог</b>\n"
-        "Он входит в Критический минимум, но хранится в общем конверте «Налоги».",
+        "Выберите обязательный транспортный расход.",
     ),
     "education": (
         "Образование",
@@ -707,6 +691,11 @@ def round_up_thousand(value: Decimal) -> Decimal:
     )
 
 
+def normalize_pass_months(value: Decimal) -> Decimal:
+    """Берёт число полных накопительных месяцев до покупки проездного."""
+    return Decimal(max(1, int(Decimal(value))))
+
+
 def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in items:
@@ -809,7 +798,7 @@ def default_km_storage(item: dict) -> dict:
         elif subtype == "pass":
             storage = "separate"
             envelope_name = "Проездной"
-        elif subtype == "car":
+        elif subtype == "car" or str(subtype or "").startswith("car_"):
             storage = "separate"
             envelope_name = "Автомобиль"
         elif subtype in {"public", "taxi"}:
@@ -1605,12 +1594,10 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(
             f"{setup_progress(data, 5)}\n\n<b>ТРАНСПОРТ</b>\n\n{hint}",
             reply_markup=keyboard([
-                [("Общественный транспорт", "kmtransport:public")],
-                [("Безлимитный проездной", "kmtransport:pass")],
-                [("Такси — необходимое", "kmtransport:taxi")],
-                [("Автомобиль", "kmtransport:car")],
-                [("Транспортный налог", "kmtransport:tax")],
-                [("Назад", "km:cancel")],
+                [("Общественный транспорт", "kmtransport:public"), ("Проездной", "kmtransport:pass")],
+                [("Необходимое такси", "kmtransport:taxi"), ("Автомобиль", "kmtransport:car")],
+                [("Транспортный налог", "kmtransport:tax"), ("+ Свой расход", "kmtransport:other")],
+                [("← Назад", "km:cancel")],
             ]),
         )
         return
@@ -1618,11 +1605,13 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         await state.set_state(SetupStates.km_menu)
         await callback.message.answer(
             f"{setup_progress(await state.get_data(), 5)}\n\n"
-            "<b>СВЯЗЬ И ПОДПИСКИ</b>",
+            "<b>СВЯЗЬ И ПОДПИСКИ</b>\n\n"
+            "Выберите обязательный расход.",
             reply_markup=keyboard([
-                [("Мобильная связь", "kmcommunication:mobile"), ("Подписка", "kmcommunication:subscription")],
-                [("Домашний интернет", "kmcommunication:internet"), ("VPN", "kmcommunication:vpn")],
-                [("← Назад", "km:cancel"), ("Другое", "kmcommunication:other")],
+                [("Мобильная связь", "kmcommunication:mobile"), ("Домашний интернет", "kmcommunication:internet")],
+                [("VPN", "kmcommunication:vpn"), ("Подписки", "kmcommunication:subscription")],
+                [("ТВ", "kmcommunication:tv"), ("+ Свой расход", "kmcommunication:other")],
+                [("← Назад", "km:cancel")],
             ]),
         )
         return
@@ -1961,9 +1950,33 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
         "public": "Общественный транспорт",
         "pass": "Безлимитный проездной",
         "taxi": "Такси — необходимое",
-        "car": "Автомобиль",
         "tax": "Транспортный налог",
+        "other": "Свой расход",
     }
+    if subtype == "back":
+        await callback.message.answer(
+            "<b>ТРАНСПОРТ</b>\n\nВыберите обязательный транспортный расход.",
+            reply_markup=keyboard([
+                [("Общественный транспорт", "kmtransport:public"), ("Проездной", "kmtransport:pass")],
+                [("Необходимое такси", "kmtransport:taxi"), ("Автомобиль", "kmtransport:car")],
+                [("Транспортный налог", "kmtransport:tax"), ("+ Свой расход", "kmtransport:other")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
+    if subtype == "car":
+        await callback.message.answer(
+            "<b>АВТОМОБИЛЬ</b>\n\nВыберите обязательный расход.",
+            reply_markup=keyboard([
+                [("Бензин", "kmtransportcar:fuel"), ("Страхование", "kmtransportcar:insurance")],
+                [("ТО", "kmtransportcar:maintenance"), ("Расходники", "kmtransportcar:supplies")],
+                [("Автосервис", "kmtransportcar:service"), ("Шиномонтаж", "kmtransportcar:tireservice")],
+                [("Платные дороги", "kmtransportcar:tolls"), ("Мойка", "kmtransportcar:wash")],
+                [("Резина", "kmtransportcar:tires"), ("Штрафы ГИБДД", "kmtransportcar:fines")],
+                [("← Назад", "kmtransport:back"), ("+ Свой расход", "kmtransportcar:other")],
+            ]),
+        )
+        return
     if subtype not in labels:
         return
     await state.update_data(
@@ -1971,9 +1984,9 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
         pending_km_category_label="Транспорт",
         pending_km_subcategory=subtype,
     )
-    await state.set_state(SetupStates.km_item_name)
     data = await state.get_data()
     if subtype == "tax":
+        await state.set_state(SetupStates.km_item_name)
         await callback.message.answer(
             f"{setup_progress(data, 5)}\n\n"
             "<b>ТРАНСПОРТНЫЙ НАЛОГ</b>\n\n"
@@ -1989,13 +2002,122 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
             reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
         )
         return
+    if subtype == "other":
+        await state.set_state(SetupStates.km_item_name)
+        await callback.message.answer(
+            "<b>СВОЙ ТРАНСПОРТНЫЙ РАСХОД</b>\n\n"
+            "Добавьте обязательный расход, которого нет среди готовых вариантов.\n\n"
+            "——————\n<b>→ Введите понятное название.</b>",
+            reply_markup=keyboard([[('← Назад', 'kmtransportinput:menu')]]),
+        )
+        return
+    texts = {
+        "public": (
+            "• Метро\n• Автобус\n• Трамвай\n• Электричка\n• Другой регулярный общественный транспорт\n\n"
+            "Если вы часто пользуетесь общественным транспортом, проверьте, есть ли подходящий "
+            "безлимитный или льготный проездной. Во многих случаях он помогает заметно сократить расходы."
+        ),
+        "pass": (
+            "Укажите полную стоимость проездного. Затем Аллокатор спросит, через сколько полных "
+            "месяцев потребуется купить новый. Деньги будут накапливаться в отдельном конверте «Проездной»."
+        ),
+        "taxi": (
+            "Укажите обязательные поездки, которые повторяются каждый месяц. Например, если вы регулярно "
+            "возите родственника в поликлинику, питомца к ветеринару или возвращаетесь с работы ночью, "
+            "когда другого транспорта нет.\n\nРедкие поездки до аэропорта или вокзала относятся к "
+            "Бытовому резерву. Поездки из-за того, что просто не хочется ехать на общественном транспорте, — тоже."
+        ),
+    }
+    await state.update_data(pending_km_item_name=labels[subtype])
+    await state.set_state(SetupStates.km_item_amount)
     await callback.message.answer(
-        f"{setup_progress(data, 5)}\n\n"
-        f"<b>{escape(labels[subtype].upper())}</b>\n\n"
-        "——————\n"
-        "<b>→ Введите название расхода.</b>\n"
-        f"<b>Например:</b> {escape(labels[subtype])}",
+        f"{setup_progress(data, 5)}\n\n<b>{escape(labels[subtype].upper())}</b>\n\n"
+        f"{texts[subtype]}\n\n——————\n<b>→ Введите сумму.</b>",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+    )
+
+
+TRANSPORT_CAR_LABELS = {
+    "fuel": "Бензин",
+    "insurance": "Страхование автомобиля",
+    "maintenance": "ТО",
+    "supplies": "Расходники",
+    "service": "Автосервис",
+    "tireservice": "Шиномонтаж",
+    "tolls": "Платные дороги",
+    "wash": "Мойка",
+    "tires": "Резина",
+    "fines": "Штрафы ГИБДД",
+}
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmtransportcar:"))
+async def choose_car_expense(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    code = callback.data.rsplit(":", 1)[1]
+    await state.update_data(
+        pending_km_category="transport",
+        pending_km_category_label="Транспорт",
+        pending_km_subcategory=f"car_{code}",
+    )
+    if code == "other":
+        await state.set_state(SetupStates.km_item_name)
+        await callback.message.answer(
+            "<b>СВОЙ РАСХОД НА АВТОМОБИЛЬ</b>\n\n"
+            "——————\n<b>→ Введите понятное название расхода.</b>",
+            reply_markup=keyboard([[('← Назад', 'kmtransportinput:car')]]),
+        )
+        return
+    label = TRANSPORT_CAR_LABELS.get(code)
+    if label is None:
+        return
+    explanations = {
+        "fuel": "Укажите необходимую сумму на регулярные поездки.",
+        "insurance": "ОСАГО, КАСКО или другое необходимое страхование автомобиля.",
+        "maintenance": "Обязательное плановое техническое обслуживание.",
+        "supplies": "Масла, жидкости, фильтры и другие необходимые расходные материалы.",
+        "service": "Необходимые диагностика и ремонт автомобиля.",
+        "tireservice": "Сезонная смена колёс, балансировка и обязательные работы с шинами.",
+        "tolls": "Регулярные обязательные поездки по платным дорогам.",
+        "wash": "Необходимая мойка автомобиля. Необязательные услуги лучше учитывать в Бытовом резерве.",
+        "tires": "Плановая покупка необходимой сезонной резины.",
+        "fines": "Учитывайте реальную сумму, если такие расходы фактически возникают. Безопаснее стремиться сократить их до нуля.",
+    }
+    await state.update_data(pending_km_item_name=label)
+    await state.set_state(SetupStates.km_item_amount)
+    await callback.message.answer(
+        f"<b>{escape(label.upper())}</b>\n\n{explanations[code]}\n\n"
+        "——————\n<b>→ Введите сумму.</b>\n(Период укажем следующим сообщением)",
+        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+    )
+
+
+@router.callback_query(F.data.startswith("kmtransportinput:"))
+async def transport_input_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    target = callback.data.rsplit(":", 1)[1]
+    await state.set_state(SetupStates.km_menu)
+    if target == "car":
+        await callback.message.answer(
+            "<b>АВТОМОБИЛЬ</b>\n\nВыберите обязательный расход.",
+            reply_markup=keyboard([
+                [("Бензин", "kmtransportcar:fuel"), ("Страхование", "kmtransportcar:insurance")],
+                [("ТО", "kmtransportcar:maintenance"), ("Расходники", "kmtransportcar:supplies")],
+                [("Автосервис", "kmtransportcar:service"), ("Шиномонтаж", "kmtransportcar:tireservice")],
+                [("Платные дороги", "kmtransportcar:tolls"), ("Мойка", "kmtransportcar:wash")],
+                [("Резина", "kmtransportcar:tires"), ("Штрафы ГИБДД", "kmtransportcar:fines")],
+                [("← Назад", "kmtransport:back"), ("+ Свой расход", "kmtransportcar:other")],
+            ]),
+        )
+        return
+    await callback.message.answer(
+        "<b>ТРАНСПОРТ</b>\n\nВыберите обязательный транспортный расход.",
+        reply_markup=keyboard([
+            [("Общественный транспорт", "kmtransport:public"), ("Проездной", "kmtransport:pass")],
+            [("Необходимое такси", "kmtransport:taxi"), ("Автомобиль", "kmtransport:car")],
+            [("Транспортный налог", "kmtransport:tax"), ("+ Свой расход", "kmtransport:other")],
+            [("← Назад", "km:cancel")],
+        ]),
     )
 
 
@@ -2058,27 +2180,260 @@ async def choose_communication_subcategory(callback: CallbackQuery, state: FSMCo
     subtype = callback.data.rsplit(":", 1)[1]
     labels = {
         "mobile": "Мобильная связь",
-        "subscription": "Подписка",
+        "subscription": "Подписки",
         "internet": "Домашний интернет",
         "vpn": "VPN",
-        "other": "Другое",
+        "tv": "ТВ",
+        "other": "Свой расход",
     }
+    if subtype == "back":
+        await state.set_state(SetupStates.km_menu)
+        await callback.message.answer(
+            "<b>СВЯЗЬ И ПОДПИСКИ</b>\n\nВыберите обязательный расход.",
+            reply_markup=keyboard([
+                [("Мобильная связь", "kmcommunication:mobile"), ("Домашний интернет", "kmcommunication:internet")],
+                [("VPN", "kmcommunication:vpn"), ("Подписки", "kmcommunication:subscription")],
+                [("ТВ", "kmcommunication:tv"), ("+ Свой расход", "kmcommunication:other")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
     if subtype not in labels:
         return
     await state.update_data(
         pending_km_category="communication",
         pending_km_category_label="Связь и подписки",
         pending_km_subcategory=subtype,
+        pending_km_communication_label=None,
     )
-    if subtype == "other":
-        await state.set_state(SetupStates.km_item_name)
+    if subtype == "mobile":
         await callback.message.answer(
-            "<b>ДРУГОЙ РАСХОД НА СВЯЗЬ</b>\n\n——————\n"
-            "<b>→ Введите название расхода.</b>",
-            reply_markup=keyboard([[("Отмена", "km:cancel")]]),
+            "<b>КАК НАЗВАТЬ НОМЕР?</b>\n\n"
+            "Не вводите номер телефона. Выберите понятное назначение SIM-карты или придумайте своё название.",
+            reply_markup=keyboard([
+                [("Личный", "kmcommunicationlabel:personal"), ("Рабочий", "kmcommunicationlabel:work")],
+                [("Для ребёнка", "kmcommunicationlabel:child"), ("Для родителей", "kmcommunicationlabel:parents")],
+                [("Резервный", "kmcommunicationlabel:reserve"), ("Своё название", "kmcommunicationlabel:custom")],
+                [("← Назад", "kmcommunication:back")],
+            ]),
         )
         return
-    await ask_preset_km_amount(callback.message, state, labels[subtype])
+    if subtype == "internet":
+        await callback.message.answer(
+            "<b>ГДЕ ПОДКЛЮЧЁН ИНТЕРНЕТ?</b>",
+            reply_markup=keyboard([
+                [("Квартира", "kmcommunicationlabel:apartment"), ("Дом", "kmcommunicationlabel:house")],
+                [("Дача", "kmcommunicationlabel:dacha"), ("Офис", "kmcommunicationlabel:office")],
+                [("Студия", "kmcommunicationlabel:studio"), ("Своё название", "kmcommunicationlabel:custom")],
+                [("← Назад", "kmcommunication:back")],
+            ]),
+        )
+        return
+    await ask_communication_name(callback.message, state)
+
+
+COMMUNICATION_DETAIL_LABELS = {
+    "personal": "Личный",
+    "work": "Рабочий",
+    "child": "Для ребёнка",
+    "parents": "Для родителей",
+    "reserve": "Резервный",
+    "apartment": "Квартира",
+    "house": "Дом",
+    "dacha": "Дача",
+    "office": "Офис",
+    "studio": "Студия",
+}
+
+
+async def ask_communication_name(message: Message, state: FSMContext):
+    data = await state.get_data()
+    subtype = data.get("pending_km_subcategory")
+    prompts = {
+        "mobile": (
+            "<b>СВОЁ НАЗВАНИЕ</b>\n\nНе указывайте номер телефона. Напишите безопасное название, "
+            "по которому вы узнаете эту SIM-карту.\n\n<b>Например:</b> Мегафон основной, МТС для работы, SIM для планшета."
+        ),
+        "internet": (
+            "<b>СВОЁ НАЗВАНИЕ</b>\n\nВведите понятное название места подключения.\n\n"
+            "<b>Например:</b> Квартира родителей, Мастерская, Загородный дом."
+        ),
+        "vpn": (
+            "<b>VPN</b>\n\nВведите название сервиса. Не указывайте логин, адрес электронной почты, "
+            "пароль или другие данные учётной записи.\n\n<b>Например:</b> Amnezia, Outline, Рабочий VPN."
+        ),
+        "subscription": (
+            "<b>ПОДПИСКИ</b>\n\nВ Критический минимум добавляйте только подписки, без которых нельзя "
+            "нормально работать, учиться или выполнять обязательные задачи. Развлекательные и "
+            "необязательные подписки относятся к Бытовому резерву.\n\n"
+            "<b>Например:</b> Облачное хранилище, рабочая программа, Яндекс Плюс."
+        ),
+        "tv": (
+            "<b>ТВ</b>\n\nЕсли телевидение уже входит в тариф домашнего интернета, не добавляйте его "
+            "повторно. Необязательное телевидение лучше учитывать в Бытовом резерве.\n\n"
+            "<b>Например:</b> ТВ дома, Кабельное ТВ, Wink."
+        ),
+        "other": (
+            "<b>СВОЙ РАСХОД НА СВЯЗЬ</b>\n\nДобавьте обязательный расход на связь или цифровой "
+            "сервис, которого нет среди готовых вариантов. Не вводите логины, пароли, номера "
+            "договоров и другие данные учётной записи.\n\n"
+            "<b>Например:</b> Спутниковая связь, Корпоративная телефония."
+        ),
+    }
+    await state.set_state(SetupStates.km_communication_name)
+    await message.answer(
+        prompts.get(subtype, prompts["other"])
+        + "\n\n——————\n<b>→ Введите название.</b>",
+        reply_markup=keyboard([[('← Назад', 'kmcommunicationinput:back')]]),
+    )
+
+
+def communication_item_name(subtype: str, detail: str) -> str:
+    prefixes = {
+        "mobile": "Мобильная связь",
+        "internet": "Домашний интернет",
+        "vpn": "VPN",
+        "subscription": "Подписки",
+        "tv": "ТВ",
+    }
+    prefix = prefixes.get(subtype)
+    return f"{prefix} · {detail.strip()}" if prefix else detail.strip()
+
+
+def matching_communication_total(items: list[dict], subtype: str, item_name: str) -> Decimal:
+    normalized_name = " ".join(item_name.split()).casefold()
+    return money2(sum(
+        (
+            Decimal(item["monthly"])
+            for item in items
+            if item.get("category") == "communication"
+            and item.get("subcategory") == subtype
+            and " ".join(str(item.get("name") or "").split()).casefold() == normalized_name
+        ),
+        Decimal("0"),
+    ))
+
+
+async def ask_communication_amount(message: Message, state: FSMContext):
+    data = await state.get_data()
+    subtype = data.get("pending_km_subcategory") or "other"
+    detail = data.get("pending_km_communication_label") or "Расход"
+    item_name = communication_item_name(subtype, detail)
+    await state.update_data(pending_km_item_name=item_name)
+    await state.set_state(SetupStates.km_item_amount)
+    texts = {
+        "mobile": (
+            "Откройте приложение оператора и проверьте фактическое ежемесячное списание.\n\n"
+            "Посмотрите подключённые платные услуги: среди них могут оказаться ненужные или "
+            "забытые опции. Отключите их перед расчётом."
+        ),
+        "internet": (
+            "Укажите регулярную абонентскую плату. Если телевидение уже входит в тариф, "
+            "не добавляйте его второй раз отдельным расходом."
+        ),
+        "vpn": "Укажите полную стоимость выбранного VPN-сервиса.",
+        "subscription": "Укажите полную стоимость необходимой подписки.",
+        "tv": "Укажите полную стоимость телевидения или ТВ-сервиса.",
+        "other": "Укажите полную стоимость обязательного расхода.",
+    }
+    await message.answer(
+        f"<b>{escape(item_name.upper())}</b>\n\n{texts.get(subtype, texts['other'])}\n\n"
+        "——————\n<b>→ Введите сумму.</b>",
+        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+    )
+
+
+async def continue_communication_detail(message: Message, state: FSMContext, detail: str):
+    data = await state.get_data()
+    subtype = data.get("pending_km_subcategory") or "other"
+    item_name = communication_item_name(subtype, detail)
+    existing_total = matching_communication_total(data.get("km_items", []), subtype, item_name)
+    await state.update_data(pending_km_communication_label=detail, pending_km_item_name=item_name)
+    if existing_total <= 0:
+        await ask_communication_amount(message, state)
+        return
+    await state.set_state(SetupStates.km_menu)
+    await message.answer(
+        f"<b>{escape(item_name.upper())} УЖЕ ДОБАВЛЕН</b>\n\n"
+        f"Сейчас учтено — <b>{rub(existing_total)}</b> в месяц.\n\n"
+        "Если это ещё один платёж по той же услуге, добавьте сумму к существующему расходу.\n\n"
+        "Если это другой номер, место или сервис, уточните название.",
+        reply_markup=keyboard([
+            [(f"Добавить к «{detail}»", "kmcommunicationdup:add")],
+            [("← Назад", "kmcommunicationdup:back"), ("Уточнить название", "kmcommunicationdup:clarify")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmcommunicationlabel:"))
+async def choose_communication_label(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    code = callback.data.rsplit(":", 1)[1]
+    if code == "custom":
+        await ask_communication_name(callback.message, state)
+        return
+    detail = COMMUNICATION_DETAIL_LABELS.get(code)
+    if detail:
+        await continue_communication_detail(callback.message, state, detail)
+
+
+@router.message(SetupStates.km_communication_name)
+async def custom_communication_name(message: Message, state: FSMContext):
+    detail = (message.text or "").strip()
+    if len(detail) < 2 or parse_decimal(detail) is not None:
+        await message.answer("Введите понятное название без персональных данных.")
+        return
+    await continue_communication_detail(message, state, detail)
+
+
+@router.callback_query(F.data.startswith("kmcommunicationdup:"))
+async def choose_duplicate_communication_action(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    action = callback.data.rsplit(":", 1)[1]
+    if action == "add":
+        await ask_communication_amount(callback.message, state)
+    elif action == "clarify":
+        await ask_communication_name(callback.message, state)
+    elif action == "back":
+        await state.set_state(SetupStates.km_menu)
+        subtype = (await state.get_data()).get("pending_km_subcategory")
+        if subtype == "mobile":
+            await callback.message.answer(
+                "<b>КАК НАЗВАТЬ НОМЕР?</b>",
+                reply_markup=keyboard([
+                    [("Личный", "kmcommunicationlabel:personal"), ("Рабочий", "kmcommunicationlabel:work")],
+                    [("Для ребёнка", "kmcommunicationlabel:child"), ("Для родителей", "kmcommunicationlabel:parents")],
+                    [("Резервный", "kmcommunicationlabel:reserve"), ("Своё название", "kmcommunicationlabel:custom")],
+                    [("← Назад", "kmcommunication:back")],
+                ]),
+            )
+        elif subtype == "internet":
+            await callback.message.answer(
+                "<b>ГДЕ ПОДКЛЮЧЁН ИНТЕРНЕТ?</b>",
+                reply_markup=keyboard([
+                    [("Квартира", "kmcommunicationlabel:apartment"), ("Дом", "kmcommunicationlabel:house")],
+                    [("Дача", "kmcommunicationlabel:dacha"), ("Офис", "kmcommunicationlabel:office")],
+                    [("Студия", "kmcommunicationlabel:studio"), ("Своё название", "kmcommunicationlabel:custom")],
+                    [("← Назад", "kmcommunication:back")],
+                ]),
+            )
+        else:
+            await ask_communication_name(callback.message, state)
+
+
+@router.callback_query(F.data == "kmcommunicationinput:back")
+async def communication_input_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.km_menu)
+    await callback.message.answer(
+        "<b>СВЯЗЬ И ПОДПИСКИ</b>\n\nВыберите обязательный расход.",
+        reply_markup=keyboard([
+            [("Мобильная связь", "kmcommunication:mobile"), ("Домашний интернет", "kmcommunication:internet")],
+            [("VPN", "kmcommunication:vpn"), ("Подписки", "kmcommunication:subscription")],
+            [("ТВ", "kmcommunication:tv"), ("+ Свой расход", "kmcommunication:other")],
+            [("← Назад", "km:cancel")],
+        ]),
+    )
 
 
 @router.callback_query(SetupStates.km_menu, F.data.startswith("kmeducation:"))
@@ -2166,7 +2521,7 @@ async def km_item_amount(message: Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("pending_km_category")
     subtype = data.get("pending_km_subcategory")
-    if category == "communication" and subtype in {"mobile", "internet", "vpn", "subscription"}:
+    if category == "communication" and subtype in {"mobile", "internet", "vpn", "subscription", "tv", "other"}:
         await state.set_state(SetupStates.km_item_period)
         if subtype in {"mobile", "internet"}:
             rows = [
@@ -2184,11 +2539,13 @@ async def km_item_amount(message: Message, state: FSMContext):
     if category == "transport" and subtype == "pass":
         await state.set_state(SetupStates.km_item_period)
         await message.answer(
-            "<b>КАК ЧАСТО НУЖНО ПОКУПАТЬ ИЛИ ПРОДЛЕВАТЬ ПРОЕЗДНОЙ?</b>",
+            "<b>ЧЕРЕЗ СКОЛЬКО ПОТРЕБУЕТСЯ НОВЫЙ ПРОЕЗДНОЙ?</b>\n\n"
+            "Укажите, через сколько полных месяцев понадобится вся сумма. Если до покупки "
+            "осталось полтора месяца, Аллокатор возьмёт один полный месяц, чтобы деньги были готовы вовремя.",
             reply_markup=keyboard([
-                [("Каждый месяц", "kmperiod:1"), ("Раз в 3 месяца", "kmperiod:3")],
-                [("Раз в 6 месяцев", "kmperiod:6"), ("Раз в год", "kmperiod:12")],
-                [("← Назад", "kmperiod:back"), ("Другой период", "kmperiod:custom")],
+                [("Через 1 месяц", "kmperiod:1"), ("Через 3 месяца", "kmperiod:3")],
+                [("Через 6 месяцев", "kmperiod:6"), ("Через 12 месяцев", "kmperiod:12")],
+                [("← Назад", "kmperiod:back"), ("Другой срок", "kmperiod:custom")],
             ]),
         )
         return
@@ -2368,10 +2725,21 @@ async def km_item_period(callback: CallbackQuery, state: FSMContext):
     if value == "custom":
         await state.set_state(SetupStates.km_custom_period)
         data = await state.get_data()
+        is_pass = (
+            data.get("pending_km_category") == "transport"
+            and data.get("pending_km_subcategory") == "pass"
+        )
         await callback.message.answer(
             f"{setup_progress(data, 5)}\n\n"
-            "<b>ЗА СКОЛЬКО МЕСЯЦЕВ?</b>\n\n"
-            "Введите число месяцев. Например: <code>2</code> или <code>18</code>.",
+            + (
+                "<b>ЧЕРЕЗ СКОЛЬКО МЕСЯЦЕВ ПОТРЕБУЕТСЯ НОВЫЙ ПРОЕЗДНОЙ?</b>\n\n"
+                "Введите срок числом. Дробный срок будет округлён вниз до полного месяца, "
+                "чтобы необходимая сумма накопилась вовремя.\n\n"
+                "<b>Например:</b> 2"
+                if is_pass
+                else "<b>ЗА СКОЛЬКО МЕСЯЦЕВ?</b>\n\n"
+                "Введите число месяцев. Например: <code>2</code> или <code>18</code>."
+            ),
             reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
         )
         return
@@ -2384,6 +2752,17 @@ async def km_custom_period(message: Message, state: FSMContext):
     if months is None or months <= 0:
         await message.answer("Введите число месяцев больше нуля.")
         return
+    data = await state.get_data()
+    if (
+        data.get("pending_km_category") == "transport"
+        and data.get("pending_km_subcategory") == "pass"
+    ):
+        safe_months = normalize_pass_months(months)
+        if safe_months != months:
+            await message.answer(
+                f"Чтобы сумма была готова вовремя, срок округлён до <b>{safe_months}</b> полн. мес."
+            )
+        months = safe_months
     await save_km_item(message, state, months)
 
 
@@ -2489,11 +2868,12 @@ async def communication_recommendation_back(callback: CallbackQuery, state: FSMC
         await state.update_data(km_items=items)
     await state.set_state(SetupStates.km_menu)
     await callback.message.answer(
-        "<b>СВЯЗЬ И ПОДПИСКИ</b>",
+        "<b>СВЯЗЬ И ПОДПИСКИ</b>\n\nВыберите обязательный расход.",
         reply_markup=keyboard([
-            [("Мобильная связь", "kmcommunication:mobile"), ("Подписка", "kmcommunication:subscription")],
-            [("Домашний интернет", "kmcommunication:internet"), ("VPN", "kmcommunication:vpn")],
-            [("← Назад", "km:cancel"), ("Другое", "kmcommunication:other")],
+            [("Мобильная связь", "kmcommunication:mobile"), ("Домашний интернет", "kmcommunication:internet")],
+            [("VPN", "kmcommunication:vpn"), ("Подписки", "kmcommunication:subscription")],
+            [("ТВ", "kmcommunication:tv"), ("+ Свой расход", "kmcommunication:other")],
+            [("← Назад", "km:cancel")],
         ]),
     )
 
@@ -2588,6 +2968,7 @@ async def clear_pending_km(state: FSMContext):
         pending_km_edit_index=None,
         pending_km_housing_object=None,
         pending_km_housing_expense_label=None,
+        pending_km_communication_label=None,
     )
 
 
