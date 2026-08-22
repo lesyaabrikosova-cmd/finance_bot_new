@@ -83,6 +83,8 @@ class SetupStates(StatesGroup):
     # Калькулятор Критического минимума
     km_menu = State()
     km_item_name = State()
+    km_housing_object_name = State()
+    km_housing_expense_name = State()
     km_item_amount = State()
     km_item_period = State()
     km_tax_due_date = State()
@@ -542,15 +544,9 @@ async def intro_step_4(
 
 KM_CATEGORIES = {
     "housing": (
-        "Жильё, Аренда, ЖКХ",
-        "Сюда относятся:\n"
-        "- аренда квартиры или дома;\n"
-        "- обязательный платёж по ипотеке;\n"
-        "- ЖКХ;\n"
-        "- аренда студии, кабинета или рабочего места, без которых невозможно получать основной доход;\n"
-        "- другие обязательные расходы на помещение.\n\n"
-        "Земельный налог и налог на имущество тоже относятся к обязательной жизни, "
-        "но хранятся в общем конверте «Налоги».",
+        "Недвижимость",
+        "Выберите вид обязательного расхода. Если хотите отдельно учитывать "
+        "конкретную квартиру, дом или другое помещение, нажмите «Уточнить объект».",
     ),
     "food": (
         "Питание",
@@ -1566,10 +1562,14 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         await state.set_state(SetupStates.km_menu)
         data = await state.get_data()
         await callback.message.answer(
-            f"{setup_progress(data, 5)}\n\n<b>ЖИЛЬЁ, АРЕНДА, ЖКХ</b>\n\n{hint}",
+            f"{setup_progress(data, 5)}\n\n<b>НЕДВИЖИМОСТЬ</b>\n\n{hint}",
             reply_markup=keyboard([
-                [("Добавить расход", "kmhousing:regular")],
-                [("Налог на имущество", "kmhousing:property_tax"), ("Земельный налог", "kmhousing:land_tax")],
+                [("+ Уточнить объект", "kmhousing:clarify")],
+                [("ЖКХ", "kmhousing:utilities"), ("Аренда", "kmhousing:rent")],
+                [("Ипотека", "kmhousing:mortgage")],
+                [("Рабочее пространство", "kmhousing:workspace")],
+                [("🏛️ Налог на имущество", "kmhousing:property_tax")],
+                [("🏛️ Земельный налог", "kmhousing:land_tax")],
                 [("← Назад", "km:cancel")],
             ]),
         )
@@ -1667,20 +1667,39 @@ async def choose_housing_subcategory(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     subtype = callback.data.split(":", 1)[1]
     labels = {
-        "regular": "Жильё, аренда или ЖКХ",
+        "utilities": "ЖКХ",
+        "rent": "Аренда",
+        "mortgage": "Ипотека",
+        "workspace": "Рабочее пространство",
         "property_tax": "Налог на имущество",
         "land_tax": "Земельный налог",
     }
+    if subtype == "clarify":
+        await callback.message.answer(
+            f"{setup_progress(await state.get_data(), 5)}\n\n"
+            "<b>КАКОЙ ЭТО ОБЪЕКТ?</b>\n\n"
+            "Выберите готовое название или введите своё.",
+            reply_markup=keyboard([
+                [("Квартира", "kmhousingobj:apartment"), ("Дом", "kmhousingobj:house")],
+                [("Общежитие", "kmhousingobj:dorm"), ("Студия", "kmhousingobj:studio")],
+                [("Офис", "kmhousingobj:office"), ("Мастерская", "kmhousingobj:workshop")],
+                [("Склад", "kmhousingobj:warehouse"), ("Гараж", "kmhousingobj:garage")],
+                [("Дача", "kmhousingobj:dacha"), ("Своё название", "kmhousingobj:custom")],
+                [("← Назад", "kmhousingobj:back")],
+            ]),
+        )
+        return
     if subtype not in labels:
         return
     await state.update_data(
         pending_km_category="housing",
-        pending_km_category_label="Жильё, Аренда, ЖКХ",
+        pending_km_category_label="Недвижимость",
         pending_km_subcategory=subtype,
+        pending_km_housing_object=None,
     )
-    await state.set_state(SetupStates.km_item_name)
     data = await state.get_data()
     if subtype in {"property_tax", "land_tax"}:
+        await state.set_state(SetupStates.km_item_name)
         examples = {
             "property_tax": "Квартира, Дом, Гараж",
             "land_tax": "Дача, Земельный участок",
@@ -1698,12 +1717,196 @@ async def choose_housing_subcategory(callback: CallbackQuery, state: FSMContext)
             reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
         )
         return
+    explanations = {
+        "utilities": (
+            "Обязательные коммунальные платежи: электричество, вода, отопление, газ, "
+            "содержание дома, вывоз мусора и взносы на капитальный ремонт."
+        ),
+        "rent": (
+            "Обязательная плата за жильё или помещение. Коммунальные услуги добавьте "
+            "отдельно, если они не входят в арендную плату."
+        ),
+        "mortgage": (
+            "Укажите обязательный платёж по ипотеке. Досрочное погашение сюда не входит."
+        ),
+        "workspace": (
+            "Аренда студии, кабинета, офиса, мастерской, склада или другого помещения, "
+            "без которого невозможно получать основной доход."
+        ),
+    }
+    await state.update_data(pending_km_item_name=labels[subtype])
+    await state.set_state(SetupStates.km_item_amount)
     await callback.message.answer(
-        f"{setup_progress(data, 5)}\n\n"
-        "<b>ЖИЛЬЁ, АРЕНДА, ЖКХ</b>\n\n"
-        "——————\n"
-        "<b>→ Введите название расхода.</b>\n"
-        "<b>Например:</b> Квартира, Студия, Коммуналка и т.п.",
+        f"{setup_progress(data, 5)}\n\n<b>{labels[subtype].upper()}</b>\n\n"
+        f"{explanations[subtype]}\n\n——————\n<b>→ Введите сумму.</b>\n"
+        "(Период укажем следующим сообщением)",
+        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+    )
+
+
+HOUSING_OBJECT_LABELS = {
+    "apartment": "Квартира",
+    "house": "Дом",
+    "dorm": "Общежитие",
+    "studio": "Студия",
+    "office": "Офис",
+    "workshop": "Мастерская",
+    "warehouse": "Склад",
+    "garage": "Гараж",
+    "dacha": "Дача",
+}
+
+HOUSING_OBJECT_HINTS = {
+    "Квартира": "Здесь можно отдельно учесть ЖКХ, аренду, ипотеку, налог или другой обязательный платёж по квартире.",
+    "Дом": "Здесь можно отдельно учесть коммунальные платежи, ипотеку, аренду, налог и другие обязательства по дому.",
+    "Общежитие": "Укажите обязательную плату за проживание. Отдельные услуги можно добавить ещё одним расходом.",
+    "Студия": "Подойдёт для рабочей, творческой, музыкальной или другой студии, необходимой для получения дохода.",
+    "Офис": "Добавляйте обязательства по офису, который необходим для основной работы или бизнеса.",
+    "Мастерская": "Добавляйте аренду и другие обязательные платежи за необходимую рабочую мастерскую.",
+    "Склад": "Добавляйте обязательную плату за склад, необходимый для работы, бизнеса или хранения имущества.",
+    "Гараж": "Здесь можно учесть аренду, взносы, электричество, налог или другой обязательный платёж по гаражу.",
+    "Дача": "Добавляйте обязательные платежи по даче. Отдых, благоустройство и необязательный ремонт относятся к Бытовому резерву.",
+}
+
+
+async def show_housing_object_expenses(message: Message, state: FSMContext, object_name: str):
+    await state.set_state(SetupStates.km_menu)
+    object_hint = HOUSING_OBJECT_HINTS.get(
+        object_name,
+        "Выберите обязательный расход, который относится к этому объекту.",
+    )
+    await message.answer(
+        f"{setup_progress(await state.get_data(), 5)}\n\n"
+        f"<b>КАКОЙ РАСХОД ОТНОСИТСЯ К ОБЪЕКТУ «{escape(object_name.upper())}»?</b>\n\n"
+        f"{object_hint}",
+        reply_markup=keyboard([
+            [("ЖКХ", "kmhousingexpense:utilities"), ("Аренда", "kmhousingexpense:rent")],
+            [("Ипотека", "kmhousingexpense:mortgage")],
+            [("Рабочее пространство", "kmhousingexpense:workspace")],
+            [("Налог на имущество", "kmhousingexpense:property_tax")],
+            [("Земельный налог", "kmhousingexpense:land_tax")],
+            [("Другой расход", "kmhousingexpense:other")],
+            [("← Назад", "kmhousing:clarify")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmhousingobj:"))
+async def choose_housing_object(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    code = callback.data.split(":", 1)[1]
+    if code == "back":
+        await state.set_state(SetupStates.km_menu)
+        data = await state.get_data()
+        await callback.message.answer(
+            f"{setup_progress(data, 5)}\n\n<b>НЕДВИЖИМОСТЬ</b>\n\n"
+            "Выберите вид обязательного расхода. Если хотите отдельно учитывать "
+            "конкретную квартиру, дом или другое помещение, нажмите «Уточнить объект».",
+            reply_markup=keyboard([
+                [("+ Уточнить объект", "kmhousing:clarify")],
+                [("ЖКХ", "kmhousing:utilities"), ("Аренда", "kmhousing:rent")],
+                [("Ипотека", "kmhousing:mortgage")],
+                [("Рабочее пространство", "kmhousing:workspace")],
+                [("🏛️ Налог на имущество", "kmhousing:property_tax")],
+                [("🏛️ Земельный налог", "kmhousing:land_tax")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
+    if code == "custom":
+        await state.set_state(SetupStates.km_housing_object_name)
+        await callback.message.answer(
+            "<b>СВОЁ НАЗВАНИЕ</b>\n\nВведите понятное вам название объекта.\n"
+            "<b>Например:</b> Квартира родителей, Репетиционная база, Павильон.\n\n"
+            "——————\n<b>→ Введите название объекта.</b>",
+            reply_markup=keyboard([[('← Назад', 'km:cancel')]]),
+        )
+        return
+    object_name = HOUSING_OBJECT_LABELS.get(code)
+    if object_name is None:
+        return
+    await state.update_data(pending_km_housing_object=object_name)
+    await show_housing_object_expenses(callback.message, state, object_name)
+
+
+@router.message(SetupStates.km_housing_object_name)
+async def custom_housing_object_name(message: Message, state: FSMContext):
+    object_name = (message.text or "").strip()
+    if len(object_name) < 2 or parse_decimal(object_name) is not None:
+        await message.answer("Введите понятное название объекта, например <code>Квартира родителей</code>.")
+        return
+    await state.update_data(pending_km_housing_object=object_name)
+    await show_housing_object_expenses(message, state, object_name)
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("kmhousingexpense:"))
+async def choose_housing_object_expense(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    subtype = callback.data.split(":", 1)[1]
+    labels = {
+        "utilities": "ЖКХ",
+        "rent": "Аренда",
+        "mortgage": "Ипотека",
+        "workspace": "Рабочее пространство",
+        "property_tax": "Налог на имущество",
+        "land_tax": "Земельный налог",
+    }
+    data = await state.get_data()
+    object_name = (data.get("pending_km_housing_object") or "Объект").strip()
+    if subtype == "other":
+        await state.set_state(SetupStates.km_housing_expense_name)
+        await callback.message.answer(
+            f"<b>ДРУГОЙ РАСХОД · {escape(object_name.upper())}</b>\n\n"
+            "——————\n<b>→ Введите название расхода.</b>",
+            reply_markup=keyboard([[('← Назад', 'km:cancel')]]),
+        )
+        return
+    if subtype not in labels:
+        return
+    item_name = object_name if subtype in {"property_tax", "land_tax"} else f"{labels[subtype]} · {object_name}"
+    await state.update_data(
+        pending_km_category="housing",
+        pending_km_category_label="Недвижимость",
+        pending_km_subcategory=subtype,
+        pending_km_item_name=item_name,
+    )
+    await state.set_state(SetupStates.km_item_amount)
+    suffix = "Срок уплаты укажем следующим сообщением" if subtype in {"property_tax", "land_tax"} else "Период укажем следующим сообщением"
+    explanations = {
+        "utilities": "Обязательные коммунальные платежи по выбранному объекту.",
+        "rent": "Обязательная арендная плата. ЖКХ добавьте отдельно, если оно не входит в аренду.",
+        "mortgage": "Только обязательный платёж по ипотеке, без досрочного погашения.",
+        "workspace": "Обязательный платёж за пространство, без которого невозможно получать основной доход.",
+        "property_tax": "Налог входит в Критический минимум, но будет храниться в общем конверте «Налоги».",
+        "land_tax": "Налог входит в Критический минимум, но будет храниться в общем конверте «Налоги».",
+    }
+    await callback.message.answer(
+        f"<b>{escape(labels[subtype].upper())} · {escape(object_name.upper())}</b>\n\n"
+        f"{explanations[subtype]}\n\n"
+        "——————\n<b>→ Введите сумму.</b>\n"
+        f"({suffix})",
+        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+    )
+
+
+@router.message(SetupStates.km_housing_expense_name)
+async def custom_housing_expense_name(message: Message, state: FSMContext):
+    expense_name = (message.text or "").strip()
+    if len(expense_name) < 2 or parse_decimal(expense_name) is not None:
+        await message.answer("Введите понятное название расхода.")
+        return
+    data = await state.get_data()
+    object_name = (data.get("pending_km_housing_object") or "Объект").strip()
+    await state.update_data(
+        pending_km_category="housing",
+        pending_km_category_label="Недвижимость",
+        pending_km_subcategory="other",
+        pending_km_item_name=f"{expense_name} · {object_name}",
+    )
+    await state.set_state(SetupStates.km_item_amount)
+    await message.answer(
+        f"<b>{escape(expense_name.upper())} · {escape(object_name.upper())}</b>\n\n"
+        "——————\n<b>→ Введите сумму.</b>\n(Период укажем следующим сообщением)",
         reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
     )
 
@@ -2341,6 +2544,7 @@ async def clear_pending_km(state: FSMContext):
         pending_km_one_time=None,
         pending_km_payment_months=None,
         pending_km_edit_index=None,
+        pending_km_housing_object=None,
     )
 
 
