@@ -718,6 +718,31 @@ def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
     return result
 
 
+def km_item_totals_by_name(items: list[dict]) -> list[tuple[str, Decimal]]:
+    """Суммирует одноимённые расходы для компактного показа в меню КМ.
+
+    Исходные записи остаются раздельными, чтобы пользователь мог независимо
+    исправить или удалить платёж с конкретной карты. Разные категории,
+    подкатегории и налоговые сроки не смешиваются.
+    """
+    totals: dict[tuple[str, str, str, str], Decimal] = {}
+    display_names: dict[tuple[str, str, str, str], str] = {}
+    for item in items:
+        name = (item.get("name") or "Расход").strip()
+        normalized_name = " ".join(name.split()).casefold()
+        key = (
+            str(item.get("category") or ""),
+            str(item.get("subcategory") or ""),
+            str(item.get("due_date") or ""),
+            normalized_name,
+        )
+        display_names.setdefault(key, name)
+        totals[key] = money2(
+            totals.get(key, Decimal("0")) + Decimal(item["monthly"])
+        )
+    return [(display_names[key], total) for key, total in totals.items()]
+
+
 def default_km_storage(item: dict) -> dict:
     """
     Рекомендует способ хранения конкретного расхода Критического минимума.
@@ -1482,8 +1507,8 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
     exact = money2(sum((Decimal(item["monthly"]) for item in items), Decimal("0")))
 
     item_lines = [
-        f"• {escape(item['name'])} — {rub(Decimal(item['monthly']))} / мес."
-        for item in items
+        f"• {escape(name)} — {rub(monthly)} / мес."
+        for name, monthly in km_item_totals_by_name(items)
     ]
     summary = ""
     if item_lines:

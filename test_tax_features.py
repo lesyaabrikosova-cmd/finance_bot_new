@@ -12,6 +12,7 @@ from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
     default_km_storage,
+    km_item_totals_by_name,
     life_categories_from_storage,
     months_until_due_date,
     parse_tax_due_date,
@@ -29,6 +30,51 @@ from storage import db, deserialize_income_types, serialize_json  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_same_km_names_are_summed_for_display(self):
+        items = [
+            {
+                "category": "housing",
+                "subcategory": "other",
+                "name": "Квартплата",
+                "monthly": "300",
+            },
+            {
+                "category": "housing",
+                "subcategory": "other",
+                "name": "  квартплата  ",
+                "monthly": "200",
+            },
+        ]
+        self.assertEqual(
+            km_item_totals_by_name(items),
+            [("Квартплата", Decimal("500.00"))],
+        )
+
+    def test_same_km_names_with_different_tax_dates_stay_separate(self):
+        items = [
+            {
+                "category": "housing",
+                "subcategory": "property_tax",
+                "name": "Квартира",
+                "due_date": "2026-12-01",
+                "monthly": "300",
+            },
+            {
+                "category": "housing",
+                "subcategory": "property_tax",
+                "name": "Квартира",
+                "due_date": "2027-12-01",
+                "monthly": "200",
+            },
+        ]
+        self.assertEqual(
+            km_item_totals_by_name(items),
+            [
+                ("Квартира", Decimal("300.00")),
+                ("Квартира", Decimal("200.00")),
+            ],
+        )
+
     def test_calendar_months_preserve_valid_day(self):
         self.assertEqual(add_calendar_months(date(2026, 8, 31), 1), date(2026, 9, 30))
         self.assertEqual(add_calendar_months(date(2026, 10, 31), 5), date(2027, 3, 31))
