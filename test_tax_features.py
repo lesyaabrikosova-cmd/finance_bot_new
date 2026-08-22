@@ -12,9 +12,11 @@ from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
     default_km_storage,
+    housing_item_name,
     km_item_display_name,
     km_item_totals_by_name,
     life_categories_from_storage,
+    matching_housing_total,
     months_until_due_date,
     parse_tax_due_date,
     planned_taxes_from_storage,
@@ -31,6 +33,42 @@ from storage import db, deserialize_income_types, serialize_json  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_housing_item_name_keeps_tax_object_separate(self):
+        self.assertEqual(
+            housing_item_name("utilities", "ЖКХ", "Квартира"),
+            "ЖКХ · Квартира",
+        )
+        self.assertEqual(
+            housing_item_name("property_tax", "Налог на имущество", "Квартира"),
+            "Квартира",
+        )
+
+    def test_matching_housing_total_sums_repeated_combination(self):
+        items = [
+            {
+                "category": "housing",
+                "subcategory": "utilities",
+                "name": "ЖКХ · Квартира",
+                "monthly": "300",
+            },
+            {
+                "category": "housing",
+                "subcategory": "utilities",
+                "name": "  жкх · квартира ",
+                "monthly": "200",
+            },
+            {
+                "category": "housing",
+                "subcategory": "rent",
+                "name": "Аренда · Квартира",
+                "monthly": "1000",
+            },
+        ]
+        self.assertEqual(
+            matching_housing_total(items, "utilities", "ЖКХ · Квартира"),
+            Decimal("500.00"),
+        )
+
     def test_same_km_names_are_summed_for_display(self):
         items = [
             {
