@@ -23,6 +23,7 @@ from onboarding import (  # noqa: E402
     normalize_pass_months,
     parse_tax_due_date,
     planned_taxes_from_storage,
+    should_auto_route_to_reserve,
 )
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets  # noqa: E402
 from taxes import (  # noqa: E402
@@ -36,6 +37,23 @@ from storage import db, deserialize_income_types, serialize_json  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_combined_onboarding_routes_nonmonthly_ambiguous_expenses_to_reserve(self):
+        for category in ("communication", "habits", "fees"):
+            self.assertTrue(
+                should_auto_route_to_reserve(category, Decimal("3"), True)
+            )
+
+    def test_combined_onboarding_keeps_monthly_and_obvious_expenses_in_critical_life(self):
+        self.assertFalse(
+            should_auto_route_to_reserve("communication", Decimal("1"), True)
+        )
+        self.assertFalse(
+            should_auto_route_to_reserve("health", Decimal("12"), True)
+        )
+        self.assertFalse(
+            should_auto_route_to_reserve("fees", Decimal("12"), False)
+        )
+
     def test_pass_deadline_uses_complete_months_conservatively(self):
         self.assertEqual(normalize_pass_months(Decimal("1.5")), Decimal("1"))
         self.assertEqual(normalize_pass_months(Decimal("9")), Decimal("9"))

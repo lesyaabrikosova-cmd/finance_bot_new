@@ -181,7 +181,12 @@ def keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=("✖️ Отмена" if text == "Отмена" else "+ Другое" if text == "Другое" else text),
+                    text=(
+                        "✖️ Отмена" if text == "Отмена"
+                        else "+ Другое" if text == "Другое"
+                        else "Продолжить →" if text == "Продолжить"
+                        else text
+                    ),
                     callback_data=data,
                 )
                 for text, data in row
@@ -592,8 +597,10 @@ KM_CATEGORIES = {
     ),
     "health": (
         "Здоровье",
-        "Рекомендуем посмотреть банковскую аналитику за <b>12 месяцев</b>. "
-        "(Аллокатор приведёт сумму к среднемесячной.)",
+        "Рекомендую посмотреть банковскую аналитику за <b>12 месяцев</b> "
+        "(Аллокатор приведёт сумму к среднемесячной.)\n\n"
+        "На каждую кнопку нажимайте снова, чтобы прибавить новые расходы к этой категории. "
+        "Это удобно, если вы пользуетесь разными банковскими картами.",
     ),
     "habits": (
         "Вредные привычки",
@@ -646,6 +653,19 @@ BR_CATEGORIES = {
     ),
     "other": ("Другое", "Любой нерегулярный расход нормальной жизни, который не относится к Критическому минимуму, но периодически требует денег."),
 }
+
+
+def should_auto_route_to_reserve(
+    category: str,
+    months: Decimal,
+    combined_onboarding: bool,
+) -> bool:
+    """Неежемесячные цифровые расходы, привычки и комиссии относятся к БР."""
+    return (
+        combined_onboarding
+        and months > 1
+        and category in {"communication", "habits", "fees"}
+    )
 
 
 def route_total(data: dict) -> int:
@@ -1480,15 +1500,27 @@ async def profile_income_done(callback: CallbackQuery, state: FSMContext):
 
 async def start_critical_minimum(message: Message, state: FSMContext):
     data = await state.get_data()
-    await state.update_data(km_items=[])
+    await state.update_data(
+        km_items=[],
+        br_items=[],
+        deferred_br_items=[],
+        combined_life_onboarding=True,
+    )
     await state.set_state(SetupStates.km_menu)
     await show_km_menu(message, state, intro=True)
 
 
-async def show_km_menu(message: Message, state: FSMContext, intro: bool = False):
+async def show_km_menu(
+    message: Message,
+    state: FSMContext,
+    intro: bool = False,
+    notice: str = "",
+):
     data = await state.get_data()
     items = data.get("km_items", [])
+    br_items = data.get("br_items", [])
     exact = money2(sum((Decimal(item["monthly"]) for item in items), Decimal("0")))
+    br_exact = money2(sum((Decimal(item["monthly"]) for item in br_items), Decimal("0")))
 
     item_lines = [
         f"• {escape(name)} — {rub(monthly)} / мес."
@@ -1496,19 +1528,23 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
     ]
     summary = ""
     if item_lines:
-        summary = "\n\n<b>Уже добавлено</b>\n" + "\n".join(item_lines)
-        summary += f"\n\nСейчас найдено: <b>{rub(exact)}</b> / мес."
+        summary = "\n\n<b>Обязательная жизнь</b>\n" + "\n".join(item_lines)
+    br_lines = [
+        f"• {escape(item['name'])} — {rub(Decimal(item['monthly']))} / мес."
+        for item in br_items
+    ]
+    if br_lines:
+        summary += "\n\n<b>Обычная жизнь и нерегулярные расходы</b>\n" + "\n".join(br_lines)
+    if item_lines or br_lines:
+        summary += f"\n\nСейчас найдено: <b>{rub(exact + br_exact)}</b> / мес."
 
     intro_text = ""
     if intro:
         intro_text = (
-            "\n\nℹ️ Критический минимум — обязательная стоимость вашей жизни. "
-            "Не угадывайте суммы: открывайте банковскую аналитику, договоры и тарифы.\n\n"
-            "Если при резком падении дохода от этих расходов можно отказаться на несколько месяцев "
-            "без серьёзных последствий, отнесите их в <b>Бытовой резерв.</b>\n\n"
-            "<b>Одну и ту же кнопку можно нажимать несколько раз.</b> Например, в категории "
-            "<b>Недвижимость</b> "
-            "можно отдельно добавить Квартиру, ЖКХ, Ипотеку, Студию и др."
+            "\n\nДобавьте реальные расходы вашей жизни. Аллокатор сам разделит их на обязательную "
+            "часть и нерегулярные расходы, которые можно временно сократить.\n\n"
+            "Не угадывайте суммы: открывайте банковскую аналитику, договоры и тарифы. "
+            "Одну и ту же кнопку можно нажимать несколько раз."
         )
 
     debt_note = ""
@@ -1525,22 +1561,33 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
         [("Питание", "kmcat:food"), ("Образование", "kmcat:education")],
         [("Вредные привычки", "kmcat:habits"), ("Комиссии", "kmcat:fees")],
         [("+ Другое", "kmcat:other")],
+        [("Одежда и обувь", "lifebr:clothes"), ("Стрижка и уход", "lifebr:care")],
+        [("Спорт и фитнес", "lifebr:gym"), ("Отдых и развлечения", "lifebr:leisure")],
+        [("Курсы и хобби", "lifebr:courses"), ("Дом и мелкий ремонт", "lifebr:repairs")],
+        [("Домашний уют", "lifebr:comfort")],
     ]
-    if items:
-        rows.append([("Редактировать", "kmedit:list"), ("✔️ Готово", "km:finish")])
+    if items or br_items:
+        rows.append([("Редактировать", "lifeedit:list"), ("✔️ Готово", "km:finish")])
     else:
         rows.append([("✔️ Готово", "km:finish")])
 
     text = (
         f"{setup_progress(data, 5)}\n\n"
-        "<b>ПОСЧИТАЕМ ВАШ КРИТИЧЕСКИЙ МИНИМУМ</b>"
+        "<b>ПОСЧИТАЕМ СТОИМОСТЬ ВАШЕЙ ЖИЗНИ</b>"
         + intro_text
         + debt_note
         + summary
     )
+    if notice:
+        text = notice + "\n\n" + text
     reply_markup = keyboard(rows)
 
-    if intro and CRITICAL_MINIMUM_IMAGE.exists() and len(text) <= 1024:
+    if (
+        intro
+        and not data.get("combined_life_onboarding")
+        and CRITICAL_MINIMUM_IMAGE.exists()
+        and len(text) <= 1024
+    ):
         await message.answer_photo(
             photo=FSInputFile(CRITICAL_MINIMUM_IMAGE),
             caption=text,
@@ -1554,6 +1601,116 @@ async def show_km_menu(message: Message, state: FSMContext, intro: bool = False)
     )
 
 
+@router.callback_query(SetupStates.km_menu, F.data.startswith("lifebr:"))
+async def choose_combined_reserve_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    key = callback.data.split(":", 1)[1]
+    if key not in BR_CATEGORIES:
+        return
+    label, hint = BR_CATEGORIES[key]
+    await state.update_data(
+        pending_life_destination="br",
+        pending_km_category=key,
+        pending_km_category_label=label,
+        pending_km_subcategory=None,
+    )
+    await state.set_state(SetupStates.km_item_name)
+    await callback.message.answer(
+        f"<b>{escape(label.upper())}</b>\n\n"
+        f"{escape(hint)}\n\n"
+        "——————\n<b>→ Введите название расхода.</b>\n"
+        "<b>Например:</b> Зимняя обувь или Абонемент.",
+        reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+    )
+
+
+async def show_km_category_after_save(
+    message: Message,
+    state: FSMContext,
+    category: str,
+    notice: str,
+):
+    """Возвращает пользователя в текущую категорию после сохранения расхода."""
+    if category == "housing":
+        await show_housing_landing(message, state, notice=notice)
+        return
+    if category == "communication":
+        await message.answer(
+            notice + "\n\n<b>СВЯЗЬ И ПОДПИСКИ</b>\n\nВыберите следующий обязательный расход.",
+            reply_markup=keyboard([
+                [("Мобильная связь", "kmcommunication:mobile"), ("Домашний интернет", "kmcommunication:internet")],
+                [("VPN", "kmcommunication:vpn"), ("Подписки", "kmcommunication:subscription")],
+                [("ТВ", "kmcommunication:tv"), ("+ Свой расход", "kmcommunication:other")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
+    if category == "transport":
+        await message.answer(
+            notice + "\n\n<b>ТРАНСПОРТ</b>\n\nВыберите следующий обязательный расход.",
+            reply_markup=keyboard([
+                [("Общественный транспорт", "kmtransport:public"), ("Проездной", "kmtransport:pass")],
+                [("Необходимое такси", "kmtransport:taxi"), ("Автомобиль", "kmtransport:car")],
+                [("Транспортный налог", "kmtransport:tax"), ("+ Свой расход", "kmtransport:other")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
+    if category == "education":
+        await message.answer(
+            notice + "\n\n<b>КАК УСТРОЕНА ОПЛАТА?</b>",
+            reply_markup=keyboard([
+                [("За каждое занятие", "kmeducation:lesson"), ("Каждый месяц", "kmeducation:monthly")],
+                [("Крупный платёж", "kmeducation:large"), ("+ Другое", "kmeducation:other")],
+                [("← Назад", "km:cancel")],
+            ]),
+        )
+        return
+    quick_rows = {
+        "health": [
+            [("Аптека", "pharmacy"), ("Стоматолог", "dentist")],
+            [("Медицинские услуги", "medical")],
+            [("Аксессуары", "accessories"), ("Массаж", "massage")],
+            [("Психолог", "psychologist"), ("Оптика", "optics")],
+        ],
+        "pets": [
+            [("Корм", "food"), ("Наполнитель", "litter")],
+            [("Пелёнки", "pads"), ("Ветеринар", "vet")],
+            [("Аксессуары", "accessories")],
+        ],
+        "children": [
+            [("Детский сад", "kindergarten"), ("Школа", "school")],
+            [("Питание", "food"), ("Секция", "club")],
+        ],
+        "food": [
+            [("Супермаркет", "supermarket"), ("Питьевая вода", "water")],
+            [("Еда вне дома", "outside"), ("Доставка", "delivery")],
+        ],
+        "habits": [
+            [("Сигареты", "cigarettes"), ("Табак и вейпы", "tobacco")],
+            [("Алкоголь", "alcohol"), ("Безалкогольное", "nonalcohol")],
+        ],
+        "fees": [
+            [("Обслуживание карты", "card"), ("Банковские переводы", "transfers")],
+            [("Платёжные сервисы", "payment"), ("Почтовые сборы", "postal")],
+            [("Госпошлины", "duties")],
+        ],
+    }
+    if category in quick_rows:
+        label, hint = KM_CATEGORIES[category]
+        rows = [
+            [(text, f"kmquick:{category}:{code}") for text, code in row]
+            for row in quick_rows[category]
+        ]
+        rows.append([("← Назад", "km:cancel"), ("+ Другое", f"kmquick:{category}:other")])
+        await message.answer(
+            notice + f"\n\n<b>{escape(label.upper())}</b>\n\n{hint}\n\nВыберите следующий расход или добавьте свой.",
+            reply_markup=keyboard(rows),
+        )
+        return
+    await show_km_menu(message, state)
+
+
 @router.callback_query(SetupStates.km_menu, F.data.startswith("kmcat:"))
 async def choose_km_category(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -1563,6 +1720,7 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
 
     label, hint = KM_CATEGORIES[key]
     await state.update_data(
+        pending_life_destination="km",
         pending_km_category=key,
         pending_km_category_label=label,
         pending_km_subcategory=None,
@@ -1678,15 +1836,15 @@ HOUSING_EXPENSE_LABELS = {
 }
 
 
-async def show_housing_landing(message: Message, state: FSMContext):
+async def show_housing_landing(message: Message, state: FSMContext, notice: str = ""):
     await state.set_state(SetupStates.km_menu)
     await message.answer(
-        f"{setup_progress(await state.get_data(), 5)}\n\n"
+        (notice + "\n\n" if notice else "")
+        + f"{setup_progress(await state.get_data(), 5)}\n\n"
         "<b>НЕДВИЖИМОСТЬ</b>\n\n"
         "Здесь учитываются обязательные расходы на жильё и другие необходимые помещения.",
         reply_markup=keyboard([
-            [("+ Добавить расход", "kmhousing:add")],
-            [("← Назад", "km:cancel")],
+            [("← Назад", "km:cancel"), ("+ Добавить расход", "kmhousing:add")],
         ]),
     )
 
@@ -2334,18 +2492,26 @@ async def ask_communication_name(message: Message, state: FSMContext):
             "<b>Например:</b> Квартира родителей, Мастерская, Загородный дом."
         ),
         "vpn": (
-            "<b>VPN</b>\n\nВведите название сервиса. Не указывайте логин, адрес электронной почты, "
-            "пароль или другие данные учётной записи.\n\n<b>Например:</b> Amnezia, Outline, Рабочий VPN."
+            "<b>VPN</b>\n\n"
+            "В Критический минимум добавляйте только <b>ежемесячные</b> расходы на VPN.\n"
+            "Если у вас оплата за несколько месяцев, система автоматически перенесёт позицию "
+            "в Бытовой резерв.\n\n"
+            "——————\n<b>→ Введите название сервиса.</b>\n"
+            "<b>Например:</b> Amnezia, Outline, Рабочий VPN."
         ),
         "subscription": (
-            "<b>ПОДПИСКИ</b>\n\nВ Критический минимум добавляйте только подписки, без которых нельзя "
-            "нормально работать, учиться или выполнять обязательные задачи. Развлекательные и "
-            "необязательные подписки относятся к Бытовому резерву.\n\n"
-            "<b>Например:</b> Облачное хранилище, рабочая программа, Яндекс Плюс."
+            "<b>ПОДПИСКИ</b>\n\n"
+            "В Критический минимум добавляйте только <b>ежемесячные</b> подписки, без которых нельзя "
+            "нормально работать, учиться или выполнять обязательные задачи.\n\n"
+            "Развлекательные подписки или обязательные подписки с <b>годовой оплатой</b> относятся "
+            "к Бытовому резерву.\n\n"
+            "——————\n<b>→ Введите название.</b>\n"
+            "<b>Например:</b> ВК Музыка, Облачное хранилище, рабочая программа, Яндекс Плюс."
         ),
         "tv": (
-            "<b>ТВ</b>\n\nЕсли телевидение уже входит в тариф домашнего интернета, не добавляйте его "
-            "повторно. Необязательное телевидение лучше учитывать в Бытовом резерве.\n\n"
+            "<b>ТВ</b>\n\n"
+            "Если телевидение уже входит в тариф домашнего интернета, не добавляйте его повторно.\n\n"
+            "——————\n<b>→ Введите название.</b>\n"
             "<b>Например:</b> ТВ дома, Кабельное ТВ, Wink."
         ),
         "other": (
@@ -2356,9 +2522,10 @@ async def ask_communication_name(message: Message, state: FSMContext):
         ),
     }
     await state.set_state(SetupStates.km_communication_name)
+    already_has_action = "——————" in prompts.get(subtype, prompts["other"])
     await message.answer(
         prompts.get(subtype, prompts["other"])
-        + "\n\n——————\n<b>→ Введите название.</b>",
+        + ("" if already_has_action else "\n\n——————\n<b>→ Введите название.</b>"),
         reply_markup=keyboard([[('← Назад', 'kmcommunicationinput:back')]]),
     )
 
@@ -2859,13 +3026,58 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         item["due_date"] = data["pending_km_due_date"]
     if data.get("pending_km_one_time"):
         item["one_time"] = True
+    if data.get("pending_life_destination") == "br":
+        br_items = list(data.get("br_items", []))
+        br_item = {
+            "category": item["category"],
+            "category_label": item["category_label"],
+            "name": item["name"],
+            "amount": item["amount"],
+            "months": item["months"],
+            "monthly": item["monthly"],
+        }
+        br_items.append(br_item)
+        await state.update_data(br_items=br_items, pending_life_destination=None)
+        await state.set_state(SetupStates.km_menu)
+        await show_km_menu(
+            message,
+            state,
+            notice=f"Добавлено: <b>{escape(br_item['name'])}</b> — {rub(monthly)} / мес.",
+        )
+        return
     items = list(data.get("km_items", []))
+    auto_reserve = should_auto_route_to_reserve(
+        item["category"],
+        months,
+        bool(data.get("combined_life_onboarding")),
+    )
+    if auto_reserve:
+        moved_item = dict(item)
+        if item["category"] == "communication":
+            moved_item["category"] = "subscriptions"
+            moved_item["category_label"] = "Подписки"
+        br_items = list(data.get("br_items", []))
+        br_items.append(moved_item)
+        await state.update_data(br_items=br_items)
+        await state.set_state(SetupStates.km_menu)
+        await show_km_category_after_save(
+            message,
+            state,
+            item["category"],
+            f"<b>{escape(km_item_display_name(item))}</b> — {rub(monthly)} / мес.\n"
+            "Оплата происходит не каждый месяц, поэтому расход перенесён в Бытовой резерв.",
+        )
+        return
     items.append(item)
     await state.update_data(km_items=items)
     await state.set_state(SetupStates.km_menu)
 
     index = len(items) - 1
-    if item["category"] == "communication" and months > 1:
+    if (
+        item["category"] == "communication"
+        and months > 1
+        and not data.get("combined_life_onboarding")
+    ):
         await message.answer(
             "<b>ГДЕ УЧИТЫВАТЬ ЭТОТ РАСХОД?</b>\n\n"
             "Оплата происходит не каждый месяц. Обычно такие расходы удобнее заранее "
@@ -2880,10 +3092,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     tax_due_text = ""
     if item.get("due_date"):
         tax_due_text = f"\nСрок уплаты — <b>{date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}</b>"
-    await message.answer(
-        f"<b>{escape(km_item_display_name(item))}</b> — {rub(monthly)} / мес.{tax_due_text}",
-        reply_markup=keyboard([[('Редактировать', f'kmedit:item:{index}'), ('Удалить', f'kmedit:delete:{index}')]])
-    )
+    notice = f"Добавлено: <b>{escape(km_item_display_name(item))}</b> — {rub(monthly)} / мес.{tax_due_text}"
     if item.get("one_time") and item["category"] == "education":
         await message.answer(
             "<b>ЕСТЬ ЕЩЁ ОДИН ОБЯЗАТЕЛЬНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ?</b>\n\n"
@@ -2894,7 +3103,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
             ]),
         )
         return
-    await show_km_menu(message, state)
+    await show_km_category_after_save(message, state, item["category"], notice)
 
 
 @router.callback_query(SetupStates.km_menu, F.data.in_({"edupayment:add", "edupayment:continue"}))
@@ -2930,7 +3139,12 @@ async def education_payment_next(callback: CallbackQuery, state: FSMContext):
 async def keep_km_subscription(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Оставлено в Критическом минимуме")
     await remove_setup_button(callback)
-    await show_km_menu(callback.message, state)
+    await show_km_category_after_save(
+        callback.message,
+        state,
+        "communication",
+        "Расход оставлен в Критическом минимуме.",
+    )
 
 
 @router.callback_query(SetupStates.km_menu, F.data.startswith("kmrecommend:back:"))
@@ -2968,10 +3182,15 @@ async def move_km_item_to_household_reserve(callback: CallbackQuery, state: FSMC
     item = dict(km_items.pop(index))
     item["category"] = "subscriptions"
     item["category_label"] = "Подписки"
-    deferred = list(data.get("deferred_br_items", []))
-    deferred.append(item)
-    await state.update_data(km_items=km_items, deferred_br_items=deferred)
-    await show_km_menu(callback.message, state)
+    br_items = list(data.get("br_items", []))
+    br_items.append(item)
+    await state.update_data(km_items=km_items, br_items=br_items)
+    await show_km_category_after_save(
+        callback.message,
+        state,
+        "communication",
+        "Расход перенесён в Бытовой резерв.",
+    )
 
 
 @router.callback_query(SetupStates.km_menu, F.data == "km:finish")
@@ -2988,30 +3207,47 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
 
     rounded = round_up_thousand(exact)
     storage_items = build_default_km_storage(items)
+    br_items = data.get("br_items", [])
+    br_groups = br_group_totals(br_items)
+    br_exact = money2(sum(br_groups.values(), Decimal("0")))
+    br_rounded = round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")
 
     await state.update_data(
         critical_life=str(rounded),
         critical_life_exact=str(exact),
         km_storage_items=storage_items,
+        household_reserve=str(br_rounded),
+        household_reserve_exact=str(br_exact),
+        household_reserve_categories={name: str(value) for name, value in br_groups.items()},
     )
 
     data = await state.get_data()
     lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
+    br_lines = [f"• {escape(name)} — {rub(value)}" for name, value in br_groups.items()]
+    sustainable = money2(rounded + br_rounded)
 
     await state.set_state(SetupStates.km_menu)
     caption = (
-        f"{setup_progress(data, 5)}\n\n"
-        "<b>КРИТИЧЕСКИЙ МИНИМУМ РАССЧИТАН</b>\n\n"
-        + "\n".join(lines)
-        + f"\n\nПо категориям — <b>{rub(exact)}</b>\n"
-        + f"Критический минимум — <b>{rub(rounded)}</b>\n\n"
-        "Сумма округлена вверх до ближайшей 1 000 ₽. Можно исправить расходы или увеличить итоговый минимум, если хотите дополнительный запас."
+        f"{setup_progress(data, 6)}\n\n"
+        "<b>СТОИМОСТЬ ВАШЕЙ ЖИЗНИ РАССЧИТАНА</b>\n\n"
+        "<b>КРИТИЧЕСКИЙ МИНИМУМ</b>\n"
+        + ("\n".join(lines) if lines else "• Расходы не добавлены")
+        + f"\nКритический минимум — <b>{rub(rounded)}</b>\n\n"
+        "<b>БЫТОВОЙ РЕЗЕРВ</b>\n"
+        + ("\n".join(br_lines) if br_lines else "• Расходы не добавлены")
+        + f"\nБытовой резерв — <b>{rub(br_rounded)}</b>\n\n"
+        f"<b>УСТОЙЧИВАЯ ЖИЗНЬ — {rub(sustainable)}</b>\n\n"
+        "Аллокатор разделил обязательные и нерегулярные расходы. Проверьте результат: "
+        "распределение можно изменить перед продолжением."
     )
     reply_markup = keyboard([
         [('Продолжить', 'kmfinal:continue')],
-        [('Редактировать расходы', 'kmedit:list')],
-        [('Изменить сумму КМ', 'kmfinal:override')],
+        [('Редактировать расходы', 'lifeedit:list')],
+        [('Изменить сумму КМ', 'kmfinal:override'), ('Изменить сумму БР', 'lifeoverride:br')],
     ])
+    if data.get("combined_life_onboarding"):
+        await callback.message.answer(caption, reply_markup=reply_markup)
+        return
     try:
         await callback.message.answer_photo(
             photo=FSInputFile(CRITICAL_MINIMUM_CALCULATED_IMAGE),
@@ -3045,6 +3281,7 @@ async def clear_pending_km(state: FSMContext):
         pending_km_housing_object=None,
         pending_km_housing_expense_label=None,
         pending_km_communication_label=None,
+        pending_life_destination=None,
     )
 
 
@@ -3065,8 +3302,74 @@ async def km_edit_list(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Пока нечего редактировать.")
         return
     rows = [[(f"{km_item_display_name(item)} — {rub(Decimal(item['monthly']))}", f"kmedit:item:{i}")] for i, item in enumerate(items)]
-    rows.append([("Назад", "kmedit:back")])
+    rows.append([("← К расчёту КМ", "kmedit:back")])
     await callback.message.answer("<b>ЧТО ИЗМЕНИТЬ?</b>", reply_markup=keyboard(rows))
+
+
+@router.callback_query(SetupStates.km_menu, F.data == "lifeedit:list")
+async def life_edit_list(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    rows = []
+    for index, item in enumerate(data.get("km_items", [])):
+        rows.append([(
+            f"КМ · {km_item_display_name(item)} — {rub(Decimal(item['monthly']))}",
+            f"kmedit:item:{index}",
+        )])
+    for index, item in enumerate(data.get("br_items", [])):
+        rows.append([(
+            f"БР · {item['name']} — {rub(Decimal(item['monthly']))}",
+            f"bredit:item:{index}",
+        )])
+    rows.append([("← К стоимости жизни", "lifeedit:back")])
+    await callback.message.answer(
+        "<b>ЧТО ИЗМЕНИТЬ?</b>\n\nКМ — Критический минимум\nБР — Бытовой резерв",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "lifeedit:back")
+async def life_edit_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.km_menu)
+    await show_km_menu(callback.message, state)
+
+
+@router.callback_query(F.data.startswith("lifemove:"))
+async def move_life_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Перенесено")
+    _, destination, raw_index = callback.data.split(":", 2)
+    index = int(raw_index)
+    data = await state.get_data()
+    km_items = list(data.get("km_items", []))
+    br_items = list(data.get("br_items", []))
+    if destination == "br" and 0 <= index < len(km_items):
+        item = dict(km_items.pop(index))
+        item.pop("due_date", None)
+        item.pop("one_time", None)
+        br_items.append(item)
+    elif destination == "km" and 0 <= index < len(br_items):
+        item = dict(br_items.pop(index))
+        km_items.append(item)
+    else:
+        await state.set_state(SetupStates.km_menu)
+        await show_km_menu(callback.message, state)
+        return
+    await state.update_data(km_items=km_items, br_items=br_items)
+    await state.set_state(SetupStates.km_menu)
+    await show_km_menu(callback.message, state, notice="Расход перенесён.")
+
+
+@router.callback_query(SetupStates.km_menu, F.data == "lifeoverride:br")
+async def life_br_override_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    await state.set_state(SetupStates.br_override_amount)
+    await callback.message.answer(
+        f"Текущий Бытовой резерв — <b>{rub(Decimal(data['household_reserve']))}</b>.\n\n"
+        "Введите новую сумму. Она не может быть меньше расчётной суммы, округлённой вверх.",
+        reply_markup=keyboard([[("Отмена", "br:cancel")]]),
+    )
 
 
 @router.callback_query(F.data == "kmedit:back")
@@ -3095,19 +3398,24 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
         else f"Период — {item['months']} мес.\n"
     )
     await state.update_data(pending_km_edit_index=index)
+    rows = [
+        [("Изменить название", f"kmedit:name:{index}")],
+        [("Изменить сумму", f"kmedit:amount:{index}")],
+        [("Изменить срок платежа" if has_deadline else "Изменить период", f"kmedit:period:{index}")],
+    ]
+    if data.get("combined_life_onboarding") and not has_deadline:
+        rows.append([("Перенести в Бытовой резерв", f"lifemove:br:{index}")])
+    rows.extend([
+        [("Удалить", f"kmedit:delete:{index}")],
+        [("Назад", "lifeedit:list" if data.get("combined_life_onboarding") else "kmedit:list")],
+    ])
     await callback.message.answer(
         f"<b>{escape(km_item_display_name(item))}</b>\n\n"
         f"Категория — {escape(item['category_label'])}\n"
         f"Исходная сумма — {rub(Decimal(item['amount']))}\n"
         + period_line
         + f"В расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",
-        reply_markup=keyboard([
-            [("Изменить название", f"kmedit:name:{index}")],
-            [("Изменить сумму", f"kmedit:amount:{index}")],
-            [(("Изменить срок платежа" if has_deadline else "Изменить период"), f"kmedit:period:{index}")],
-            [("Удалить", f"kmedit:delete:{index}")],
-            [("Назад", "kmedit:list")],
-        ]),
+        reply_markup=keyboard(rows),
     )
 
 
@@ -3229,6 +3537,18 @@ async def km_override_save(message: Message, state: FSMContext):
     if value is None or value < minimum:
         await message.answer(f"Сумма не может быть меньше <b>{rub(minimum)}</b>."); return
     value=round_up_thousand(value); await state.update_data(critical_life=str(value)); await state.set_state(SetupStates.km_menu)
+    if data.get("combined_life_onboarding"):
+        household = Decimal(data.get("household_reserve", "0"))
+        await message.answer(
+            f"Критический минимум — <b>{rub(value)}</b>.\n"
+            f"Бытовой резерв — <b>{rub(household)}</b>.\n"
+            f"Устойчивая жизнь — <b>{rub(value + household)}</b>.",
+            reply_markup=keyboard([
+                [("Продолжить", "kmfinal:continue")],
+                [("Редактировать расходы", "lifeedit:list")],
+            ]),
+        )
+        return
     await message.answer(f"Критический минимум установлен: <b>{rub(value)}</b>.", reply_markup=keyboard([[('Продолжить','kmfinal:continue')],[('Редактировать расходы','kmedit:list')]]))
 
 
@@ -3239,7 +3559,7 @@ async def show_km_storage_review(message: Message, state: FSMContext):
     await state.set_state(SetupStates.km_envelopes_menu)
 
     await message.answer(
-        f"{setup_progress(data, 5)}\n\n"
+        f"{setup_progress(data, 6 if data.get('combined_life_onboarding') else 5)}\n\n"
         "<b>КАК ХРАНИТЬ ДЕНЬГИ НА КРИТИЧЕСКИЙ МИНИМУМ</b>\n\n"
         "Аллокатор отделяет деньги, которые важно не смешивать с повседневными расходами. "
         "Остальное остаётся на операционном счёте «Зарплата».\n\n"
@@ -3270,6 +3590,13 @@ async def accept_km_storage(callback: CallbackQuery, state: FSMContext):
     await state.update_data(
         life_categories={name: str(value) for name, value in categories.items()}
     )
+    if data.get("combined_life_onboarding"):
+        if data.get("income_rhythm") == "cyclic":
+            await state.update_data(contract_obligation_keys=[])
+            await show_contract_obligations(callback.message, state)
+        else:
+            await ask_pillow_policy(callback.message, state)
+        return
     await start_household_reserve(callback.message, state)
 
 
@@ -3457,6 +3784,10 @@ async def start_household_reserve(message: Message, state: FSMContext):
 
 async def show_br_menu(message: Message, state: FSMContext, intro: bool = False):
     data = await state.get_data()
+    if data.get("combined_life_onboarding"):
+        await state.set_state(SetupStates.km_menu)
+        await show_km_menu(message, state)
+        return
     items = data.get("br_items", [])
     exact = money2(sum((Decimal(item["monthly"]) for item in items), Decimal("0")))
     item_lines = [f"• {escape(item['name'])} — {rub(Decimal(item['monthly']))} / мес." for item in items]
@@ -3731,13 +4062,18 @@ async def br_edit_item(callback: CallbackQuery, state: FSMContext):
     if not (0<=index<len(items)): await show_br_menu(callback.message,state); return
     item=items[index]; await state.update_data(pending_br_edit_index=index)
     rows = [[('Изменить название',f'bredit:name:{index}')],[('Изменить сумму',f'bredit:amount:{index}')],[('Изменить период',f'bredit:period:{index}')]]
-    if item.get("category") == "subscriptions":
+    if data.get("combined_life_onboarding"):
+        rows.append([('Перенести в Критический минимум', f'lifemove:km:{index}')])
+    elif item.get("category") == "subscriptions":
         rows.append([('Вернуть в Критический минимум', f'brmove:km:{index}')])
-    rows.extend([[('Удалить',f'bredit:delete:{index}')],[('Назад','bredit:list')]])
+    rows.extend([
+        [('Удалить',f'bredit:delete:{index}')],
+        [('Назад','lifeedit:list' if data.get("combined_life_onboarding") else 'bredit:list')],
+    ])
     await callback.message.answer(f"<b>{escape(item['name'])}</b>\n\nКатегория — {escape(item['category_label'])}\nИсходная сумма — {rub(Decimal(item['amount']))}\nПериод — {item['months']} мес.\nВ расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",reply_markup=keyboard(rows))
 
 
-@router.callback_query(SetupStates.br_menu, F.data.startswith("brmove:km:"))
+@router.callback_query(F.data.startswith("brmove:km:"))
 async def move_br_item_to_critical_minimum(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Возвращено в Критический минимум")
     index = int(callback.data.rsplit(":", 1)[1])
@@ -3958,7 +4294,20 @@ async def br_override_start(callback: CallbackQuery, state: FSMContext):
 async def br_override_save(message: Message, state: FSMContext):
     value=parse_decimal(message.text); data=await state.get_data(); minimum=round_up_thousand(Decimal(data['household_reserve_exact']))
     if value is None or value<minimum: await message.answer(f"Сумма не может быть меньше <b>{rub(minimum)}</b>."); return
-    value=round_up_thousand(value); await state.update_data(household_reserve=str(value)); critical=Decimal(data['critical_life']); await state.set_state(SetupStates.br_menu)
+    value=round_up_thousand(value); await state.update_data(household_reserve=str(value)); critical=Decimal(data['critical_life'])
+    if data.get("combined_life_onboarding"):
+        await state.set_state(SetupStates.km_menu)
+        await message.answer(
+            f"Критический минимум — <b>{rub(critical)}</b>.\n"
+            f"Бытовой резерв — <b>{rub(value)}</b>.\n"
+            f"Устойчивая жизнь — <b>{rub(critical + value)}</b>.",
+            reply_markup=keyboard([
+                [("Продолжить", "kmfinal:continue")],
+                [("Редактировать расходы", "lifeedit:list")],
+            ]),
+        )
+        return
+    await state.set_state(SetupStates.br_menu)
     await message.answer(f"Бытовой резерв установлен: <b>{rub(value)}</b>.\nУстойчивая жизнь — <b>{rub(critical+value)}</b>.",reply_markup=keyboard([[('Продолжить','brfinal:continue')],[('Редактировать расходы','bredit:list')]]))
 
 
