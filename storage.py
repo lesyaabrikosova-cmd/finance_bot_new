@@ -148,7 +148,7 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 5,
+        "version": 6,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
@@ -167,12 +167,16 @@ def serialize_income_types(settings: UserSettings) -> str:
             name: decimal_to_string(amount)
             for name, amount in settings.contract_obligations.items()
         },
+        "household_reserve_categories": {
+            name: decimal_to_string(amount)
+            for name, amount in settings.household_reserve_categories.items()
+        },
     })
 
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -184,7 +188,7 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
@@ -196,6 +200,10 @@ def deserialize_income_rhythm(value) -> dict:
             "contract_obligations": {
                 str(name): string_to_decimal(amount)
                 for name, amount in raw.get("contract_obligations", {}).items()
+            },
+            "household_reserve_categories": {
+                str(name): string_to_decimal(amount)
+                for name, amount in raw.get("household_reserve_categories", {}).items()
             },
         }
     return {"income_rhythm": "monthly", "income_gap_months": Decimal("1")}

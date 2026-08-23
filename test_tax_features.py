@@ -33,10 +33,28 @@ from taxes import (  # noqa: E402
     report_text,
 )
 from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
-from storage import db, deserialize_income_types, serialize_json  # noqa: E402
+from storage import (  # noqa: E402
+    db,
+    deserialize_income_rhythm,
+    deserialize_income_types,
+    serialize_income_types,
+    serialize_json,
+)
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_children_reserve_category_survives_settings_serialization(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Наёмный",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("50"),
+            household_reserve_categories={"Дети": Decimal("20")},
+            average_income=Decimal("100"),
+        )
+        restored = deserialize_income_rhythm(serialize_income_types(settings))
+        self.assertEqual(restored["household_reserve_categories"], {"Дети": Decimal("20")})
+
     def test_combined_onboarding_routes_nonmonthly_ambiguous_expenses_to_reserve(self):
         for category in ("communication", "habits", "fees"):
             self.assertTrue(

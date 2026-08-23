@@ -1388,6 +1388,13 @@ async def send_distribution_report(
         ),
     )
 
+    for name in settings.household_reserve_categories:
+        add_distribution_line(
+            "❤️" if name == "Дети" else "💚",
+            name,
+            allocations.get(f"БР:{name}", ZERO),
+        )
+
     if settings.goals:
 
         for goal in settings.goals:

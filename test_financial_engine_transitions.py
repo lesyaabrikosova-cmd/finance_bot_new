@@ -15,6 +15,23 @@ D = Decimal
 
 
 class ModeTransitionTests(unittest.TestCase):
+    def test_stage_b_splits_children_into_the_same_named_envelope(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Наёмный",
+            critical_life=D("100"),
+            household_reserve=D("100"),
+            household_reserve_categories={"Дети": D("40")},
+            average_income=D("100"),
+            force_majeure_months=D("1"),
+            bracket_b=D("0"),
+        )
+        allocator = FinancialAllocator(settings, AllocatorState(life_balance=D("100")))
+        result = allocator.process_income(D("100"), "Зарплата", tax_override=D("0"))
+        self.assertEqual(result.allocations["БР:Дети"], D("40"))
+        self.assertEqual(result.allocations["Бытовой резерв"], D("60"))
+        self.assertEqual(allocator.state.life_balance, D("200"))
+
     def test_profile_specific_mode_scales(self):
         stable = self.make_allocator(employment="Наёмный")
         piecework = self.make_allocator(employment="Фрилансер")

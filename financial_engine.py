@@ -306,6 +306,7 @@ class UserSettings:
     # ----------------------------
 
     life_categories: Dict[str, Decimal] = field(default_factory=dict)
+    household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
 
     # ----------------------------
     # Цели
@@ -387,6 +388,10 @@ class UserSettings:
         self.life_categories = {
             name: D(amount)
             for name, amount in self.life_categories.items()
+        }
+        self.household_reserve_categories = {
+            name: D(amount)
+            for name, amount in self.household_reserve_categories.items()
         }
 
     # ========================================================
@@ -519,6 +524,11 @@ class UserSettings:
         if self.household_reserve < ZERO:
             errors.append(
                 "Бытовой резерв не может быть отрицательным."
+            )
+
+        if sum(self.household_reserve_categories.values(), ZERO) > self.household_reserve:
+            errors.append(
+                "Сумма отдельных категорий Бытового резерва превышает его общий размер."
             )
 
         if self.average_income < ZERO:
@@ -1716,9 +1726,16 @@ class FinancialAllocator:
 
         reserve_part = part_b - up_calculated
         st.life_balance += reserve_part
+        reserve_total = s.household_reserve
+        detailed = ZERO
+        if reserve_total > ZERO:
+            for name, target in s.household_reserve_categories.items():
+                part = reserve_part * target / reserve_total
+                detailed += part
+                allocations[f"БР:{name}"] = allocations.get(f"БР:{name}", ZERO) + part
         allocations["Бытовой резерв"] = (
             allocations.get("Бытовой резерв", ZERO)
-            + reserve_part
+            + reserve_part - detailed
         )
 
         steps.append(
