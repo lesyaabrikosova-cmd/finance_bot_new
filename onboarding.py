@@ -38,7 +38,6 @@ BASE_DIR = Path(__file__).resolve().parent
 INTRO_IMAGES_DIR = BASE_DIR / "assets" / "onboarding"
 
 INTRO_IMAGE_1 = INTRO_IMAGES_DIR / "intro_1.png"
-INTRO_IMAGE_2 = INTRO_IMAGES_DIR / "intro_2.png"
 INTRO_IMAGE_3 = INTRO_IMAGES_DIR / "intro_3.png"
 INTRO_IMAGE_4 = INTRO_IMAGES_DIR / "intro_4.png"
 FINANCIAL_PROFILE_IMAGE = INTRO_IMAGES_DIR / "financial_profile.png"
@@ -430,19 +429,25 @@ async def show_intro(
 ):
 
     caption = (
-        "<b>Я — Богатый Алхимик, ваш финансовый аллокатор.</b>\n\n"
+        "<b>Я — Богатый Алхимик, ваш финансовый аллокатор, проще говоря, денежный "
+        "распределитель.</b>\n\n"
         "Я не буду заставлять вас записывать каждую трату. Ничего, кроме дисциплины "
-        "и тревожности это вам не принесет.\n\n"
+        "и тревожности, это вам не принесёт.\n\n"
         "Вместо того чтобы разбираться, куда деньги исчезли, мы будем решать, "
-        "<b>куда им отправиться</b>, пока они ещё у вас."
+        "<b>куда им отправиться</b>, пока они ещё у вас.\n\n"
+        "Каждый раз, когда приходят деньги, я рассчитываю, <b>сколько и куда отправить</b>.\n\n"
+        "Вы переводите эти суммы по отдельным <b>накопительным счетам</b> в своём банке — "
+        "финансовым «конвертам» (это бесплатно).\n\n"
+        "Некоторые покажутся очевидными. <b>Другие конверты, скорее всего, вы сами бы не "
+        "создали. И вот тут начинается самое интересное</b>."
     )
 
     await send_intro_photo(
         message=message,
         image_path=INTRO_IMAGE_1,
         caption=caption,
-        callback_data="intro:2",
-        button_text="И куда же? →",
+        callback_data="intro:3",
+        button_text="В чём секрет? →",
     )
 
 
@@ -453,29 +458,8 @@ async def intro_step_2(
     callback: CallbackQuery,
     state: FSMContext,
 ):
-
-    await callback.answer()
-
-    await remove_old_intro_button(
-        callback
-    )
-
-    caption = (
-        "<b>Богатый Алхимик работает с будущим.</b>\n\n"
-        "Каждый раз, когда приходят деньги, я рассчитываю, <b>сколько и куда отправить</b>.\n\n"
-        "Вы переводите эти суммы по отдельным <b>накопительным счетам</b> в своём банке — "
-        "финансовым «конвертам» (это бесплатно).\n\n"
-        "Некоторые покажутся очевидными. <b>Другие конверты, скорее всего, сами бы не создали. "
-        "И вот тут начинается самое интересное</b>."
-    )
-
-    await send_intro_photo(
-        message=callback.message,
-        image_path=INTRO_IMAGE_2,
-        caption=caption,
-        callback_data="intro:3",
-        button_text="В чём секрет? →",
-    )
+    # Совместимость со старыми сообщениями: ранее первая кнопка имела callback intro:2.
+    await intro_step_3(callback, state)
 
 
 @router.callback_query(
