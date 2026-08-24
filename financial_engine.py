@@ -265,6 +265,14 @@ class PhaseLifeBudget:
         self.completed = bool(self.completed)
 
     @property
+    def critical_life_rub(self) -> Decimal:
+        return money(self.critical_life * self.exchange_rate_to_rub)
+
+    @property
+    def household_reserve_rub(self) -> Decimal:
+        return money(self.household_reserve * self.exchange_rate_to_rub)
+
+    @property
     def household_life(self) -> Decimal:
         return self.critical_life + self.household_reserve
 

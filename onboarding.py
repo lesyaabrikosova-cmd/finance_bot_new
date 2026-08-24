@@ -23,8 +23,10 @@ from financial_engine import (
     Credit,
     FinancialAllocator,
     Goal,
+    PhaseLifeBudget,
     UserSettings,
 )
+from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
 
 from storage import db
 from ui import main_menu_keyboard
@@ -73,6 +75,12 @@ class SetupStates(StatesGroup):
     income_rhythm = State()
     income_gap_months = State()
     income_work_months = State()
+    initial_cycle_phase = State()
+    initial_phase_remaining = State()
+    phase_currency = State()
+    phase_currency_custom = State()
+    phase_rate_choice = State()
+    phase_rate_manual = State()
     fund_salary_intro = State()
     stabilizer_target_months = State()
     contract_obligations_menu = State()
@@ -828,7 +836,7 @@ def source_period_label(months: Decimal) -> str:
     return f"{value} мес."
 
 
-def life_expense_summary(items: list[dict]) -> str:
+def life_expense_summary(items: list[dict], symbol: str = "₽") -> str:
     """Группирует введённые суммы по категориям без подмены их среднемесячными."""
     grouped: dict[str, dict[tuple[str, str], Decimal]] = {}
     names: dict[tuple[str, str, str], str] = {}
@@ -853,11 +861,16 @@ def life_expense_summary(items: list[dict]) -> str:
         for (normalized, months), amount in grouped[category].items():
             name = names[(category, normalized, months)]
             lines.append(
-                f"• <b>{escape(name)}</b> — {rub(amount)} / "
+                f"• <b>{escape(name)}</b> — {format_money_symbol(amount, symbol)} / "
                 f"{source_period_label(Decimal(months))}"
             )
         blocks.append(f"<b><u>{escape(category.upper())}</u></b>\n\n" + "\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def format_money_symbol(value: Decimal, symbol: str = "₽") -> str:
+    formatted = f"{Decimal(value):,.2f}".replace(",", " ").replace(".", ",")
+    return f"{formatted} {escape(symbol)}"
 
 
 def default_km_storage(item: dict) -> dict:
@@ -1329,7 +1342,7 @@ async def save_income_gap_button(callback: CallbackQuery, state: FSMContext):
         income_gap_months=value,
         reliable_gap_income="0",
     )
-    await ask_stabilizer_target(callback.message, state)
+    await ask_initial_cycle_phase(callback.message, state)
 
 
 @router.message(SetupStates.income_gap_months)
@@ -1343,7 +1356,186 @@ async def save_income_gap_text(message: Message, state: FSMContext):
         income_gap_months=str(value),
         reliable_gap_income="0",
     )
-    await ask_stabilizer_target(message, state)
+    await ask_initial_cycle_phase(message, state)
+
+
+async def ask_initial_cycle_phase(message: Message, state: FSMContext):
+    """Определяет первую жизнь, которую пользователь рассчитает в онбординге."""
+    await state.set_state(SetupStates.initial_cycle_phase)
+    await message.answer(
+        f"{setup_progress(await state.get_data(), 5)}\n\n"
+        "<b>В КАКОЙ ЧАСТИ ФИНАНСОВОГО ЦИКЛА ВЫ СЕЙЧАС?</b>\n\n"
+        "Сначала рассчитаем стоимость жизни именно в текущей части цикла. "
+        "Вторую часть можно будет заполнить позже из Главного меню.",
+        reply_markup=keyboard([
+            [("Рабочая часть", "initialphase:work"), ("Перерыв", "initialphase:break")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.initial_cycle_phase, F.data.startswith("initialphase:"))
+async def save_initial_cycle_phase(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    phase = callback.data.rsplit(":", 1)[1]
+    await state.update_data(current_cycle_phase=phase, life_phase=phase)
+    await state.set_state(SetupStates.initial_phase_remaining)
+    label = (
+        "ДО КОНЦА ТЕКУЩЕЙ РАБОЧЕЙ ЧАСТИ"
+        if phase == "work"
+        else "ДО СЛЕДУЮЩЕЙ РАБОЧЕЙ ЧАСТИ"
+    )
+    await callback.message.answer(
+        f"<b>СКОЛЬКО ЦЕЛЫХ МЕСЯЦЕВ ОСТАЛОСЬ {label}?</b>\n\n"
+        "Если осталось меньше месяца, укажите 1. Это значение можно будет изменить позже.",
+        reply_markup=keyboard([
+            [("1 месяц", "initialremaining:1"), ("2 месяца", "initialremaining:2")],
+            [("3 месяца", "initialremaining:3"), ("6 месяцев", "initialremaining:6")],
+            [("Указать другое", "initialremaining:custom")],
+        ]),
+    )
+
+
+async def save_initial_remaining(message: Message, state: FSMContext, value: Decimal):
+    data = await state.get_data()
+    phase = data.get("current_cycle_phase", "break")
+    await state.update_data(
+        current_phase_months_remaining=str(value),
+        current_cycle_gap_remaining=str(value) if phase == "break" else "0",
+    )
+    await ask_phase_currency(message, state)
+
+
+@router.callback_query(SetupStates.initial_phase_remaining, F.data.startswith("initialremaining:"))
+async def save_initial_remaining_button(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    raw = callback.data.rsplit(":", 1)[1]
+    if raw == "custom":
+        await callback.message.answer("Введите целое количество месяцев от 1 до 24.")
+        return
+    await save_initial_remaining(callback.message, state, Decimal(raw))
+
+
+@router.message(SetupStates.initial_phase_remaining)
+async def save_initial_remaining_text(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
+        await message.answer("Введите целое количество месяцев от 1 до 24.")
+        return
+    await save_initial_remaining(message, state, value)
+
+
+async def ask_phase_currency(message: Message, state: FSMContext):
+    data = await state.get_data()
+    phase_label = "рабочей части" if data.get("life_phase") == "work" else "перерыва"
+    await state.set_state(SetupStates.phase_currency)
+    await message.answer(
+        f"<b>В КАКОЙ ВАЛЮТЕ ВЫ ОПЛАЧИВАЕТЕ ЖИЗНЬ ВО ВРЕМЯ {phase_label.upper()}?</b>\n\n"
+        "Если выберете рубль, Аллокатор не будет показывать валютные настройки.",
+        reply_markup=keyboard([
+            [("₽ RUB", "phasecurrency:RUB"), ("$ USD", "phasecurrency:USD")],
+            [("€ EUR", "phasecurrency:EUR"), ("₹ INR", "phasecurrency:INR")],
+            [("د.إ AED", "phasecurrency:AED"), ("¥ CNY", "phasecurrency:CNY")],
+            [("Другая валюта", "phasecurrency:other")],
+        ]),
+    )
+
+
+async def continue_after_phase_currency(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("phase_life_edit_mode"):
+        await start_critical_minimum(message, state, reset_items=False)
+    else:
+        await ask_stabilizer_target(message, state)
+
+
+async def offer_phase_rate(message: Message, state: FSMContext, code: str):
+    await state.update_data(phase_currency_code=code, phase_currency_symbol=currency_symbol(code))
+    try:
+        quote = await CurrencyRateService(db).get_rate_async(code)
+    except CurrencyRateUnavailable:
+        await state.set_state(SetupStates.phase_rate_manual)
+        await message.answer(
+            f"Не удалось получить курс {escape(code)} автоматически.\n\n"
+            f"——————\n<b>→ Сколько рублей соответствует 1 {escape(code)}?</b>"
+        )
+        return
+    await state.update_data(
+        pending_phase_official_rate=str(quote.rub_per_unit),
+        pending_phase_rate_date=quote.rate_date.isoformat(),
+    )
+    await state.set_state(SetupStates.phase_rate_choice)
+    stale_note = " (последний сохранённый курс)" if quote.stale else ""
+    await message.answer(
+        f"<b>КУРС ДЛЯ РАСЧЁТОВ</b>\n\n"
+        f"Курс ЦБ на {quote.rate_date.strftime('%d.%m.%Y')}{stale_note}: "
+        f"1 {escape(code)} = <b>{quote.rub_per_unit:.4f} ₽</b>.\n\n"
+        "При реальном обмене банк может применить другой курс, спред или комиссию.",
+        reply_markup=keyboard([
+            [("Использовать курс ЦБ", "phaserate:official")],
+            [("Ввести свой курс", "phaserate:manual")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.phase_currency, F.data.startswith("phasecurrency:"))
+async def save_phase_currency(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    code = callback.data.rsplit(":", 1)[1]
+    if code == "other":
+        await state.set_state(SetupStates.phase_currency_custom)
+        await callback.message.answer(
+            "Введите трёхбуквенный код валюты. Например: <code>TRY</code>, <code>KZT</code> или <code>GEL</code>."
+        )
+        return
+    if code == "RUB":
+        await state.update_data(
+            phase_currency_code="RUB", phase_currency_symbol="₽",
+            phase_exchange_rate="1", phase_exchange_rate_mode="official",
+            phase_exchange_rate_updated_at=None,
+        )
+        await continue_after_phase_currency(callback.message, state)
+        return
+    await offer_phase_rate(callback.message, state, code)
+
+
+@router.message(SetupStates.phase_currency_custom)
+async def save_custom_phase_currency(message: Message, state: FSMContext):
+    code = (message.text or "").strip().upper()
+    if len(code) != 3 or not code.isalpha():
+        await message.answer("Введите трёхбуквенный код валюты. Например: <code>TRY</code>.")
+        return
+    await offer_phase_rate(message, state, code)
+
+
+@router.callback_query(SetupStates.phase_rate_choice, F.data.startswith("phaserate:"))
+async def save_phase_rate_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    choice = callback.data.rsplit(":", 1)[1]
+    if choice == "manual":
+        await state.set_state(SetupStates.phase_rate_manual)
+        code = (await state.get_data()).get("phase_currency_code", "валюты")
+        await callback.message.answer(f"——————\n<b>→ Сколько рублей соответствует 1 {escape(code)}?</b>")
+        return
+    data = await state.get_data()
+    await state.update_data(
+        phase_exchange_rate=data["pending_phase_official_rate"],
+        phase_exchange_rate_mode="official",
+        phase_exchange_rate_updated_at=data.get("pending_phase_rate_date"),
+    )
+    await continue_after_phase_currency(callback.message, state)
+
+
+@router.message(SetupStates.phase_rate_manual)
+async def save_manual_phase_rate(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value <= 0:
+        await message.answer("Введите положительный курс. Например: <code>90,50</code>.")
+        return
+    await state.update_data(
+        phase_exchange_rate=str(value), phase_exchange_rate_mode="manual",
+        phase_exchange_rate_updated_at=date.today().isoformat(),
+    )
+    await continue_after_phase_currency(message, state)
 
 
 @router.callback_query(SetupStates.fund_salary_intro, F.data == "fundsalary:intro")
@@ -1613,14 +1805,17 @@ async def profile_income_done(callback: CallbackQuery, state: FSMContext):
     await start_critical_minimum(callback.message, state)
 
 
-async def start_critical_minimum(message: Message, state: FSMContext):
+async def start_critical_minimum(
+    message: Message,
+    state: FSMContext,
+    *,
+    reset_items: bool = True,
+):
     data = await state.get_data()
-    await state.update_data(
-        km_items=[],
-        br_items=[],
-        deferred_br_items=[],
-        combined_life_onboarding=True,
-    )
+    updates = {"combined_life_onboarding": True}
+    if reset_items:
+        updates.update(km_items=[], br_items=[], deferred_br_items=[])
+    await state.update_data(**updates)
     await state.set_state(SetupStates.km_menu)
     await show_km_menu(message, state, intro=True)
 
@@ -1638,11 +1833,16 @@ async def show_km_menu(
     br_exact = money2(sum((Decimal(item["monthly"]) for item in br_items), Decimal("0")))
 
     all_items = [*items, *br_items]
+    life_symbol = (
+        data.get("phase_currency_symbol", "₽")
+        if data.get("income_rhythm") == "cyclic"
+        else "₽"
+    )
     summary = ""
     if all_items:
         summary = (
-            "\n\n" + life_expense_summary(all_items)
-            + f"\n\n——————\nСейчас найдено: <b>{rub(exact + br_exact)}</b> / мес."
+            "\n\n" + life_expense_summary(all_items, life_symbol)
+            + f"\n\n——————\nСейчас найдено: <b>{format_money_symbol(exact + br_exact, life_symbol)}</b> / мес."
         )
 
     intro_text = ""
@@ -1653,6 +1853,22 @@ async def show_km_menu(
             "Не угадывайте суммы: открывайте банковскую аналитику, договоры и тарифы. "
             "Одну и ту же кнопку можно нажимать несколько раз."
         )
+
+    phase_text = ""
+    if data.get("income_rhythm") == "cyclic" and data.get("life_phase") in {"work", "break"}:
+        phase = data["life_phase"]
+        phase_label = "РАБОЧАЯ ЧАСТЬ" if phase == "work" else "ПЕРЕРЫВ"
+        code = data.get("phase_currency_code", "RUB")
+        phase_text = (
+            f"\n\n<b>СЕЙЧАС СЧИТАЕМ: {phase_label} · {escape(code)}</b>\n\n"
+            "Смотрите расходы только за сопоставимые месяцы этой части цикла. "
+            "Не смешивайте их с расходами другой части."
+        )
+        if phase == "work":
+            phase_text += (
+                " Указывайте только те расходы, которые оплачиваете лично; "
+                "жильё, питание и другие расходы, оплаченные работодателем напрямую, не добавляйте."
+            )
 
     debt_note = ""
     if data.get("has_debts"):
@@ -1681,6 +1897,7 @@ async def show_km_menu(
     text = (
         f"{setup_progress(data, 5)}\n\n"
         "<b>ПОСЧИТАЕМ СТОИМОСТЬ ВАШЕЙ ЖИЗНИ</b>"
+        + phase_text
         + intro_text
         + debt_note
         + summary
@@ -3274,6 +3491,12 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     data = await state.get_data()
     amount = Decimal(data["pending_km_item_amount"])
     monthly = money2(amount / months)
+    amount_symbol = (
+        data.get("phase_currency_symbol", "₽")
+        if data.get("income_rhythm") == "cyclic"
+        else "₽"
+    )
+    monthly_text = format_money_symbol(monthly, amount_symbol)
     item = {
         "category": data["pending_km_category"],
         "category_label": data["pending_km_category_label"],
@@ -3301,7 +3524,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         category = item["category"]
         await state.update_data(br_items=br_items, pending_life_destination=None)
         await state.set_state(SetupStates.km_menu)
-        notice = f"Добавлено: <b>{escape(br_item['name'])}</b> — {rub(monthly)} / мес."
+        notice = f"Добавлено: <b>{escape(br_item['name'])}</b> — {monthly_text} / мес."
         if category in {"transport", "children", "food"}:
             await show_km_category_after_save(message, state, category, notice)
         elif category == "clothes":
@@ -3342,7 +3565,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
             message,
             state,
             item["category"],
-            f"Добавлено: <b>{escape(km_item_display_name(item))}</b> — {rub(monthly)} / мес.",
+            f"Добавлено: <b>{escape(km_item_display_name(item))}</b> — {monthly_text} / мес.",
         )
         return
     items.append(item)
@@ -3369,7 +3592,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     tax_due_text = ""
     if item.get("due_date"):
         tax_due_text = f"\nСрок уплаты — <b>{date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}</b>"
-    notice = f"Добавлено: <b>{escape(km_item_display_name(item))}</b> — {rub(monthly)} / мес.{tax_due_text}"
+    notice = f"Добавлено: <b>{escape(km_item_display_name(item))}</b> — {monthly_text} / мес.{tax_due_text}"
     if item["category"] == "transport" and str(item.get("subcategory") or "").startswith("car_"):
         await message.answer(
             notice + "\n\n<b>АВТОМОБИЛЬ</b>\n\nВыберите следующий расход.",
@@ -3501,6 +3724,44 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
     br_groups = br_group_totals(br_items)
     br_exact = money2(sum(br_groups.values(), Decimal("0")))
     br_rounded = round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")
+    native_critical = rounded
+    native_reserve = br_rounded
+
+    # В циклическом профиле введённые суммы принадлежат конкретной фазе и
+    # сохраняются в исходной валюте. Канонические поля движка остаются в рублях.
+    phase_budgets = dict(data.get("phase_life_budgets", {}))
+    rate = Decimal(str(data.get("phase_exchange_rate", "1")))
+    if data.get("income_rhythm") == "cyclic" and data.get("life_phase") in {"work", "break"}:
+        phase = data["life_phase"]
+        phase_budgets[phase] = {
+            "critical_life": str(rounded),
+            "household_reserve": str(br_rounded),
+            "life_categories": {name: str(value) for name, value in groups.items()},
+            "household_reserve_categories": {name: str(value) for name, value in br_groups.items()},
+            "currency_code": data.get("phase_currency_code", "RUB"),
+            "currency_symbol": data.get("phase_currency_symbol", "₽"),
+            "exchange_rate_to_rub": str(rate),
+            "exchange_rate_mode": data.get("phase_exchange_rate_mode", "official"),
+            "exchange_rate_updated_at": data.get("phase_exchange_rate_updated_at"),
+            "completed": True,
+        }
+        exact = money2(exact * rate)
+        rounded = round_up_thousand(exact)
+        br_exact = money2(br_exact * rate)
+        br_rounded = round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")
+        items = [
+            {**item, "amount": str(money2(Decimal(item["amount"]) * rate)),
+             "monthly": str(money2(Decimal(item["monthly"]) * rate))}
+            for item in items
+        ]
+        br_items = [
+            {**item, "amount": str(money2(Decimal(item["amount"]) * rate)),
+             "monthly": str(money2(Decimal(item["monthly"]) * rate))}
+            for item in br_items
+        ]
+        groups = km_group_totals(items)
+        br_groups = br_group_totals(br_items)
+        storage_items = build_default_km_storage(items)
 
     await state.update_data(
         critical_life=str(rounded),
@@ -3509,18 +3770,33 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         household_reserve=str(br_rounded),
         household_reserve_exact=str(br_exact),
         household_reserve_categories={name: str(value) for name, value in br_groups.items()},
+        phase_life_budgets=phase_budgets,
+        km_items=items,
+        br_items=br_items,
     )
 
     data = await state.get_data()
     lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
     br_lines = [f"• {escape(name)} — {rub(value)}" for name, value in br_groups.items()]
     sustainable = money2(rounded + br_rounded)
+    phase_result_note = ""
+    if data.get("income_rhythm") == "cyclic" and data.get("life_phase") in {"work", "break"}:
+        phase_label = "рабочей части" if data["life_phase"] == "work" else "перерыва"
+        symbol = data.get("phase_currency_symbol", "₽")
+        phase_result_note = (
+            f"\n\nРасходы {phase_label} введены в <b>{escape(data.get('phase_currency_code', 'RUB'))}</b>: "
+            f"КМ {format_money_symbol(native_critical, symbol)}, "
+            f"БР {format_money_symbol(native_reserve, symbol)}. "
+            "Ниже показан рублёвый эквивалент для финансового алгоритма."
+        )
 
     await state.set_state(SetupStates.km_menu)
     caption = (
         f"{setup_progress(data, 6)}\n\n"
         "<b>СТОИМОСТЬ ВАШЕЙ ЖИЗНИ РАССЧИТАНА</b>\n\n"
-        "🆘 <b><u>КРИТИЧЕСКИЙ МИНИМУМ</u></b>\n\n"
+        + phase_result_note
+        + ("\n\n" if phase_result_note else "")
+        + "🆘 <b><u>КРИТИЧЕСКИЙ МИНИМУМ</u></b>\n\n"
         "<blockquote><b>КМ</b> — это обязательная стоимость вашей жизни. За неуплату этих "
         "расходов следуют санкции: отключат, оштрафуют, выгонят, отберут или случится "
         "что-то похуже. Я заполняю КМ в первую очередь, чтобы снизить риск.</blockquote>\n\n"
@@ -3936,6 +4212,9 @@ async def accept_km_storage(callback: CallbackQuery, state: FSMContext):
     await state.update_data(
         life_categories={name: str(value) for name, value in categories.items()}
     )
+    if data.get("phase_life_edit_mode"):
+        await save_edited_phase_life(callback.message, state, callback.from_user.id)
+        return
     if data.get("combined_life_onboarding"):
         if data.get("income_rhythm") == "cyclic":
             await state.update_data(contract_obligation_keys=[])
@@ -3944,6 +4223,98 @@ async def accept_km_storage(callback: CallbackQuery, state: FSMContext):
             await ask_pillow_policy(callback.message, state)
         return
     await start_household_reserve(callback.message, state)
+
+
+async def save_edited_phase_life(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+):
+    data = await state.get_data()
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await state.clear()
+        await message.answer("Профиль не найден. Запустите /start.")
+        return
+    phase = data.get("life_phase")
+    raw = data.get("phase_life_budgets", {}).get(phase)
+    if phase not in {"work", "break"} or not raw:
+        await message.answer("Не удалось сохранить жизнь этой части цикла. Попробуйте ещё раз.")
+        return
+    budget = PhaseLifeBudget(
+        critical_life=raw["critical_life"],
+        household_reserve=raw["household_reserve"],
+        life_categories=raw.get("life_categories", {}),
+        household_reserve_categories=raw.get("household_reserve_categories", {}),
+        currency_code=raw.get("currency_code", "RUB"),
+        currency_symbol=raw.get("currency_symbol", "₽"),
+        exchange_rate_to_rub=raw.get("exchange_rate_to_rub", "1"),
+        exchange_rate_mode=raw.get("exchange_rate_mode", "official"),
+        exchange_rate_updated_at=raw.get("exchange_rate_updated_at"),
+        completed=True,
+    )
+    allocator.settings.phase_life_budgets[phase] = budget
+    if phase == "break":
+        allocator.settings.critical_life = budget.critical_life_rub
+        allocator.settings.household_reserve = budget.household_reserve_rub
+        allocator.settings.life_categories = {
+            name: money2(amount * budget.exchange_rate_to_rub)
+            for name, amount in budget.life_categories.items()
+        }
+        allocator.settings.household_reserve_categories = {
+            name: money2(amount * budget.exchange_rate_to_rub)
+            for name, amount in budget.household_reserve_categories.items()
+        }
+        allocator.settings.__post_init__()
+    db.save_allocator(telegram_id, allocator)
+    await state.clear()
+    phase_label = "Рабочая жизнь" if phase == "work" else "Жизнь в перерыве"
+    await message.answer(
+        f"<b>{phase_label.upper()} СОХРАНЕНА</b>\n\n"
+        f"Валюта — <b>{escape(budget.currency_code)}</b>. "
+        "Теперь Аллокатор различает расходы двух частей финансового цикла.",
+        reply_markup=main_menu_keyboard(telegram_id),
+    )
+
+
+@router.callback_query(F.data.startswith("phaselife:fill:"))
+async def start_phase_life_from_profile(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or allocator.settings.income_rhythm != "cyclic":
+        await callback.message.answer("Эта настройка доступна только циклическому профилю.")
+        return
+    phase = callback.data.rsplit(":", 1)[1]
+    if phase not in {"work", "break"}:
+        return
+    await state.clear()
+    await state.update_data(
+        income_rhythm="cyclic",
+        profile_type="cyclic",
+        life_phase=phase,
+        phase_life_edit_mode=True,
+        combined_life_onboarding=True,
+        km_items=[], br_items=[], deferred_br_items=[],
+        has_debts=allocator.settings.has_debts,
+        phase_life_budgets={
+            key: {
+                "critical_life": str(value.critical_life),
+                "household_reserve": str(value.household_reserve),
+                "life_categories": {name: str(amount) for name, amount in value.life_categories.items()},
+                "household_reserve_categories": {
+                    name: str(amount) for name, amount in value.household_reserve_categories.items()
+                },
+                "currency_code": value.currency_code,
+                "currency_symbol": value.currency_symbol,
+                "exchange_rate_to_rub": str(value.exchange_rate_to_rub),
+                "exchange_rate_mode": value.exchange_rate_mode,
+                "exchange_rate_updated_at": value.exchange_rate_updated_at,
+                "completed": value.completed,
+            }
+            for key, value in allocator.settings.phase_life_budgets.items()
+        },
+    )
+    await ask_phase_currency(callback.message, state)
 
 
 @router.callback_query(SetupStates.km_envelopes_menu, F.data == "kmstorage:edit")
@@ -4511,7 +4882,7 @@ async def apply_br_edit_period(message: Message, state: FSMContext, months: Deci
 async def br_final_continue(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    if data.get("income_rhythm") == "cyclic":
+    if data.get("income_rhythm") == "cyclic" and not data.get("current_cycle_phase"):
         await state.update_data(contract_obligation_keys=[])
         await show_contract_obligations(callback.message, state)
     else:
@@ -5290,6 +5661,10 @@ async def start_current_state(
         )
         return
 
+    if data.get("income_rhythm") == "cyclic":
+        await ask_current_intercontract(message, state)
+        return
+
     await ask_current_pillow(message, state)
 
 
@@ -5803,6 +6178,27 @@ def build_settings_from_data(
     planned_taxes = planned_taxes_from_storage(
         data.get("km_storage_items", [])
     )
+    phase_life_budgets = {
+        phase: PhaseLifeBudget(
+            critical_life=raw.get("critical_life", "0"),
+            household_reserve=raw.get("household_reserve", "0"),
+            life_categories=raw.get("life_categories", {}),
+            household_reserve_categories=raw.get("household_reserve_categories", {}),
+            currency_code=raw.get("currency_code", "RUB"),
+            currency_symbol=raw.get("currency_symbol", "₽"),
+            exchange_rate_to_rub=raw.get("exchange_rate_to_rub", "1"),
+            exchange_rate_mode=raw.get("exchange_rate_mode", "official"),
+            exchange_rate_updated_at=raw.get("exchange_rate_updated_at"),
+            completed=bool(raw.get("completed", False)),
+        )
+        for phase, raw in data.get("phase_life_budgets", {}).items()
+        if phase in {"work", "break"} and isinstance(raw, dict)
+    }
+    if data.get("income_rhythm") == "cyclic" and phase_life_budgets:
+        # Явная незаполненная фаза отличает новый двухфазный онбординг от
+        # миграции старого профиля, где единственная жизнь считалась перерывом.
+        phase_life_budgets.setdefault("work", PhaseLifeBudget(completed=False))
+        phase_life_budgets.setdefault("break", PhaseLifeBudget(completed=False))
 
     return UserSettings(
         has_debts=data[
@@ -5840,6 +6236,7 @@ def build_settings_from_data(
             name: Decimal(str(amount))
             for name, amount in data.get("contract_obligations", {}).items()
         },
+        phase_life_budgets=phase_life_budgets,
 
         tax_rate=Decimal(
             data["tax_rate"]
@@ -5996,7 +6393,7 @@ def build_state_from_data(
             else "",
 
         current_phase_months_remaining=
-            cycle_months_remaining,
+            Decimal(str(data.get("current_phase_months_remaining", cycle_months_remaining))),
 
         pillow_force_majeure=
             pillow_force,

@@ -133,6 +133,14 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("Баланс Стабилизатора", "settings:stabilizer_balance")],
             [("Фонд Зарплаты", "settings:intercontract_balance")],
             [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
+            *(
+                [
+                    [("Изменить рабочую жизнь", "phaselife:fill:work")],
+                    [("Изменить жизнь в перерыве", "phaselife:fill:break")],
+                ]
+                if s.income_rhythm == "cyclic"
+                else []
+            ),
             [("💰 Средний доход", "settings:income")],
             [("Ритм поступлений", "settings:rhythm")],
             [("Типы доходов", "settings:income_types")],

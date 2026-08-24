@@ -17,6 +17,17 @@ async def start_intercontract_period(callback: CallbackQuery):
     if allocator is None or allocator.settings.income_rhythm != "cyclic":
         await callback.message.answer("Межконтрактный период недоступен для этого профиля.")
         return
+    break_life = allocator.settings.phase_life("break")
+    if break_life is None or not break_life.completed:
+        await callback.message.answer(
+            "<b>СНАЧАЛА ЗАПОЛНИТЕ ЖИЗНЬ В ПЕРЕРЫВЕ</b>\n\n"
+            "Без этих расходов Аллокатор не сможет правильно рассчитать Фонд Зарплаты.",
+            reply_markup=keyboard([
+                [("Заполнить жизнь в перерыве", "phaselife:fill:break")],
+                [("← Главное меню", "menu:back")],
+            ]),
+        )
+        return
     result = allocator.start_intercontract_break()
     db.save_allocator(callback.from_user.id, allocator)
     await callback.message.answer(
@@ -67,6 +78,17 @@ async def finish_intercontract_period(callback: CallbackQuery):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is None:
+        return
+    work_life = allocator.settings.phase_life("work")
+    if work_life is None or not work_life.completed:
+        await callback.message.answer(
+            "<b>СНАЧАЛА ЗАПОЛНИТЕ РАБОЧУЮ ЖИЗНЬ</b>\n\n"
+            "Так Аллокатор будет знать ваши личные расходы во время работы.",
+            reply_markup=keyboard([
+                [("Заполнить рабочую жизнь", "phaselife:fill:work")],
+                [("← Главное меню", "menu:back")],
+            ]),
+        )
         return
     try:
         allocator.start_new_work_phase()

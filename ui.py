@@ -49,6 +49,23 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         rows.append([("Прогноз распределения дохода", "menu:forecast")])
 
     if allocator and allocator.settings.income_rhythm == "cyclic":
+        missing_phase = next(
+            (
+                phase for phase in ("work", "break")
+                if not (
+                    allocator.settings.phase_life(phase)
+                    and allocator.settings.phase_life(phase).completed
+                )
+            ),
+            None,
+        )
+        if missing_phase:
+            label = (
+                "⚠️ Заполнить рабочую жизнь"
+                if missing_phase == "work"
+                else "⚠️ Заполнить жизнь в перерыве"
+            )
+            rows.append([(label, f"phaselife:fill:{missing_phase}")])
         if not allocator.state.intercontract_break_active:
             rows.append([("Начать перерыв", "intercontract:start")])
         elif allocator.state.intercontract_months_remaining > 0:
