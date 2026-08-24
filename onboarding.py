@@ -50,6 +50,7 @@ CRITICAL_MINIMUM_CALCULATED_IMAGE = (
 HOUSEHOLD_RESERVE_CALCULATED_IMAGE = (
     INTRO_IMAGES_DIR / "household_reserve_calculated.png"
 )
+LIFE_COST_CALCULATED_IMAGE = INTRO_IMAGES_DIR / "life_cost_calculated.png"
 
 # Стандартный эффект Telegram «Праздник / конфетти». Эффекты работают только
 # в личных чатах и могут быть недоступны в отдельных версиях клиента.
@@ -619,7 +620,18 @@ BR_CATEGORIES = {
     "gym": ("Спорт", "Добавьте расходы на физическую активность. Для абонемента укажите его полную стоимость и срок действия; для разовых занятий посмотрите расходы за <b>3–6 месяцев</b>."),
     "leisure": ("Развлечения", "Посмотрите расходы за <b>3–6 месяцев</b>: кино, театр, концерты, музеи, игры, парки и другие способы проводить свободное время."),
     "gifts": ("Подарки", "Посмотрите расходы за <b>12 месяцев</b>, чтобы учесть дни рождения, праздники, свадьбы, подарки семье, детям, друзьям, коллегам и учителям."),
-    "repairs": ("Быт", "Посмотрите расходы за <b>12 месяцев</b>: мелкий ремонт, сантехника, ремонт техники, посуда, текстиль, инструменты и бытовые мелочи."),
+    "repairs": (
+        "Быт",
+        "В доме постоянно что-то заканчивается, изнашивается или требует замены. "
+        "Эти деньги помогают спокойно купить нужную вещь, не создавая отдельную финансовую проблему.\n\n"
+        "Примеры:\n"
+        "• заменить кран или полку;\n"
+        "• починить ноутбук;\n"
+        "• купить новую сковороду;\n"
+        "• заменить постельное бельё;\n"
+        "• приобрести лампочки, фильтры или небольшие инструменты.\n\n"
+        "Посмотрите расходы за <b>12 месяцев</b>.",
+    ),
     "services": ("Услуги", "Посмотрите расходы за <b>6–12 месяцев</b>: электрик, мастер на дом, клининг, дезинфекция и дезинсекция, грузчики, доставка и перевозка вещей."),
     "subscriptions": ("Подписки", "Подписки с оплатой раз в несколько месяцев или раз в год, которые вы хотите заранее учитывать в обычном бюджете."),
     "habits": (
@@ -639,7 +651,7 @@ BR_CATEGORIES = {
 
 LIFE_BR_OPTIONS = {
     "care": [[("Парикмахерская", "hair"), ("Барбершоп", "barber")], [("Маникюр и педикюр", "nails"), ("Косметолог", "cosmetologist")], [("Брови и ресницы", "brows"), ("Депиляция", "depilation")], [("Расслабляющий массаж и SPA", "spa"), ("Косметика", "cosmetics")]],
-    "leisure": [[("Кино", "cinema"), ("Театр", "theatre")], [("Концерты", "concerts"), ("Музеи и выставки", "museums")], [("Игры", "games"), ("Парки и аттракционы", "parks")], [("Встречи и мероприятия", "events")]],
+    "leisure": [[("Кино", "cinema"), ("Театр", "theatre")], [("Концерты", "concerts"), ("Музеи", "museums")], [("Игры", "games"), ("Хобби", "hobby")], [("Встречи и мероприятия", "events")], [("Дом на сутки", "short_stay")]],
     "gifts": [[("Семье", "family"), ("Детям", "children")], [("Друзьям", "friends"), ("Коллегам", "colleagues")], [("Учителям", "teachers"), ("Праздники", "holidays")], [("Свадьбы и события", "events")]],
     "gym": [[("Спортзал", "gym"), ("Бассейн", "pool")], [("Групповые занятия", "groups"), ("Тренер", "coach")], [("Спортивная секция", "section"), ("Экипировка", "equipment")], [("Соревнования и сборы", "competitions")]],
     "repairs": [[("Мелкий ремонт", "repairs"), ("Сантехника", "plumbing")], [("Ремонт техники", "appliances"), ("Посуда", "dishes")], [("Текстиль", "textiles"), ("Бытовые мелочи", "small")], [("Инструменты", "tools"), ("Растения и декор", "decor")]],
@@ -648,12 +660,23 @@ LIFE_BR_OPTIONS = {
 
 LIFE_BR_LABELS = {
     "care": {"hair": "Парикмахерская", "barber": "Барбершоп", "nails": "Маникюр и педикюр", "cosmetologist": "Косметолог", "brows": "Брови и ресницы", "depilation": "Депиляция", "spa": "Расслабляющий массаж и SPA", "cosmetics": "Косметика"},
-    "leisure": {"cinema": "Кино", "theatre": "Театр", "concerts": "Концерты", "museums": "Музеи и выставки", "games": "Игры", "parks": "Парки и аттракционы", "events": "Встречи и мероприятия"},
+    "leisure": {"cinema": "Кино", "theatre": "Театр", "concerts": "Концерты", "museums": "Музеи", "games": "Игры", "hobby": "Хобби", "events": "Встречи и мероприятия", "short_stay": "Дом на сутки"},
     "gifts": {"family": "Подарки семье", "children": "Подарки детям", "friends": "Подарки друзьям", "colleagues": "Подарки коллегам", "teachers": "Подарки учителям", "holidays": "Подарки на праздники", "events": "Подарки на свадьбы и события"},
     "gym": {"gym": "Спортзал", "pool": "Бассейн", "groups": "Групповые занятия", "coach": "Тренер", "section": "Спортивная секция", "equipment": "Спортивная экипировка", "competitions": "Соревнования и сборы"},
     "repairs": {"repairs": "Мелкий ремонт", "plumbing": "Сантехника", "appliances": "Ремонт техники", "dishes": "Посуда", "textiles": "Текстиль", "small": "Бытовые мелочи", "tools": "Инструменты", "decor": "Растения и декор"},
     "services": {"electrician": "Электрик", "handyman": "Мастер на дом", "cleaning": "Клининг", "pest": "Дезинсекция", "disinfection": "Дезинфекция", "movers": "Грузчики", "delivery": "Доставка", "transport": "Перевозка вещей"},
 }
+
+def life_input_keyboard(back_callback: str) -> InlineKeyboardMarkup:
+    """Явно разделяет возврат в категорию и выход в общее меню жизни."""
+    return keyboard([[('← Назад', back_callback), ('Меню Жизни', 'km:cancel')]])
+
+
+def current_life_back_callback(data: dict) -> str:
+    category = data.get("pending_km_category") or ""
+    if data.get("pending_life_destination") == "br" or category in BR_CATEGORIES:
+        return f"lifebr:{category}"
+    return f"kmcat:{category}"
 
 
 def should_auto_route_to_reserve(
@@ -683,7 +706,9 @@ def life_classification_reason(item: dict, destination: str) -> str:
     if subtype in {"property_tax", "land_tax", "tax"}:
         return "налоговое обязательство; деньги будут храниться в конверте «Налоги»"
     if destination == "br" and months > 1:
-        return f"оплата происходит раз в {money2(months):g} мес."
+        normalized_months = money2(months)
+        formatted_months = format(normalized_months, "f").rstrip("0").rstrip(".")
+        return f"оплата происходит раз в {formatted_months} мес."
     factual = {
         ("food", "outside"): "кафе и рестораны учитываются как нерегулярная часть питания",
         ("food", "fastfood"): "фастфуд учитывается как нерегулярная часть питания",
@@ -1649,13 +1674,14 @@ async def choose_combined_reserve_category(callback: CallbackQuery, state: FSMCo
         )
         return
     if key == "clothes":
-        await state.update_data(pending_km_item_name="Одежда")
-        await state.set_state(SetupStates.km_item_amount)
+        await state.set_state(SetupStates.km_menu)
         await callback.message.answer(
             f"<b>ОДЕЖДА</b>\n\n{hint}\n\n"
-            "Если покупки на маркетплейсах смешаны с другими товарами, используйте реалистичную приблизительную сумму.\n\n"
-            "——————\n<b>→ Введите общую сумму.</b>\n(Период укажем в следующем сообщении)",
-            reply_markup=keyboard([[("✖️ Отмена", "km:cancel")]]),
+            "Если покупки на маркетплейсах смешаны с другими товарами, используйте реалистичную приблизительную сумму.",
+            reply_markup=keyboard([
+                [("Добавить общую сумму", "lifeclothes:total")],
+                [("← Назад", "km:cancel"), ("+ Уточнить покупку", "lifeclothes:detail")],
+            ]),
         )
         return
     await state.set_state(SetupStates.km_item_name)
@@ -1664,7 +1690,33 @@ async def choose_combined_reserve_category(callback: CallbackQuery, state: FSMCo
         f"{escape(hint)}\n\n"
         "——————\n<b>→ Введите название расхода.</b>\n"
         "<b>Например:</b> Зимняя обувь или Абонемент.",
-        reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+        reply_markup=life_input_keyboard(f"lifebr:{key}"),
+    )
+
+
+@router.callback_query(F.data.startswith("lifeclothes:"))
+async def choose_clothes_input(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    action = callback.data.rsplit(":", 1)[1]
+    await state.update_data(
+        pending_life_destination="br",
+        pending_km_category="clothes",
+        pending_km_category_label="Одежда",
+        pending_km_subcategory="total" if action == "total" else "detail",
+    )
+    if action == "detail":
+        await state.set_state(SetupStates.km_item_name)
+        await callback.message.answer(
+            "<b>УТОЧНИТЬ ПОКУПКУ</b>\n\n——————\n<b>→ Введите название покупки.</b>",
+            reply_markup=life_input_keyboard("lifebr:clothes"),
+        )
+        return
+    await state.update_data(pending_km_item_name="Одежда")
+    await state.set_state(SetupStates.km_item_amount)
+    await callback.message.answer(
+        "<b>ОДЕЖДА — ОБЩАЯ СУММА</b>\n\n——————\n<b>→ Введите сумму.</b>\n"
+        "(Период укажем в следующем сообщении)",
+        reply_markup=life_input_keyboard("lifebr:clothes"),
     )
 
 
@@ -1685,7 +1737,7 @@ async def choose_life_reserve_item(callback: CallbackQuery, state: FSMContext):
         await state.set_state(SetupStates.km_item_name)
         await callback.message.answer(
             f"<b>{escape(BR_CATEGORIES[category][0].upper())}</b>\n\n——————\n<b>→ Введите название расхода.</b>",
-            reply_markup=keyboard([[("← Назад", f"lifebr:{category}")]]),
+            reply_markup=life_input_keyboard(f"lifebr:{category}"),
         )
         return
     if not label:
@@ -1699,9 +1751,9 @@ async def choose_life_reserve_item(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(SetupStates.km_item_amount)
     await callback.message.answer(
-        f"<b>{escape(label.upper())}</b>\n\n{BR_CATEGORIES[category][1]}\n\n"
-        "——————\n<b>→ Введите сумму.</b>\n(Период укажем в следующем сообщении)",
-        reply_markup=keyboard([[("✖️ Отмена", "km:cancel")]]),
+        f"<b>{escape(label.upper())}</b>\n\n"
+        + "——————\n<b>→ Введите сумму.</b>\n(Период укажем в следующем сообщении)",
+        reply_markup=life_input_keyboard(f"lifebr:{category}"),
     )
 
 
@@ -1928,7 +1980,7 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         f"{setup_progress(data, 5)}\n\n"
         f"<b>{escape(label.upper())}</b>\n\n"
         + prompt,
-        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        reply_markup=life_input_keyboard(current_life_back_callback(data)),
     )
 
 
@@ -2060,7 +2112,7 @@ async def ask_housing_amount(message: Message, state: FSMContext):
         f"{explanations.get(subtype, explanations['other'])}\n\n"
         "——————\n<b>→ Введите сумму.</b>"
         f"{suffix}",
-        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
     )
 
 
@@ -2260,7 +2312,7 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
             "——————\n"
             "<b>→ Введите название автомобиля.</b>\n"
             "<b>Например:</b> Автомобиль, Лада, Volkswagen",
-            reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+            reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
         )
         return
     if subtype == "other":
@@ -2305,7 +2357,7 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
         + ("Посмотрите расходы минимум за <b>6 месяцев</b>.\n\n" if subtype not in {"pass", "optional_taxi"} else "")
         + "——————\n<b>→ Введите сумму.</b>\n"
         + ("(Срок укажем в следующем сообщении)" if subtype == "pass" else "(Период укажем в следующем сообщении)"),
-        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
     )
 
 
@@ -2361,7 +2413,7 @@ async def choose_car_expense(callback: CallbackQuery, state: FSMContext):
         f"<b>{escape(label.upper())}</b>\n\n{explanations[code]}\n\n"
         "Рекомендуем посмотреть расходы минимум за <b>6 месяцев</b>.\n\n"
         "——————\n<b>→ Введите сумму.</b>\n(Период укажем в следующем сообщении)",
-        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
     )
 
 
@@ -2405,11 +2457,9 @@ async def ask_preset_km_amount(message: Message, state: FSMContext, name: str):
     recommendations = {
         "food": "Посмотрите расходы за <b>3–6 месяцев</b> и введите общую сумму за выбранный период.",
         "health": "Посмотрите расходы за <b>12 месяцев</b>: это поможет учесть сезонность болезней и плановых врачей.",
-        "pets": "Посмотрите расходы за <b>12 месяцев</b>, включая сезонные покупки и ветеринара.",
         "transport": "Посмотрите расходы минимум за <b>6 месяцев</b>.",
         "habits": "Посмотрите фактические расходы минимум за <b>3 месяца</b>.",
         "fees": "Проверьте банковскую аналитику и выписки за <b>12 месяцев</b>.",
-        "children": "Посмотрите расходы за <b>6–12 месяцев</b>, чтобы не пропустить сезонные платежи.",
     }
     recommendation = recommendations.get(category)
     health_texts = {
@@ -2481,7 +2531,7 @@ async def ask_preset_km_amount(message: Message, state: FSMContext, name: str):
         + (f"{recommendation}\n\n" if recommendation else "")
         + "——————\n<b>→ Введите сумму.</b>\n"
         "(Период укажем в следующем сообщении)",
-        reply_markup=keyboard([[("Отмена", "km:cancel")]]),
+        reply_markup=life_input_keyboard(f"kmcat:{category}"),
     )
 
 
@@ -2540,7 +2590,7 @@ async def choose_quick_km_subcategory(callback: CallbackQuery, state: FSMContext
         await callback.message.answer(
             f"<b>{escape(category_labels[category].upper())}</b>\n\n——————\n"
             "<b>→ Введите название расхода.</b>",
-            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+            reply_markup=life_input_keyboard(f"kmcat:{category}"),
         )
         return
     await ask_preset_km_amount(callback.message, state, labels[category][subtype])
@@ -2717,7 +2767,7 @@ async def ask_communication_amount(message: Message, state: FSMContext):
         f"<b>{escape(item_name.upper())}</b>\n\n{texts.get(subtype, texts['other'])}\n\n"
         "——————\n<b>→ Введите сумму.</b>"
         + ("" if subtype in {"mobile", "internet"} else "\n(Период укажем в следующем сообщении)"),
-        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
     )
 
 
@@ -2837,7 +2887,7 @@ async def choose_education_subcategory(callback: CallbackQuery, state: FSMContex
         await callback.message.answer(
             "<b>ДРУГОЙ РАСХОД НА ОБРАЗОВАНИЕ</b>\n\n——————\n"
             "<b>→ Введите название расхода.</b>",
-            reply_markup=keyboard([[("Отмена", "km:cancel")]]),
+            reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
         )
         return
     await state.set_state(SetupStates.km_item_name)
@@ -2850,7 +2900,7 @@ async def choose_education_subcategory(callback: CallbackQuery, state: FSMContex
         f"<b>{escape(labels[subtype].upper())}</b>\n\n{prompt}\n\n"
         f"<b>Например:</b> {escape('Университет' if subtype == 'college' else labels[subtype])}.\n\n"
         "——————\n<b>→ Введите название.</b>",
-        reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+        reply_markup=life_input_keyboard("kmcat:education"),
     )
 
 
@@ -2880,7 +2930,7 @@ async def km_item_name(message: Message, state: FSMContext):
             if is_tax
             else "(Период укажем в следующем сообщении)"
         ),
-        reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+        reply_markup=life_input_keyboard(current_life_back_callback(data)),
     )
 
 
@@ -2927,7 +2977,7 @@ async def km_item_amount(message: Message, state: FSMContext):
         await message.answer(
             "<b>СКОЛЬКО ЗАНЯТИЙ ВХОДИТ В АБОНЕМЕНТ?</b>\n\n"
             "——————\n<b>→ Введите количество занятий числом.</b>",
-            reply_markup=keyboard([[("✖️ Отмена", "km:cancel")]]),
+            reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
         )
         return
     if category == "education" and subtype == "college":
@@ -2954,7 +3004,7 @@ async def km_item_amount(message: Message, state: FSMContext):
             "——————\n"
             "<b>→ Введите точную или ориентировочную дату.</b>\n"
             f"<b>Например:</b> <code>01.12.{example_year}</code>",
-            reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+            reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
         )
         return
     await state.set_state(SetupStates.km_item_period)
@@ -2964,7 +3014,8 @@ async def km_item_amount(message: Message, state: FSMContext):
         reply_markup=keyboard([
             [("В неделю", "kmperiod:week"), ("В месяц", "kmperiod:1")],
             [("За 6 месяцев", "kmperiod:6"), ("В год", "kmperiod:12")],
-            [("Другой период", "kmperiod:custom"), ("Отмена", "km:cancel")],
+            [("Другой период", "kmperiod:custom")],
+            [("← Назад", current_life_back_callback(data)), ("Меню Жизни", "km:cancel")],
         ]),
     )
 
@@ -2996,7 +3047,7 @@ async def education_pass_lessons(message: Message, state: FSMContext):
         "<b>СКОЛЬКО ЗАНЯТИЙ ОБЫЧНО БЫВАЕТ В НЕДЕЛЮ?</b>\n\n"
         "Если график меняется, укажите осторожную среднюю в меньшую сторону.\n\n"
         "——————\n<b>→ Введите число.</b>\n<b>Например:</b> 1 или 2.",
-        reply_markup=keyboard([[("✖️ Отмена", "km:cancel")]]),
+        reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
     )
 
 
@@ -3022,7 +3073,7 @@ async def education_lesson_count(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(
             "<b>СКОЛЬКО ЗАНЯТИЙ БЫВАЕТ В МЕСЯЦ?</b>\n\n——————\n"
             "<b>→ Введите целое число.</b>",
-            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+            reply_markup=life_input_keyboard("kmcat:education"),
         )
         return
     lessons_per_week = Decimal(value)
@@ -3052,7 +3103,7 @@ async def education_due_choice(callback: CallbackQuery, state: FSMContext):
     if value == "date":
         await callback.message.answer(
             "——————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
-            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+            reply_markup=life_input_keyboard("kmcat:education"),
         )
         return
     months = int(value.rsplit(":", 1)[1])
@@ -3136,7 +3187,7 @@ async def km_item_period(callback: CallbackQuery, state: FSMContext):
                 else "<b>ЗА СКОЛЬКО МЕСЯЦЕВ?</b>\n\n"
                 "Введите число месяцев. Например: <code>2</code> или <code>18</code>."
             ),
-            reply_markup=keyboard([[('Отмена', 'km:cancel')]]),
+            reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
         )
         return
     await save_km_item(callback.message, state, Decimal(value))
@@ -3196,6 +3247,14 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         notice = f"Добавлено: <b>{escape(br_item['name'])}</b> — {rub(monthly)} / мес."
         if category in {"transport", "children", "food"}:
             await show_km_category_after_save(message, state, category, notice)
+        elif category == "clothes":
+            await message.answer(
+                notice + "\n\n<b>ОДЕЖДА</b>\n\nВыберите следующий способ добавления.",
+                reply_markup=keyboard([
+                    [("Добавить общую сумму", "lifeclothes:total")],
+                    [("← Назад", "km:cancel"), ("+ Уточнить покупку", "lifeclothes:detail")],
+                ]),
+            )
         elif category in LIFE_BR_OPTIONS:
             label, hint = BR_CATEGORIES[category]
             rows = [[(text, f"lifebrquick:{category}:{code}") for text, code in row] for row in LIFE_BR_OPTIONS[category]]
@@ -3303,7 +3362,7 @@ async def education_payment_next(callback: CallbackQuery, state: FSMContext):
             "<b>КРУПНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ</b>\n\n"
             "Укажите сумму, которую должны внести именно вы.\n\n"
             "——————\n<b>→ Какую сумму вам нужно внести самостоятельно?</b>",
-            reply_markup=keyboard([[("← Назад", "km:cancel")]]),
+            reply_markup=life_input_keyboard("kmcat:education"),
         )
         return
     await show_km_menu(callback.message, state)
@@ -3404,24 +3463,50 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
     caption = (
         f"{setup_progress(data, 6)}\n\n"
         "<b>СТОИМОСТЬ ВАШЕЙ ЖИЗНИ РАССЧИТАНА</b>\n\n"
-        "<b>КРИТИЧЕСКИЙ МИНИМУМ</b>\n"
+        "🆘 <b><u>КРИТИЧЕСКИЙ МИНИМУМ</u></b>\n\n"
+        "<blockquote><b>КМ</b> — это обязательная стоимость вашей жизни. За неуплату этих "
+        "расходов следуют санкции: отключат, оштрафуют, выгонят, отберут или случится "
+        "что-то похуже. Я заполняю КМ в первую очередь, чтобы снизить риск.</blockquote>\n\n"
         + ("\n".join(lines) if lines else "• Расходы не добавлены")
-        + f"\nКритический минимум — <b>{rub(rounded)}</b>\n\n"
-        "<b>БЫТОВОЙ РЕЗЕРВ</b>\n"
+        + f"\n———\n<b>КМ — {rub(rounded)}</b>\n\n"
+        "💚 <b><u>БЫТОВОЙ РЕЗЕРВ</u></b>\n\n"
+        "<blockquote><b>БР</b> — это расходы нормальной жизни, которые трудно прогнозировать. "
+        "Они возникают регулярно, но не каждый месяц. При серьёзном падении дохода некоторые "
+        "из них можно временно сократить или перенести. Другие являются необходимыми, но редкими. "
+        "Поэтому Бытовой резерв накапливается во <b>вторую</b> очередь после Критического минимума. "
+        "Бытовой резерв сложно потратить целиком за один месяц: он устроен так, что деньги на нём "
+        "будут почти всегда.</blockquote>\n\n"
         + ("\n".join(br_lines) if br_lines else "• Расходы не добавлены")
-        + f"\nБытовой резерв — <b>{rub(br_rounded)}</b>\n\n"
-        f"<b>УСТОЙЧИВАЯ ЖИЗНЬ — {rub(sustainable)}</b>\n\n"
-        "Аллокатор разделил обязательные и нерегулярные расходы. Проверьте результат: "
+        + f"\n———\n<b>БР — {rub(br_rounded)}</b>\n\n"
+        "✳️ <b><u>УСТОЙЧИВАЯ ЖИЗНЬ</u></b>\n\n"
+        "<blockquote><b>УЖ</b> — это сумма Критического минимума и Бытового резерва. "
+        "Если вы достигли уровня Устойчивой жизни, вам не придётся беспокоиться о внезапных "
+        "тратах.</blockquote>\n\n"
+        f"КМ — {rub(rounded)}\nБР — {rub(br_rounded)}\n———\n<b>УЖ — {rub(sustainable)}</b>\n\n"
+        "Я разделил обязательные и нерегулярные расходы. Проверьте результат: "
         "распределение можно изменить перед продолжением."
     )
     reply_markup = keyboard([
-        [('Продолжить', 'kmfinal:continue')],
+        [('Продолжить →', 'kmfinal:continue')],
         [('Почему так распределено?', 'lifeclassification:show')],
-        [('Редактировать расходы', 'lifeedit:list')],
-        [('Изменить сумму КМ', 'kmfinal:override'), ('Изменить сумму БР', 'lifeoverride:br')],
+        [('✎ Редактировать расходы', 'lifeedit:list')],
+        [('✎ Изменить сумму КМ', 'kmfinal:override')],
+        [('✎ Изменить сумму БР', 'lifeoverride:br')],
     ])
     if data.get("combined_life_onboarding"):
-        await callback.message.answer(caption, reply_markup=reply_markup)
+        if LIFE_COST_CALCULATED_IMAGE.exists() and len(caption) <= 1024:
+            await callback.message.answer_photo(
+                photo=FSInputFile(LIFE_COST_CALCULATED_IMAGE),
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+        else:
+            if LIFE_COST_CALCULATED_IMAGE.exists():
+                await callback.message.answer_photo(
+                    photo=FSInputFile(LIFE_COST_CALCULATED_IMAGE),
+                    caption="<b>СТОИМОСТЬ ВАШЕЙ ЖИЗНИ РАССЧИТАНА</b>",
+                )
+            await callback.message.answer(caption, reply_markup=reply_markup)
         return
     try:
         await callback.message.answer_photo(
@@ -3652,7 +3737,7 @@ async def km_edit_name_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.update_data(pending_km_edit_index=int(callback.data.rsplit(":", 1)[1]))
     await state.set_state(SetupStates.km_edit_name)
-    await callback.message.answer("Введите новое название.", reply_markup=keyboard([[('Отмена', 'km:cancel')]]))
+    await callback.message.answer("Введите новое название.", reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())))
 
 
 @router.message(SetupStates.km_edit_name)

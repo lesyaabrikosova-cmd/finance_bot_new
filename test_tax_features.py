@@ -16,6 +16,7 @@ from onboarding import (  # noqa: E402
     housing_item_name,
     km_item_display_name,
     km_item_totals_by_name,
+    life_classification_reason,
     life_categories_from_storage,
     matching_housing_total,
     matching_communication_total,
@@ -43,6 +44,13 @@ from storage import (  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_life_classification_period_drops_trailing_zeroes(self):
+        item = {"category": "subscriptions", "months": "12.00"}
+        self.assertEqual(
+            life_classification_reason(item, "br"),
+            "оплата происходит раз в 12 мес.",
+        )
+
     def test_children_reserve_category_survives_settings_serialization(self):
         settings = UserSettings(
             has_debts=False,
