@@ -1314,12 +1314,14 @@ class FinancialAllocator:
         self.state.intercontract_months_remaining = self.settings.income_gap_months
         self.state.current_cycle_phase = "break"
         self.state.current_phase_months_remaining = self.settings.income_gap_months
-        # Обязательства рабочей части к этому моменту считаются исполненными.
-        # В следующем рабочем цикле резерв будет сформирован заново.
+        # Резерв завершившейся рабочей части считается использованным. С этого
+        # момента новые деньги заранее готовят обязательства следующей работы.
         self.state.contract_obligations_reserve = ZERO
         return {
             "months_remaining": self.state.intercontract_months_remaining,
             "monthly_salary": self.intercontract_monthly_salary,
+            "next_work_obligations": self.settings.contract_obligations_total,
+            "next_work_obligations_missing": self.settings.contract_obligations_total,
         }
 
     def pay_intercontract_salary(self) -> Decimal:
@@ -1344,6 +1346,16 @@ class FinancialAllocator:
         self.state.current_cycle_phase = "work"
         self.state.current_phase_months_remaining = self.settings.income_work_months
         self.state.cycle_income = ZERO
+
+    def advance_work_month(self) -> Decimal:
+        """Уменьшает счётчик рабочей части при начале нового периода."""
+        if self.settings.income_rhythm != "cyclic" or self.state.current_cycle_phase != "work":
+            return self.state.current_phase_months_remaining
+        self.state.current_phase_months_remaining = max(
+            ZERO,
+            self.state.current_phase_months_remaining - ONE,
+        )
+        return self.state.current_phase_months_remaining
 
     @property
     def profile_id(self) -> str:

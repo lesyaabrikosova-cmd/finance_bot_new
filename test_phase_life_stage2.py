@@ -92,6 +92,28 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         self.assertEqual(allocator.state.pillow_stabilizer, Decimal("10000"))
         self.assertEqual(allocator.state.pillow_force_majeure, Decimal("10000"))
 
+    def test_starting_break_opens_next_work_obligations_again(self):
+        allocator = self.cyclic_allocator({
+            "break": PhaseLifeBudget(critical_life="40000", completed=True),
+        })
+        allocator.settings.contract_obligations = {"ЖКХ": Decimal("5000")}
+        allocator.state.current_cycle_phase = "work"
+        allocator.state.contract_obligations_reserve = Decimal("5000")
+
+        result = allocator.start_intercontract_break()
+
+        self.assertEqual(allocator.state.contract_obligations_reserve, Decimal("0"))
+        self.assertEqual(result["next_work_obligations_missing"], Decimal("5000"))
+
+    def test_new_period_advances_only_work_phase_counter(self):
+        allocator = self.cyclic_allocator({})
+        allocator.state.current_cycle_phase = "work"
+        allocator.state.current_phase_months_remaining = Decimal("3")
+
+        self.assertEqual(allocator.advance_work_month(), Decimal("2"))
+        allocator.state.current_cycle_phase = "break"
+        self.assertEqual(allocator.advance_work_month(), Decimal("2"))
+
 
 if __name__ == "__main__":
     unittest.main()

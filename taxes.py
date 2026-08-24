@@ -424,8 +424,12 @@ async def tax_obligation_name(message: Message, state: FSMContext):
         await message.answer("Введите понятное название.")
         return
     await state.update_data(tax_goal_name=name)
-    await state.set_state(TaxStates.obligation_amount)
-    await message.answer(f"<b>{escape(name.upper())}</b>\n\nВведите сумму, которую нужно накопить.")
+    await state.set_state(TaxStates.obligation_due_date)
+    await message.answer(
+        f"<b>{escape(name.upper())}</b>\n\n"
+        "<b>КОГДА НУЖНО ОПЛАТИТЬ НАЛОГ?</b>\n\n"
+        "Введите дату в формате <code>ДД.ММ.ГГГГ</code>."
+    )
 
 
 def parse_amount(text: str | None) -> Decimal | None:
@@ -442,11 +446,14 @@ async def tax_obligation_amount(message: Message, state: FSMContext):
         await message.answer("Введите положительную сумму.")
         return
     await state.update_data(tax_goal_amount=str(amount))
-    await state.set_state(TaxStates.obligation_saved)
-    await message.answer(
-        "<b>УЖЕ НАКОПЛЕНО</b>\n\n"
-        "Введите часть общего конверта «Налоги», которая уже относится к этому обязательству. "
-        "Если пока ничего не накоплено, отправьте 0."
+    data = await state.get_data()
+    await state.update_data(tax_goal_saved="0")
+    await save_tax_obligation(
+        message,
+        state,
+        message.from_user.id,
+        int(data["tax_goal_months"]),
+        str(data["tax_goal_due_date"]),
     )
 
 
@@ -481,7 +488,16 @@ async def tax_obligation_due_date(message: Message, state: FSMContext):
         await message.answer("Дата должна быть позже сегодняшнего дня.")
         return
     months = max(1, (due.year - date.today().year) * 12 + due.month - date.today().month)
-    await save_tax_obligation(message, state, message.from_user.id, months, due.isoformat())
+    await state.update_data(
+        tax_goal_due_date=due.isoformat(),
+        tax_goal_months=months,
+    )
+    await state.set_state(TaxStates.obligation_amount)
+    await message.answer(
+        "<b>СКОЛЬКО ОСТАЛОСЬ НАКОПИТЬ К ДАТЕ ПЛАТЕЖА?</b>\n\n"
+        "Укажите не полную сумму начисления, а остаток, которого сейчас не хватает в конверте «Налоги».\n\n"
+        "——————\n<b>→ Введите сумму.</b>"
+    )
 
 
 @router.callback_query(TaxStates.obligation_months, F.data.startswith("taxgoal:months:"))
@@ -516,6 +532,10 @@ async def save_tax_obligation(
     monthly = ((target - saved) / Decimal(months)).quantize(Decimal("0.01"))
     tax_type = data["tax_goal_type"]
     object_name = data["tax_goal_name"]
+    due_line = (
+        f"Оплатить до — <b>{date.fromisoformat(due_date).strftime('%d.%m.%Y')}</b>\n"
+        if due_date else ""
+    )
     db.add_tax_obligation(
         telegram_id, tax_type, object_name, target, saved, months, monthly, due_date
     )

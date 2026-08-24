@@ -35,6 +35,11 @@ async def start_intercontract_period(callback: CallbackQuery):
         f"Месяцев: <b>{result['months_remaining']}</b>\n"
         f"Плановая зарплата себе: <b>{result['monthly_salary']} ₽</b>.\n\n"
         "Счётчик дохода продолжает учитывать полный цикл: рабочую часть и перерыв.\n\n"
+        "<b>РЕЗЕРВ НА СЛЕДУЮЩУЮ РАБОЧУЮ ЧАСТЬ</b>\n"
+        f"Нужно подготовить: <b>{result['next_work_obligations']} ₽</b>.\n"
+        "Сейчас начинается накопление этого резерва. Он получает приоритет раньше Фонда Зарплаты, "
+        "Стабилизатора и Подушки. Если денег пока недостаточно, Аллокатор покажет дефицит и будет "
+        "закрывать его из следующих поступлений.\n\n"
         "В начале каждого месяца сначала начните новый расчётный период и добавьте внешние "
         "поступления, если они уже пришли. Затем нажмите «Заплатить себе из Фонда Зарплаты».",
         reply_markup=main_menu_keyboard(callback.from_user.id),
@@ -90,6 +95,36 @@ async def finish_intercontract_period(callback: CallbackQuery):
             ]),
         )
         return
+    missing_obligations = max(
+        0,
+        allocator.settings.contract_obligations_total
+        - allocator.state.contract_obligations_reserve,
+    )
+    if missing_obligations > 0:
+        await callback.message.answer(
+            "<b>РЕЗЕРВ НА РАБОЧУЮ ЧАСТЬ НЕ СОБРАН</b>\n\n"
+            f"Не хватает <b>{missing_obligations} ₽</b> на обязательства, которые продолжатся во время работы.\n\n"
+            "Добавьте доступные деньги через «Распределить текущие деньги» или новое поступление. "
+            "Начать работу всё равно можно, но тогда часть обязательств останется без покрытия.",
+            reply_markup=keyboard([
+                [("← Главное меню", "menu:back")],
+                [("Начать работу без полного резерва", "intercontract:finish:force")],
+            ]),
+        )
+        return
+    await complete_work_phase_start(callback, allocator)
+
+
+@router.callback_query(F.data == "intercontract:finish:force")
+async def force_finish_intercontract_period(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    await complete_work_phase_start(callback, allocator)
+
+
+async def complete_work_phase_start(callback: CallbackQuery, allocator):
     try:
         allocator.start_new_work_phase()
     except ValueError as error:
@@ -99,7 +134,9 @@ async def finish_intercontract_period(callback: CallbackQuery):
     await callback.message.answer(
         "<b>НАЧАЛАСЬ НОВАЯ РАБОЧАЯ ЧАСТЬ</b>\n\n"
         "Предыдущий финансовый цикл завершён. Счётчик дохода обнулён, и следующие поступления "
-        "будут учитываться в новом цикле.",
+        "будут учитываться в новом цикле.\n\n"
+        f"Резерв обязательств: <b>{allocator.state.contract_obligations_reserve} ₽</b> / "
+        f"<b>{allocator.settings.contract_obligations_total} ₽</b>.",
         reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
@@ -173,6 +210,7 @@ async def confirm_new_period(callback: CallbackQuery):
         return
 
     allocator.reset_period()
+    work_months_left = allocator.advance_work_month()
     allocator.state.period_started_at = datetime.now().isoformat()
     db.save_allocator(callback.from_user.id, allocator)
     db.save_operation(
@@ -181,10 +219,20 @@ async def confirm_new_period(callback: CallbackQuery):
         {"started_at": allocator.state.period_started_at, "message": "Начат новый расчётный период"},
     )
 
+    phase_text = ""
+    if allocator.settings.income_rhythm == "cyclic" and allocator.state.current_cycle_phase == "work":
+        phase_text = (
+            f"\n\nВ рабочей части осталось: <b>{work_months_left} мес.</b>"
+            + (
+                "\nПлановая рабочая часть завершена. Когда работа фактически закончится, нажмите «Начать перерыв»."
+                if work_months_left <= 0 else ""
+            )
+        )
     await callback.message.answer(
         "✅ <b>НОВЫЙ РАСЧЁТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
         "Баланс жизни и месячные категории начаты заново.\n"
         "Подушка, цели, инвестиции, кредиты и история сохранены. Для Цикличного (контрактного) "
-        "профиля Фонд Зарплаты и счётчик полного финансового цикла тоже не сбрасываются.",
+        "профиля Фонд Зарплаты и счётчик полного финансового цикла тоже не сбрасываются."
+        f"{phase_text}",
         reply_markup=main_menu_keyboard(callback.from_user.id),
     )
