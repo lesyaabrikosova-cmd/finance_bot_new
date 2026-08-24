@@ -227,6 +227,51 @@ class Goal:
         self.balance = D(self.balance)
 
 
+@dataclass
+class PhaseLifeBudget:
+    """Стоимость жизни и валюта одной фазы циклического профиля."""
+
+    critical_life: Decimal = ZERO
+    household_reserve: Decimal = ZERO
+    life_categories: Dict[str, Decimal] = field(default_factory=dict)
+    household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
+    currency_code: str = "RUB"
+    currency_symbol: str = "₽"
+    exchange_rate_to_rub: Decimal = ONE
+    exchange_rate_mode: str = "official"
+    exchange_rate_updated_at: Optional[str] = None
+    completed: bool = False
+
+    def __post_init__(self):
+        self.critical_life = max(ZERO, D(self.critical_life))
+        self.household_reserve = max(ZERO, D(self.household_reserve))
+        self.life_categories = {
+            str(name): max(ZERO, D(amount))
+            for name, amount in self.life_categories.items()
+        }
+        self.household_reserve_categories = {
+            str(name): max(ZERO, D(amount))
+            for name, amount in self.household_reserve_categories.items()
+        }
+        self.currency_code = str(self.currency_code or "RUB").strip().upper()
+        self.currency_symbol = str(self.currency_symbol or self.currency_code).strip()
+        self.exchange_rate_to_rub = max(ZERO, D(self.exchange_rate_to_rub))
+        if self.currency_code == "RUB":
+            self.currency_symbol = "₽"
+            self.exchange_rate_to_rub = ONE
+            self.exchange_rate_mode = "official"
+        if self.exchange_rate_mode not in {"official", "manual"}:
+            self.exchange_rate_mode = "official"
+        self.completed = bool(self.completed)
+
+    @property
+    def household_life(self) -> Decimal:
+        return self.critical_life + self.household_reserve
+
+    def rub(self, amount: Decimal) -> Decimal:
+        return money(D(amount) * self.exchange_rate_to_rub)
+
+
 # ============================================================
 # НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ
 # ============================================================
@@ -264,6 +309,10 @@ class UserSettings:
     reliable_gap_income: Decimal = Decimal("0")
     stabilizer_target_months: Decimal = Decimal("1")
     contract_obligations: Dict[str, Decimal] = field(default_factory=dict)
+    # Две независимые стоимости жизни циклического профиля. Старые поля
+    # critical_life/household_reserve остаются канонической базой алгоритма
+    # до включения фазового интерфейса и обеспечивают обратную совместимость.
+    phase_life_budgets: Dict[str, PhaseLifeBudget] = field(default_factory=dict)
 
     # ----------------------------
     # Налог
@@ -346,6 +395,25 @@ class UserSettings:
             str(name): max(ZERO, D(amount))
             for name, amount in self.contract_obligations.items()
         }
+        normalized_phase_budgets: Dict[str, PhaseLifeBudget] = {}
+        for phase, budget in self.phase_life_budgets.items():
+            phase_id = str(phase).strip().lower()
+            if phase_id not in {"work", "break"}:
+                continue
+            normalized_phase_budgets[phase_id] = (
+                budget if isinstance(budget, PhaseLifeBudget)
+                else PhaseLifeBudget(**budget)
+            )
+        if self.income_rhythm == "cyclic" and "break" not in normalized_phase_budgets:
+            # Старые циклические профили считали российскую/домашнюю жизнь.
+            normalized_phase_budgets["break"] = PhaseLifeBudget(
+                critical_life=self.critical_life,
+                household_reserve=self.household_reserve,
+                life_categories=self.life_categories,
+                household_reserve_categories=self.household_reserve_categories,
+                completed=True,
+            )
+        self.phase_life_budgets = normalized_phase_budgets
 
         self.tax_rate = D(self.tax_rate)
         self.income_type_tax_rates = {
@@ -404,6 +472,9 @@ class UserSettings:
         УЖ = КЖ + БР
         """
         return self.critical_life + self.household_reserve
+
+    def phase_life(self, phase: str) -> Optional[PhaseLifeBudget]:
+        return self.phase_life_budgets.get(str(phase).strip().lower())
 
     @property
     def minimum_payment_total(self) -> Decimal:
@@ -599,6 +670,20 @@ class UserSettings:
         if self.income_work_months < ONE:
             errors.append("Рабочая часть цикла должна быть не меньше одного месяца.")
 
+        for phase, budget in self.phase_life_budgets.items():
+            if budget.completed and budget.critical_life <= ZERO:
+                errors.append(
+                    f"Критический минимум фазы «{phase}» должен быть больше 0."
+                )
+            if (
+                budget.completed
+                and budget.currency_code != "RUB"
+                and budget.exchange_rate_to_rub <= ZERO
+            ):
+                errors.append(
+                    f"Для валюты {budget.currency_code} фазы «{phase}» нужен курс к рублю."
+                )
+
         if self.debt_strategy not in {
             "Лавина",
             "Снежный ком",
@@ -635,6 +720,8 @@ class AllocatorState:
     intercontract_reserve: Decimal = ZERO
     intercontract_months_remaining: Decimal = ZERO
     intercontract_break_active: bool = False
+    current_cycle_phase: str = ""
+    current_phase_months_remaining: Decimal = ZERO
     contract_obligations_reserve: Decimal = ZERO
     pillow_force_majeure: Decimal = ZERO
     pillow_stabilizer: Decimal = ZERO
@@ -710,6 +797,19 @@ class AllocatorState:
         self.intercontract_reserve = D(self.intercontract_reserve)
         self.intercontract_months_remaining = max(ZERO, D(self.intercontract_months_remaining))
         self.intercontract_break_active = bool(self.intercontract_break_active)
+        self.current_cycle_phase = str(self.current_cycle_phase or "").strip().lower()
+        if self.current_cycle_phase not in {"", "work", "break"}:
+            self.current_cycle_phase = ""
+        if not self.current_cycle_phase and self.intercontract_break_active:
+            self.current_cycle_phase = "break"
+        self.current_phase_months_remaining = max(
+            ZERO, D(self.current_phase_months_remaining)
+        )
+        if (
+            self.current_phase_months_remaining == ZERO
+            and self.current_cycle_phase == "break"
+        ):
+            self.current_phase_months_remaining = self.intercontract_months_remaining
         self.contract_obligations_reserve = max(ZERO, D(self.contract_obligations_reserve))
         self.pillow_force_majeure = D(
             self.pillow_force_majeure
@@ -1126,6 +1226,8 @@ class FinancialAllocator:
             raise ValueError("Межконтрактный период уже начат.")
         self.state.intercontract_break_active = True
         self.state.intercontract_months_remaining = self.settings.income_gap_months
+        self.state.current_cycle_phase = "break"
+        self.state.current_phase_months_remaining = self.settings.income_gap_months
         # Обязательства рабочей части к этому моменту считаются исполненными.
         # В следующем рабочем цикле резерв будет сформирован заново.
         self.state.contract_obligations_reserve = ZERO
@@ -1144,6 +1246,7 @@ class FinancialAllocator:
         self.state.intercontract_reserve -= amount
         self.state.life_balance += amount
         self.state.intercontract_months_remaining -= ONE
+        self.state.current_phase_months_remaining = self.state.intercontract_months_remaining
         return amount
 
     def start_new_work_phase(self) -> None:
@@ -1152,6 +1255,8 @@ class FinancialAllocator:
         if self.state.intercontract_months_remaining > ZERO:
             raise ValueError("Сначала проведите все запланированные месяцы перерыва.")
         self.state.intercontract_break_active = False
+        self.state.current_cycle_phase = "work"
+        self.state.current_phase_months_remaining = self.settings.income_work_months
         self.state.cycle_income = ZERO
 
     @property

@@ -5990,6 +5990,14 @@ def build_state_from_data(
         intercontract_break_active=
             cycle_break_active,
 
+        current_cycle_phase=
+            str(data.get("current_cycle_phase", ""))
+            if settings.income_rhythm == "cyclic"
+            else "",
+
+        current_phase_months_remaining=
+            cycle_months_remaining,
+
         pillow_force_majeure=
             pillow_force,
 

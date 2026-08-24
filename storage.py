@@ -28,6 +28,7 @@ from financial_engine import (
     Credit,
     FinancialAllocator,
     Goal,
+    PhaseLifeBudget,
     UserSettings,
     normalize_profile_id,
 )
@@ -148,7 +149,7 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 6,
+        "version": 7,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
@@ -171,12 +172,33 @@ def serialize_income_types(settings: UserSettings) -> str:
             name: decimal_to_string(amount)
             for name, amount in settings.household_reserve_categories.items()
         },
+        "phase_life_budgets": {
+            phase: {
+                "critical_life": decimal_to_string(budget.critical_life),
+                "household_reserve": decimal_to_string(budget.household_reserve),
+                "life_categories": {
+                    name: decimal_to_string(amount)
+                    for name, amount in budget.life_categories.items()
+                },
+                "household_reserve_categories": {
+                    name: decimal_to_string(amount)
+                    for name, amount in budget.household_reserve_categories.items()
+                },
+                "currency_code": budget.currency_code,
+                "currency_symbol": budget.currency_symbol,
+                "exchange_rate_to_rub": decimal_to_string(budget.exchange_rate_to_rub),
+                "exchange_rate_mode": budget.exchange_rate_mode,
+                "exchange_rate_updated_at": budget.exchange_rate_updated_at,
+                "completed": budget.completed,
+            }
+            for phase, budget in settings.phase_life_budgets.items()
+        },
     })
 
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -188,7 +210,7 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
@@ -204,6 +226,24 @@ def deserialize_income_rhythm(value) -> dict:
             "household_reserve_categories": {
                 str(name): string_to_decimal(amount)
                 for name, amount in raw.get("household_reserve_categories", {}).items()
+            },
+            "phase_life_budgets": {
+                str(phase): PhaseLifeBudget(
+                    critical_life=budget.get("critical_life", "0"),
+                    household_reserve=budget.get("household_reserve", "0"),
+                    life_categories=budget.get("life_categories", {}),
+                    household_reserve_categories=budget.get(
+                        "household_reserve_categories", {}
+                    ),
+                    currency_code=budget.get("currency_code", "RUB"),
+                    currency_symbol=budget.get("currency_symbol", "₽"),
+                    exchange_rate_to_rub=budget.get("exchange_rate_to_rub", "1"),
+                    exchange_rate_mode=budget.get("exchange_rate_mode", "official"),
+                    exchange_rate_updated_at=budget.get("exchange_rate_updated_at"),
+                    completed=bool(budget.get("completed", False)),
+                )
+                for phase, budget in raw.get("phase_life_budgets", {}).items()
+                if phase in {"work", "break"} and isinstance(budget, dict)
             },
         }
     return {"income_rhythm": "monthly", "income_gap_months": Decimal("1")}
@@ -400,6 +440,8 @@ class Database:
                 intercontract_reserve TEXT NOT NULL DEFAULT '0',
                 intercontract_months_remaining TEXT NOT NULL DEFAULT '0',
                 intercontract_break_active INTEGER NOT NULL DEFAULT 0,
+                current_cycle_phase TEXT NOT NULL DEFAULT '',
+                current_phase_months_remaining TEXT NOT NULL DEFAULT '0',
                 contract_obligations_reserve TEXT NOT NULL DEFAULT '0',
                 pillow_force_majeure TEXT NOT NULL,
                 pillow_stabilizer TEXT NOT NULL,
@@ -443,6 +485,18 @@ class Database:
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
                     ON DELETE CASCADE
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exchange_rates (
+                currency_code TEXT PRIMARY KEY,
+                rub_per_unit TEXT NOT NULL,
+                rate_date TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'CBR'
             )
             """
         )
@@ -546,6 +600,14 @@ class Database:
         if "contract_obligations_reserve" not in state_columns:
             cursor.execute(
                 "ALTER TABLE state ADD COLUMN contract_obligations_reserve TEXT NOT NULL DEFAULT '0'"
+            )
+        if "current_cycle_phase" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN current_cycle_phase TEXT NOT NULL DEFAULT ''"
+            )
+        if "current_phase_months_remaining" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN current_phase_months_remaining TEXT NOT NULL DEFAULT '0'"
             )
 
         # ----------------------------------------------------
@@ -1241,6 +1303,8 @@ class Database:
                 intercontract_reserve,
                 intercontract_months_remaining,
                 intercontract_break_active,
+                current_cycle_phase,
+                current_phase_months_remaining,
                 contract_obligations_reserve,
                 pillow_force_majeure,
                 pillow_stabilizer,
@@ -1261,7 +1325,7 @@ class Database:
             VALUES (
                 ?,
                 ?, ?,
-                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
@@ -1288,6 +1352,12 @@ class Database:
 
                 intercontract_break_active =
                     excluded.intercontract_break_active,
+
+                current_cycle_phase =
+                    excluded.current_cycle_phase,
+
+                current_phase_months_remaining =
+                    excluded.current_phase_months_remaining,
 
                 contract_obligations_reserve =
                     excluded.contract_obligations_reserve,
@@ -1346,6 +1416,10 @@ class Database:
                 ),
 
                 int(state.intercontract_break_active),
+
+                state.current_cycle_phase,
+
+                decimal_to_string(state.current_phase_months_remaining),
 
                 decimal_to_string(
                     state.contract_obligations_reserve
@@ -1445,6 +1519,12 @@ class Database:
 
             intercontract_break_active=
                 bool(row["intercontract_break_active"]),
+
+            current_cycle_phase=
+                row["current_cycle_phase"],
+
+            current_phase_months_remaining=
+                string_to_decimal(row["current_phase_months_remaining"]),
 
             contract_obligations_reserve=
                 string_to_decimal(row["contract_obligations_reserve"]),
@@ -1949,6 +2029,58 @@ class Database:
             WHERE telegram_id = ? AND id = ?
             """,
             (decimal_to_string(monthly_amount), telegram_id, obligation_id),
+        )
+        self.connection.commit()
+
+    # ========================================================
+    # КЭШ АВТОМАТИЧЕСКИХ ВАЛЮТНЫХ КУРСОВ
+    # ========================================================
+
+    def load_exchange_rate(self, currency_code: str) -> Optional[dict]:
+        row = self.connection.execute(
+            """
+            SELECT currency_code, rub_per_unit, rate_date, fetched_at, source
+            FROM exchange_rates
+            WHERE currency_code = ?
+            """,
+            (str(currency_code).strip().upper(),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "currency_code": row["currency_code"],
+            "rub_per_unit": string_to_decimal(row["rub_per_unit"]),
+            "rate_date": row["rate_date"],
+            "fetched_at": row["fetched_at"],
+            "source": row["source"],
+        }
+
+    def save_exchange_rate(
+        self,
+        currency_code: str,
+        rub_per_unit: Decimal,
+        rate_date: str,
+        fetched_at: str,
+        source: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO exchange_rates (
+                currency_code, rub_per_unit, rate_date, fetched_at, source
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(currency_code) DO UPDATE SET
+                rub_per_unit = excluded.rub_per_unit,
+                rate_date = excluded.rate_date,
+                fetched_at = excluded.fetched_at,
+                source = excluded.source
+            """,
+            (
+                str(currency_code).strip().upper(),
+                decimal_to_string(rub_per_unit),
+                rate_date,
+                fetched_at,
+                source,
+            ),
         )
         self.connection.commit()
 
