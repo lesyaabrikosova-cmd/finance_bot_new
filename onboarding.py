@@ -1241,8 +1241,12 @@ async def save_income_gap_button(callback: CallbackQuery, state: FSMContext):
     if value == "custom":
         await callback.message.answer("Введите количество полных месяцев без надёжного дохода.")
         return
-    await state.update_data(income_rhythm="cyclic", income_gap_months=value)
-    await show_fund_salary_intro(callback.message, state)
+    await state.update_data(
+        income_rhythm="cyclic",
+        income_gap_months=value,
+        reliable_gap_income="0",
+    )
+    await ask_stabilizer_target(callback.message, state)
 
 
 @router.message(SetupStates.income_gap_months)
@@ -1251,23 +1255,17 @@ async def save_income_gap_text(message: Message, state: FSMContext):
     if value is None or value < 1 or value > 24 or value != value.to_integral_value():
         await message.answer("Введите целое число от 1 до 24.")
         return
-    await state.update_data(income_rhythm="cyclic", income_gap_months=str(value))
-    await show_fund_salary_intro(message, state)
-
-
-async def show_fund_salary_intro(message: Message, state: FSMContext):
-    await state.set_state(SetupStates.fund_salary_intro)
-    await message.answer(
-        f"{setup_progress(await state.get_data(), 4)}\n\n"
-        "<b>ФОНД ЗАРПЛАТЫ</b>\n\n"
-        "Во время перерыва между контрактами вы будете платить зарплату самому себе.\n\n"
-        "Аллокатор рассчитает необходимую сумму и поможет проводить ежемесячные выплаты.",
-        reply_markup=keyboard([[("Понятно →", "fundsalary:intro")]]),
+    await state.update_data(
+        income_rhythm="cyclic",
+        income_gap_months=str(value),
+        reliable_gap_income="0",
     )
+    await ask_stabilizer_target(message, state)
 
 
 @router.callback_query(SetupStates.fund_salary_intro, F.data == "fundsalary:intro")
 async def continue_after_fund_salary_intro(callback: CallbackQuery, state: FSMContext):
+    """Совместимость с уже отправленными кнопками удалённого экрана."""
     await callback.answer()
     await state.update_data(reliable_gap_income="0")
     await ask_stabilizer_target(callback.message, state)
