@@ -11,6 +11,7 @@ os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
+    build_state_from_data,
     communication_item_name,
     default_km_storage,
     housing_item_name,
@@ -18,6 +19,7 @@ from onboarding import (  # noqa: E402
     km_item_totals_by_name,
     life_classification_reason,
     life_categories_from_storage,
+    life_expense_summary,
     matching_housing_total,
     matching_communication_total,
     months_until_due_date,
@@ -44,6 +46,85 @@ from storage import (  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_life_summary_groups_raw_amounts_by_category_and_period(self):
+        text = life_expense_summary([
+            {
+                "category": "health",
+                "subcategory": "medical",
+                "name": "Медицинские услуги",
+                "amount": "32970",
+                "months": "12",
+                "monthly": "2747.50",
+            },
+            {
+                "category": "clothes",
+                "name": "Одежда",
+                "amount": "55452",
+                "months": "7",
+                "monthly": "7921.71",
+            },
+        ])
+        self.assertIn("<b><u>ЗДОРОВЬЕ</u></b>", text)
+        self.assertIn("<b>Медицинские услуги</b> — 32 970,00 ₽ / год", text)
+        self.assertIn("<b><u>ОДЕЖДА</u></b>", text)
+        self.assertIn("<b>Одежда</b> — 55 452,00 ₽ / 7 мес.", text)
+        self.assertNotIn("Обязательная жизнь", text)
+
+    def test_cyclic_break_uses_remaining_months_for_salary_fund_target(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("39000"),
+            household_reserve=Decimal("7000"),
+            average_income=Decimal("57000"),
+            income_rhythm="cyclic",
+            profile_type="cyclic",
+            income_work_months=Decimal("5"),
+            income_gap_months=Decimal("7"),
+        )
+        state = build_state_from_data(
+            {
+                "current_pillow": "0",
+                "current_stabilizer": "0",
+                "current_intercontract": "92000",
+                "current_life_balance": "0",
+                "current_cycle_phase": "break",
+                "current_cycle_gap_remaining": "2",
+            },
+            settings,
+        )
+        allocator = FinancialAllocator(settings, state)
+        self.assertTrue(state.intercontract_break_active)
+        self.assertEqual(state.intercontract_months_remaining, Decimal("2"))
+        self.assertEqual(state.intercontract_reserve, Decimal("92000"))
+        self.assertEqual(allocator.intercontract_current_limit, Decimal("92000"))
+
+    def test_cyclic_work_phase_targets_the_full_future_break(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("39000"),
+            household_reserve=Decimal("7000"),
+            average_income=Decimal("57000"),
+            income_rhythm="cyclic",
+            profile_type="cyclic",
+            income_work_months=Decimal("5"),
+            income_gap_months=Decimal("7"),
+        )
+        state = build_state_from_data(
+            {
+                "current_pillow": "0",
+                "current_stabilizer": "0",
+                "current_intercontract": "0",
+                "current_life_balance": "0",
+                "current_cycle_phase": "work",
+            },
+            settings,
+        )
+        allocator = FinancialAllocator(settings, state)
+        self.assertFalse(state.intercontract_break_active)
+        self.assertEqual(allocator.intercontract_current_limit, Decimal("322000"))
+
     def test_life_classification_period_drops_trailing_zeroes(self):
         item = {"category": "subscriptions", "months": "12.00"}
         self.assertEqual(

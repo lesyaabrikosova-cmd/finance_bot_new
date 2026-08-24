@@ -102,6 +102,17 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
         f"Ритм дохода: <b>{rhythm_labels.get(s.income_rhythm, s.income_rhythm)}</b>\n"
         + (f"Финансовый цикл: <b>{s.income_work_months} / {s.income_gap_months}</b>\n" if s.income_rhythm == "cyclic" else "")
+        + (
+            "Текущая фаза: <b>"
+            + (
+                f"Перерыв · осталось {st.intercontract_months_remaining} мес."
+                if st.intercontract_break_active
+                else "Рабочая часть"
+            )
+            + "</b>\n"
+            if s.income_rhythm == "cyclic"
+            else ""
+        )
         + (f"Доход текущего цикла: <b>{rub(st.cycle_income)}</b> / {rub(s.cycle_regular_income_limit)}\n" if s.income_rhythm == "cyclic" else "")
         + (f"Стабилизатор: <b>{s.stabilizer_target_months} мес.</b>\n" if s.needs_stabilizer else "")
         + (f"Обязательства на время контракта: <b>{rub(s.contract_obligations_total)}</b>\n" if s.income_rhythm == "cyclic" else "")
@@ -110,7 +121,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
         f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
         + (f"🛟 Стабилизатор дохода: <b>{rub(st.stabilizer_balance)}</b> / {rub(s.stabilizer_full_limit)}\n" if s.needs_stabilizer else "")
-        + (f"Фонд Зарплаты: <b>{rub(st.intercontract_reserve)}</b> / {rub(s.intercontract_full_limit)}\n" if s.income_rhythm == "cyclic" else "")
+        + (f"Фонд Зарплаты: <b>{rub(st.intercontract_reserve)}</b> / {rub(allocator.intercontract_current_limit)}\n" if s.income_rhythm == "cyclic" else "")
         +
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"

@@ -49,7 +49,6 @@ CRITICAL_MINIMUM_CALCULATED_IMAGE = (
 HOUSEHOLD_RESERVE_CALCULATED_IMAGE = (
     INTRO_IMAGES_DIR / "household_reserve_calculated.png"
 )
-LIFE_COST_CALCULATED_IMAGE = INTRO_IMAGES_DIR / "life_cost_calculated.png"
 
 # Стандартный эффект Telegram «Праздник / конфетти». Эффекты работают только
 # в личных чатах и могут быть недоступны в отдельных версиях клиента.
@@ -159,6 +158,8 @@ class SetupStates(StatesGroup):
     current_pillow = State()
     current_stabilizer = State()
     current_intercontract = State()
+    current_cycle_phase = State()
+    current_cycle_gap_remaining = State()
     current_life_balance = State()
     current_minimum_payments = State()
 
@@ -781,6 +782,84 @@ def km_item_totals_by_name(items: list[dict]) -> list[tuple[str, Decimal]]:
     return [(display_names[key], total) for key, total in totals.items()]
 
 
+LIFE_CATEGORY_ORDER = [
+    "Недвижимость", "Транспорт", "Связь и подписки", "Питание",
+    "Вредные привычки", "Здоровье", "Красота и уход", "Дети",
+    "Питомцы", "Образование", "Развлечения", "Одежда", "Подарки",
+    "Спорт", "Быт", "Комиссии", "Услуги", "Другое",
+]
+
+
+def life_item_category_label(item: dict) -> str:
+    category = str(item.get("category") or "")
+    labels = {
+        "housing": "Недвижимость",
+        "transport": "Транспорт",
+        "communication": "Связь и подписки",
+        "subscriptions": "Связь и подписки",
+        "food": "Питание",
+        "habits": "Вредные привычки",
+        "health": "Здоровье",
+        "care": "Красота и уход",
+        "children": "Дети",
+        "pets": "Питомцы",
+        "education": "Образование",
+        "leisure": "Развлечения",
+        "clothes": "Одежда",
+        "gifts": "Подарки",
+        "gym": "Спорт",
+        "repairs": "Быт",
+        "fees": "Комиссии",
+        "services": "Услуги",
+        "other": "Другое",
+    }
+    return labels.get(category, str(item.get("category_label") or "Другое"))
+
+
+def source_period_label(months: Decimal) -> str:
+    months = Decimal(str(months))
+    if months == Decimal("0.25"):
+        return "неделю"
+    if months == Decimal("1"):
+        return "мес."
+    if months == Decimal("12"):
+        return "год"
+    value = format(months.normalize(), "f")
+    return f"{value} мес."
+
+
+def life_expense_summary(items: list[dict]) -> str:
+    """Группирует введённые суммы по категориям без подмены их среднемесячными."""
+    grouped: dict[str, dict[tuple[str, str], Decimal]] = {}
+    names: dict[tuple[str, str, str], str] = {}
+    for item in items:
+        category = life_item_category_label(item)
+        months = str(item.get("months", "1"))
+        name = km_item_display_name(item)
+        normalized = " ".join(name.split()).casefold()
+        key = (normalized, months)
+        category_items = grouped.setdefault(category, {})
+        category_items[key] = money2(
+            category_items.get(key, Decimal("0"))
+            + Decimal(str(item.get("amount", "0")))
+        )
+        names[(category, normalized, months)] = name
+
+    ordered_categories = [name for name in LIFE_CATEGORY_ORDER if name in grouped]
+    ordered_categories.extend(name for name in grouped if name not in ordered_categories)
+    blocks: list[str] = []
+    for category in ordered_categories:
+        lines = []
+        for (normalized, months), amount in grouped[category].items():
+            name = names[(category, normalized, months)]
+            lines.append(
+                f"• <b>{escape(name)}</b> — {rub(amount)} / "
+                f"{source_period_label(Decimal(months))}"
+            )
+        blocks.append(f"<b><u>{escape(category.upper())}</u></b>\n\n" + "\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 def default_km_storage(item: dict) -> dict:
     """
     Рекомендует способ хранения конкретного расхода Критического минимума.
@@ -940,9 +1019,13 @@ def km_storage_summary(storage_items: list[dict], critical_life: Decimal) -> str
     separate_sum = sum(separate.values(), Decimal("0"))
     salary = money2(critical_life - separate_sum)
 
+    preferred_order = {"Налоги": 0, "Недвижимость": 1, "Здоровье": 2}
     separate_lines = [
-        f"• <b>{escape(name.upper())}</b> — {rub(amount)}"
-        for name, amount in separate.items()
+        f"✉️  <b>{escape(name.upper())}</b> — {rub(amount)}"
+        for name, amount in sorted(
+            separate.items(),
+            key=lambda pair: (preferred_order.get(pair[0], 10), pair[0]),
+        )
     ]
 
     salary_items = [
@@ -954,7 +1037,7 @@ def km_storage_summary(storage_items: list[dict], critical_life: Decimal) -> str
     text = "Давайте утвердим отдельные конверты:\n\n"
     if separate_lines:
         text += "\n".join(separate_lines) + "\n"
-    text += "• <b>ЗАРПЛАТА</b> — " + rub(salary)
+    text += "✉️  <b>ЗАРПЛАТА</b> — " + rub(salary)
     if salary_items:
         text += "\n  — " + "\n  — ".join(escape(name) for name in salary_items)
     return text
@@ -1554,21 +1637,13 @@ async def show_km_menu(
     exact = money2(sum((Decimal(item["monthly"]) for item in items), Decimal("0")))
     br_exact = money2(sum((Decimal(item["monthly"]) for item in br_items), Decimal("0")))
 
-    item_lines = [
-        f"• {escape(name)} — {rub(monthly)} / мес."
-        for name, monthly in km_item_totals_by_name(items)
-    ]
+    all_items = [*items, *br_items]
     summary = ""
-    if item_lines:
-        summary = "\n\n<b>Обязательная жизнь</b>\n" + "\n".join(item_lines)
-    br_lines = [
-        f"• {escape(item['name'])} — {rub(Decimal(item['monthly']))} / мес."
-        for item in br_items
-    ]
-    if br_lines:
-        summary += "\n\n<b>Обычная жизнь и нерегулярные расходы</b>\n" + "\n".join(br_lines)
-    if item_lines or br_lines:
-        summary += f"\n\nСейчас найдено: <b>{rub(exact + br_exact)}</b> / мес."
+    if all_items:
+        summary = (
+            "\n\n" + life_expense_summary(all_items)
+            + f"\n\n——————\nСейчас найдено: <b>{rub(exact + br_exact)}</b> / мес."
+        )
 
     intro_text = ""
     if intro:
@@ -3476,19 +3551,7 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         [('✎ Изменить сумму БР', 'lifeoverride:br')],
     ])
     if data.get("combined_life_onboarding"):
-        if LIFE_COST_CALCULATED_IMAGE.exists() and len(caption) <= 1024:
-            await callback.message.answer_photo(
-                photo=FSInputFile(LIFE_COST_CALCULATED_IMAGE),
-                caption=caption,
-                reply_markup=reply_markup,
-            )
-        else:
-            if LIFE_COST_CALCULATED_IMAGE.exists():
-                await callback.message.answer_photo(
-                    photo=FSInputFile(LIFE_COST_CALCULATED_IMAGE),
-                    caption="<b>СТОИМОСТЬ ВАШЕЙ ЖИЗНИ РАССЧИТАНА</b>",
-                )
-            await callback.message.answer(caption, reply_markup=reply_markup)
+        await callback.message.answer(caption, reply_markup=reply_markup)
         return
     try:
         await callback.message.answer_photo(
@@ -3841,8 +3904,10 @@ async def show_km_storage_review(message: Message, state: FSMContext):
 
     await message.answer(
         f"{setup_progress(data, 6 if data.get('combined_life_onboarding') else 5)}\n\n"
-        "<b>КАК ХРАНИТЬ ДЕНЬГИ НА КРИТИЧЕСКИЙ МИНИМУМ</b>\n\n"
-        "Аллокатор отделяет деньги, которые важно не смешивать с повседневными расходами. "
+        "<b>КАК ХРАНИТЬ ДЕНЬГИ НА ЖИЗНЬ</b>\n\n"
+        "Аллокатор отделяет деньги, которые важно не смешивать с повседневными расходами.\n\n"
+        "Нерегулярные траты будут храниться на отдельном счёте «Бытовой резерв».\n\n"
+        "Особо важные регулярные расходы образуют отдельные конверты.\n\n"
         "Остальное остаётся на операционном счёте «Зарплата».\n\n"
         + km_storage_summary(storage_items, critical)
         + "\n\nЭто рекомендуемая структура. Её можно изменить под ваши банковские счета и привычки.",
@@ -4638,7 +4703,7 @@ async def show_force_majeure_question_new(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(data, 7)}\n\n"
         "<b>РАЗМЕР ФОРС-МАЖОРНОЙ ПОДУШКИ</b>\n\n"
-        "Это резерв на случай событий, которые действительно переворачивают жизнь с ног на голову:\n"
+        "ℹ️ <b>Подушка</b> — это резерв на случай событий, которые действительно переворачивают жизнь с ног на голову:\n"
         "- потеря жилья\n"
         "- серьёзная болезнь\n"
         "- аварийный переезд\n"
@@ -5214,15 +5279,79 @@ async def start_current_state(
     step = 9 if data.get("has_debts") else 8
 
     if data.get("income_rhythm") == "cyclic":
-        await state.set_state(SetupStates.current_intercontract)
+        await state.set_state(SetupStates.current_cycle_phase)
         await message.answer(
             f"{setup_progress(data, step)}\n\n"
-            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В ФОНДЕ ЗАРПЛАТЫ?</b>\n\n"
-            "Это деньги на плановую жизнь во время следующего перерыва. Если Фонда пока нет — отправьте <code>0</code>."
+            "<b>ГДЕ ВЫ СЕЙЧАС В ФИНАНСОВОМ ЦИКЛЕ?</b>\n\n"
+            "Выберите текущую фазу — это определит, на сколько месяцев жизни сейчас нужен Фонд Зарплаты.",
+            reply_markup=keyboard([
+                [("Рабочая часть", "cyclephase:work"), ("Перерыв", "cyclephase:break")],
+            ]),
         )
         return
 
     await ask_current_pillow(message, state)
+
+
+async def ask_current_intercontract(message: Message, state: FSMContext):
+    await state.set_state(SetupStates.current_intercontract)
+    data = await state.get_data()
+    step = 9 if data.get("has_debts") else 8
+    await message.answer(
+        f"{setup_progress(data, step)}\n\n"
+        "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В ФОНДЕ ЗАРПЛАТЫ?</b>\n\n"
+        "Фонд Зарплаты — это отдельные деньги, на которые вы живёте в перерывах "
+        "между рабочими месяцами по контракту.\n\n"
+        "Если Фонда пока нет — отправьте <code>0</code>."
+    )
+
+
+@router.callback_query(SetupStates.current_cycle_phase, F.data.startswith("cyclephase:"))
+async def save_current_cycle_phase(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    phase = callback.data.rsplit(":", 1)[1]
+    if phase == "work":
+        await state.update_data(
+            current_cycle_phase="work",
+            current_cycle_gap_remaining="0",
+        )
+        await ask_current_intercontract(callback.message, state)
+        return
+    await state.update_data(current_cycle_phase="break")
+    await state.set_state(SetupStates.current_cycle_gap_remaining)
+    await callback.message.answer(
+        "<b>СКОЛЬКО ЦЕЛЫХ МЕСЯЦЕВ ОСТАЛОСЬ ДО СЛЕДУЮЩЕЙ РАБОЧЕЙ ЧАСТИ?</b>\n\n"
+        "Укажите плановый остаток перерыва. Если до работы осталось меньше месяца, укажите 1.",
+        reply_markup=keyboard([
+            [("1 месяц", "cycleremaining:1"), ("2 месяца", "cycleremaining:2")],
+            [("3 месяца", "cycleremaining:3"), ("6 месяцев", "cycleremaining:6")],
+            [("Указать другое", "cycleremaining:custom")],
+        ]),
+    )
+
+
+@router.callback_query(
+    SetupStates.current_cycle_gap_remaining,
+    F.data.startswith("cycleremaining:"),
+)
+async def save_cycle_gap_remaining_button(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.rsplit(":", 1)[1]
+    if value == "custom":
+        await callback.message.answer("Введите целое количество месяцев от 1 до 24.")
+        return
+    await state.update_data(current_cycle_gap_remaining=value)
+    await ask_current_intercontract(callback.message, state)
+
+
+@router.message(SetupStates.current_cycle_gap_remaining)
+async def save_cycle_gap_remaining_text(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
+        await message.answer("Введите целое количество месяцев от 1 до 24.")
+        return
+    await state.update_data(current_cycle_gap_remaining=str(value))
+    await ask_current_intercontract(message, state)
 
 
 async def ask_current_pillow(message: Message, state: FSMContext):
@@ -5278,8 +5407,9 @@ async def save_current_pillow(
         await message.answer(
             f"{setup_progress(data, step)}\n\n"
             "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ ДОХОДА?</b>\n\n"
-            "Подушка и Стабилизатор дохода — разные резервы. Укажите только деньги, "
-            "отложенные на случай временного снижения или задержки дохода.\n\n"
+            "Подушка и Стабилизатор дохода — разные резервы. Стабилизатор дохода — "
+            "это особый запас на случай отмены или задержки контракта.\n\n"
+            "Укажите только деньги, отложенные на случай временного снижения или задержки дохода.\n\n"
             "Если Стабилизатора пока нет — отправьте <code>0</code>."
         )
         return
@@ -5307,7 +5437,7 @@ async def ask_current_life_balance(message: Message, state: FSMContext):
     step = 9 if data.get("has_debts") else 8
     await message.answer(
         f"{setup_progress(data, step)}\n\n"
-        "<b>СКОЛЬКО УЖЕ ОТЛОЖЕНО НА ТЕКУЩУЮ ЖИЗНЬ?</b>\n\n"
+        "<b>СКОЛЬКО УЖЕ ОТЛОЖЕНО НА ТЕКУЩУЮ ЖИЗНЬ В ЭТОМ МЕСЯЦЕ?</b>\n\n"
         "Это деньги на Критический минимум и Бытовой резерв текущего расчётного периода.\n\n"
         "Если начинаете с чистого листа — отправьте <code>0</code>."
     )
@@ -5815,6 +5945,15 @@ def build_state_from_data(
         Decimal(data.get("current_intercontract", "0")),
         settings.intercontract_full_limit,
     )
+    cycle_break_active = (
+        settings.income_rhythm == "cyclic"
+        and data.get("current_cycle_phase") == "break"
+    )
+    cycle_months_remaining = (
+        Decimal(str(data.get("current_cycle_gap_remaining", "0")))
+        if cycle_break_active
+        else Decimal("0")
+    )
 
     # Введённая пользователем Подушка целиком остаётся Подушкой, даже если
     # она уже превышает рекомендуемый ориентир.
@@ -5844,6 +5983,12 @@ def build_state_from_data(
 
         intercontract_reserve=
             intercontract_reserve,
+
+        intercontract_months_remaining=
+            cycle_months_remaining,
+
+        intercontract_break_active=
+            cycle_break_active,
 
         pillow_force_majeure=
             pillow_force,
@@ -5926,11 +6071,20 @@ async def show_confirmation(
     }
     cycle_text = ""
     if settings.income_rhythm == "cyclic":
+        if state_object.intercontract_break_active:
+            phase_text = (
+                "Перерыв · до рабочей части "
+                f"{format(state_object.intercontract_months_remaining.normalize(), 'f')} мес."
+            )
+        else:
+            phase_text = "Рабочая часть"
         cycle_text = (
             f"\nФинансовый цикл — <b>{settings.income_work_months} / {settings.income_gap_months}</b> "
             f"({settings.income_work_months} мес. работы · {settings.income_gap_months} мес. перерыва)\n"
+            f"Текущая фаза — <b>{phase_text}</b>\n"
             f"Стабилизатор — <b>{settings.stabilizer_target_months} мес.</b>\n"
-            f"Цель Фонда Зарплаты — <b>{rub(settings.intercontract_full_limit)}</b>\n"
+            f"Фонд Зарплаты сейчас — <b>{rub(state_object.intercontract_reserve)}</b> / "
+            f"<b>{rub(allocator.intercontract_current_limit)}</b>\n"
             f"Обязательства на время контракта — <b>{rub(settings.contract_obligations_total)}</b>"
         )
 
