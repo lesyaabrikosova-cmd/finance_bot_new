@@ -57,6 +57,41 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         self.assertEqual(budget.critical_life_rub, Decimal("36400.00"))
         self.assertEqual(budget.household_reserve_rub, Decimal("6370.00"))
 
+    def test_first_distribution_moves_salary_fund_overflow_forward(self):
+        allocator = self.cyclic_allocator({
+            "break": PhaseLifeBudget(
+                critical_life="40000", household_reserve="10000", completed=True
+            ),
+        })
+        allocator.state.current_cycle_phase = "break"
+        allocator.state.intercontract_break_active = True
+        allocator.state.intercontract_months_remaining = Decimal("2")
+        allocations = allocator.apply_first_distribution(Decimal("250000"))
+
+        self.assertEqual(allocator.state.life_balance, Decimal("50000"))
+        self.assertEqual(allocator.state.intercontract_reserve, Decimal("100000"))
+        self.assertEqual(allocator.state.pillow_stabilizer, Decimal("100000"))
+        self.assertEqual(allocator.state.pillow_force_majeure, Decimal("0"))
+        self.assertEqual(allocations["Фонд Зарплаты"], Decimal("100000.00"))
+        self.assertEqual(allocations["Стабилизатор дохода"], Decimal("100000.00"))
+
+    def test_piecework_waterfall_fills_stabilizer_before_force_majeure(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("10000"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("20000"),
+            income_rhythm="irregular",
+            profile_type="piecework",
+            stabilizer_target_months=Decimal("1"),
+            force_majeure_months=Decimal("4"),
+        )
+        allocator = FinancialAllocator(settings=settings)
+        allocator.apply_first_distribution(Decimal("30000"))
+        self.assertEqual(allocator.state.pillow_stabilizer, Decimal("10000"))
+        self.assertEqual(allocator.state.pillow_force_majeure, Decimal("10000"))
+
 
 if __name__ == "__main__":
     unittest.main()

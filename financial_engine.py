@@ -84,9 +84,9 @@ PROFILE_MODE_TITLES = {
     PROFILE_PIECEWORK: {
         1: "Небо помогает тому, кто помогает себе.",
         2: "Ланистеры всегда платят свои долги.",
-        3: "Подготовка к Апокалипсису.",
-        4: "Заказов нет. Паники тоже.",
-        5: "Защита есть. Пора расти.",
+        3: "Заказов нет. Паники тоже.",
+        4: "Защита есть. Пора расти.",
+        5: "Подготовка к Апокалипсису.",
         6: "Философский камень найден.",
     },
     PROFILE_CYCLIC: {
@@ -94,9 +94,9 @@ PROFILE_MODE_TITLES = {
         2: "Ланистеры всегда платят свои долги.",
         3: "Заплати будущему себе.",
         4: "Не на хлебе и воде.",
-        5: "Подготовка к Апокалипсису.",
-        6: "Контракт задержался. Паники нет.",
-        7: "Защита есть. Пора расти.",
+        5: "Контракт задержался. Паники нет.",
+        6: "Защита есть. Пора расти.",
+        7: "Подготовка к Апокалипсису.",
         8: "Философский камень найден.",
     },
 }
@@ -1177,9 +1177,8 @@ class FinancialAllocator:
         start_layer: str,
     ) -> Decimal:
         """
-        Технический водопад защитных сущностей:
-
-        МП → МР → ФМ → СтабД
+        Технический водопад защитных сущностей. Для Сдельного и
+        Циклического профилей Стабилизатор заполняется раньше ФМ-подушки.
 
         Возвращает остаток, если все предусмотренные резервы заполнены.
         """
@@ -1189,7 +1188,12 @@ class FinancialAllocator:
         if amount <= ZERO:
             return ZERO
 
-        layers = ["МП", "МР", "ФМ", "СтабД"]
+        if self.profile_id == PROFILE_CYCLIC:
+            layers = ["МП", "МР", "СтабД", "ФМ"]
+        elif self.profile_id == PROFILE_PIECEWORK:
+            layers = ["МП", "СтабД", "ФМ"]
+        else:
+            layers = ["МП", "ФМ"]
 
         try:
             start_index = layers.index(start_layer)
@@ -1210,6 +1214,80 @@ class FinancialAllocator:
             )
 
         return remaining
+
+    def first_distribution_source_total(self) -> Decimal:
+        """Деньги, заявленные в онбординге как текущие накопления и остатки."""
+        st = self.state
+        return money(
+            st.life_balance
+            + st.accumulated_minimum_payments
+            + st.contract_obligations_reserve
+            + st.pillow_minimum
+            + st.intercontract_reserve
+            + st.pillow_stabilizer
+            + st.pillow_force_majeure
+        )
+
+    def apply_first_distribution(self, total: Decimal) -> Dict[str, Decimal]:
+        """Раскладывает уже имеющиеся деньги по актуальному защитному водопаду.
+
+        Это не доход: налог, средний доход и аналитика поступлений не меняются.
+        """
+        total = max(ZERO, D(total))
+        s = self.settings
+        st = self.state
+        result: Dict[str, Decimal] = {}
+
+        st.life_balance = ZERO
+        st.accumulated_minimum_payments = ZERO
+        st.contract_obligations_reserve = ZERO
+        st.pillow_minimum = ZERO
+        st.intercontract_reserve = ZERO
+        st.pillow_stabilizer = ZERO
+        st.pillow_force_majeure = ZERO
+
+        if s.income_rhythm == "cyclic" and s.contract_obligations_total > ZERO:
+            part = min(total, s.contract_obligations_total)
+            st.contract_obligations_reserve = part
+            result["Обязательства на время работы"] = part
+            total -= part
+
+        life_part = min(total, s.household_life)
+        st.life_balance = life_part
+        result["Текущая жизнь"] = life_part
+        total -= life_part
+
+        has_debts = any(credit.active for credit in s.credits)
+        if has_debts:
+            start_layer = "МП"
+        elif self.profile_id == PROFILE_CYCLIC:
+            start_layer = "МР"
+        elif self.profile_id == PROFILE_PIECEWORK:
+            start_layer = "СтабД"
+        else:
+            start_layer = "ФМ"
+
+        before_minimum = st.pillow_minimum
+        before_fund = st.intercontract_reserve
+        before_stabilizer = st.pillow_stabilizer
+        before_force = st.pillow_force_majeure
+        overflow = self.waterfall_pillow(total, start_layer)
+        result["Минимальная подушка"] = st.pillow_minimum - before_minimum
+        result["Фонд Зарплаты"] = st.intercontract_reserve - before_fund
+        result["Стабилизатор дохода"] = st.pillow_stabilizer - before_stabilizer
+        result["Форс-мажорная подушка"] = st.pillow_force_majeure - before_force
+
+        if overflow > ZERO:
+            if has_debts:
+                # Аллокатор не совершает досрочное погашение без отдельного
+                # решения пользователя: остаток остаётся на «Зарплате».
+                st.life_balance += overflow
+                result["Свободный остаток на Зарплате"] = overflow
+            else:
+                st.investments += overflow
+                result["Инвестиции"] = overflow
+
+        return {name: money(value) for name, value in result.items() if value > ZERO}
 
     # ========================================================
     # ОПРЕДЕЛЕНИЕ РЕЖИМА
@@ -1295,21 +1373,23 @@ class FinancialAllocator:
                 return 3
             if st.intercontract_reserve < s.intercontract_full_limit:
                 return 4
-            if st.pillow_force_majeure < s.force_majeure_limit:
-                return 5
             if st.pillow_stabilizer < s.stabilizer_life_limit:
-                return 6
+                return 5
             if st.pillow_stabilizer < s.stabilizer_full_limit:
+                return 6
+            if st.pillow_force_majeure < s.force_majeure_limit:
                 return 7
             return 8
 
-        if st.pillow_force_majeure < s.force_majeure_limit:
-            return 3
         if self.profile_id == PROFILE_STABLE:
+            if st.pillow_force_majeure < s.force_majeure_limit:
+                return 3
             return 4
         if st.pillow_stabilizer < s.stabilizer_life_limit:
-            return 4
+            return 3
         if st.pillow_stabilizer < s.stabilizer_full_limit:
+            return 4
+        if st.pillow_force_majeure < s.force_majeure_limit:
             return 5
         return 6
 
@@ -1345,26 +1425,23 @@ class FinancialAllocator:
 
             return MODE_2
 
-        if (
-            self.state.intercontract_reserve < self.intercontract_current_limit
-            or self.state.pillow_force_majeure < self.settings.force_majeure_limit
-        ):
+        if self.state.intercontract_reserve < self.intercontract_current_limit:
             return MODE_3
 
-        if not self.settings.needs_stabilizer:
-            return MODE_6
-
-        if (
+        if self.settings.needs_stabilizer and (
             self.state.pillow_stabilizer
             < self.settings.stabilizer_life_limit
         ):
             return MODE_4
 
-        if (
+        if self.settings.needs_stabilizer and (
             self.state.pillow_stabilizer
             < self.settings.stabilizer_full_limit
         ):
             return MODE_5
+
+        if self.state.pillow_force_majeure < self.settings.force_majeure_limit:
+            return MODE_3
 
         return MODE_6
 
@@ -1496,15 +1573,15 @@ class FinancialAllocator:
             targets = {
                 3: (s.intercontract_life_limit, st.intercontract_reserve),
                 4: (s.intercontract_full_limit, st.intercontract_reserve),
-                5: (s.force_majeure_limit, st.pillow_force_majeure),
-                6: (s.stabilizer_life_limit, st.pillow_stabilizer),
-                7: (s.stabilizer_full_limit, st.pillow_stabilizer),
+                5: (s.stabilizer_life_limit, st.pillow_stabilizer),
+                6: (s.stabilizer_full_limit, st.pillow_stabilizer),
+                7: (s.force_majeure_limit, st.pillow_force_majeure),
             }
         elif self.profile_id == PROFILE_PIECEWORK:
             targets = {
-                3: (s.force_majeure_limit, st.pillow_force_majeure),
-                4: (s.stabilizer_life_limit, st.pillow_stabilizer),
-                5: (s.stabilizer_full_limit, st.pillow_stabilizer),
+                3: (s.stabilizer_life_limit, st.pillow_stabilizer),
+                4: (s.stabilizer_full_limit, st.pillow_stabilizer),
+                5: (s.force_majeure_limit, st.pillow_force_majeure),
             }
         else:
             targets = {3: (s.force_majeure_limit, st.pillow_force_majeure)}
@@ -1525,7 +1602,7 @@ class FinancialAllocator:
             MODE_2: "Досрочное",
             MODE_3: "МР" if self.settings.needs_intercontract_reserve else "ФМ",
             MODE_4: "СтабД",
-            MODE_5: "Инвест",
+            MODE_5: "СтабД",
             MODE_6: "Инвест",
         }
 
@@ -1556,6 +1633,8 @@ class FinancialAllocator:
             )
 
         if mode == MODE_3:
+            if self.settings.needs_intercontract_reserve and self.state.intercontract_reserve < self.intercontract_current_limit:
+                return max(ZERO, self.intercontract_current_limit - self.state.intercontract_reserve)
             return max(
                 ZERO,
                 s.force_majeure_limit - st.pillow_force_majeure,
@@ -1648,7 +1727,7 @@ class FinancialAllocator:
         )
         part_a = min(amount, required_base)
 
-        if mode in {MODE_1, MODE_2, MODE_3, MODE_4}:
+        if mode in {MODE_1, MODE_2, MODE_3, MODE_4, MODE_5}:
             part_a = self.amount_until_mode_transition(
                 part_a,
                 mode,
@@ -1791,7 +1870,7 @@ class FinancialAllocator:
         )
         part_b = min(amount, required_base)
 
-        if mode in {MODE_1, MODE_2, MODE_3, MODE_4}:
+        if mode in {MODE_1, MODE_2, MODE_3, MODE_4, MODE_5}:
             part_b = self.amount_until_mode_transition(
                 part_b,
                 mode,

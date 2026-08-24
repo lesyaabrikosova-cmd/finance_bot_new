@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING
 from html import escape
 from pathlib import Path
@@ -177,6 +178,8 @@ class SetupStates(StatesGroup):
 
     # Подтверждение
     confirmation = State()
+    first_allocation_amount = State()
+    first_allocation_confirm = State()
 
 
 # ============================================================
@@ -6338,10 +6341,9 @@ def build_state_from_data(
 
         remaining -= pillow_minimum
 
-    intercontract_reserve = min(
-        Decimal(data.get("current_intercontract", "0")),
-        settings.intercontract_full_limit,
-    )
+    # Не обрезаем переполнение: первое распределение перенесёт его дальше
+    # по водопаду и ни один введённый рубль не потеряется.
+    intercontract_reserve = Decimal(data.get("current_intercontract", "0"))
     cycle_break_active = (
         settings.income_rhythm == "cyclic"
         and data.get("current_cycle_phase") == "break"
@@ -6665,6 +6667,127 @@ async def confirm_save(
 
         "Теперь можно добавить первое поступление денег "
         "или посмотреть текущее финансовое состояние.",
+        reply_markup=keyboard([
+            [("Сделать первое распределение", "firstallocation:start")],
+            [("Перейти в Главное меню", "menu:back")],
+        ]),
+    )
+
+
+def first_allocation_preview_text(allocator: FinancialAllocator, total: Decimal) -> str:
+    preview = deepcopy(allocator)
+    allocations = preview.apply_first_distribution(total)
+    lines = "\n".join(
+        f"• <b>{escape(name)}</b> — {rub(amount)}"
+        for name, amount in allocations.items()
+    ) or "• Распределять пока нечего"
+    return (
+        "<b>ПЕРВОЕ РАСПРЕДЕЛЕНИЕ</b>\n\n"
+        f"Доступно — <b>{rub(total)}</b>\n\n"
+        f"{lines}\n\n"
+        "Это внутреннее распределение уже имеющихся денег. Оно не считается новым доходом, "
+        "поэтому налог и статистика поступлений не изменятся.\n\n"
+        "Проверьте суммы. Переводы между банковскими счетами вы сделаете самостоятельно."
+    )
+
+
+@router.callback_query(F.data == "firstallocation:start")
+async def start_first_allocation(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await callback.message.answer("Профиль не найден. Запустите /start.")
+        return
+    await state.clear()
+    await callback.message.answer(
+        "<b>КАК СЕЙЧАС ЛЕЖАТ ВАШИ ДЕНЬГИ?</b>\n\n"
+        "Если деньги лежат одной суммой, Аллокатор разложит её с нуля.\n\n"
+        "Если вы уже указали отдельные суммы Фонда Зарплаты, Стабилизатора, Подушки и текущей "
+        "жизни, Аллокатор соберёт их для расчёта и предложит правильный водопад.",
+        reply_markup=keyboard([
+            [("Все деньги лежат вместе", "firstallocation:pile")],
+            [("Деньги уже разделены", "firstallocation:separated")],
+            [("✖️ Отмена", "menu:back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "firstallocation:pile")
+async def ask_first_allocation_total(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.first_allocation_amount)
+    await callback.message.answer(
+        "<b>СКОЛЬКО ДЕНЕГ ДОСТУПНО ДЛЯ РАСПРЕДЕЛЕНИЯ?</b>\n\n"
+        "Сложите деньги на картах и накопительных счетах, которые относятся к текущей жизни "
+        "и финансовым резервам. Не добавляйте уже купленные инвестиции, имущество и кредитные лимиты.\n\n"
+        "——————\n<b>→ Введите общую сумму в рублях.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "menu:back")]]),
+    )
+
+
+async def show_first_allocation_preview(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+    total: Decimal,
+):
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await state.clear()
+        await message.answer("Профиль не найден. Запустите /start.")
+        return
+    await state.update_data(first_allocation_total=str(total))
+    await state.set_state(SetupStates.first_allocation_confirm)
+    await message.answer(
+        first_allocation_preview_text(allocator, total),
+        reply_markup=keyboard([
+            [("← Назад", "firstallocation:start"), ("✔️ Применить", "firstallocation:apply")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "firstallocation:separated")
+async def preview_separated_first_allocation(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    await show_first_allocation_preview(
+        callback.message,
+        state,
+        callback.from_user.id,
+        allocator.first_distribution_source_total(),
+    )
+
+
+@router.message(SetupStates.first_allocation_amount)
+async def save_first_allocation_total(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 ₽ и выше.")
+        return
+    await show_first_allocation_preview(message, state, message.from_user.id, value)
+
+
+@router.callback_query(SetupStates.first_allocation_confirm, F.data == "firstallocation:apply")
+async def apply_first_allocation(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    data = await state.get_data()
+    total = Decimal(str(data.get("first_allocation_total", "0")))
+    allocations = allocator.apply_first_distribution(total)
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    lines = "\n".join(
+        f"• <b>{escape(name)}</b> — {rub(amount)}"
+        for name, amount in allocations.items()
+    ) or "• Распределять пока нечего"
+    await callback.message.answer(
+        "<b>ПЕРВОЕ РАСПРЕДЕЛЕНИЕ СОХРАНЕНО</b>\n\n"
+        f"{lines}\n\n"
+        "Теперь физически переведите указанные суммы по соответствующим счетам и конвертам.",
         reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 

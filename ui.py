@@ -47,6 +47,7 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
 
     if allocator:
         rows.append([("Прогноз распределения дохода", "menu:forecast")])
+        rows.append([("Распределить текущие деньги", "firstallocation:start")])
 
     if allocator and allocator.settings.income_rhythm == "cyclic":
         missing_phase = next(

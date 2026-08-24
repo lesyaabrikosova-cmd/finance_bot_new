@@ -57,11 +57,11 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertEqual(cyclic.active_mode(), 4)
         cyclic.state.intercontract_reserve = D("400")
         self.assertEqual(cyclic.active_mode(), 5)
-        cyclic.state.pillow_force_majeure = D("100")
-        self.assertEqual(cyclic.active_mode(), 6)
         cyclic.state.pillow_stabilizer = D("200")
-        self.assertEqual(cyclic.active_mode(), 7)
+        self.assertEqual(cyclic.active_mode(), 6)
         cyclic.state.pillow_stabilizer = D("400")
+        self.assertEqual(cyclic.active_mode(), 7)
+        cyclic.state.pillow_force_majeure = D("100")
         self.assertEqual(cyclic.active_mode(), 8)
         self.assertEqual(cyclic.mode_title(3), "Заплати будущему себе.")
         self.assertEqual(cyclic.mode_title(4), "Не на хлебе и воде.")
@@ -222,9 +222,9 @@ class ModeTransitionTests(unittest.TestCase):
         result = allocator.process_income(D("2000"), "Тест")
 
         self.assert_money(result.allocations["Досрочное"], "100.00")
-        self.assert_money(result.allocations["Подушка"], "200.00")
-        self.assert_money(result.allocations["Стабилизатор дохода"], "1420.00")
-        self.assert_money(result.allocations["Инвестиции"], "280.00")
+        self.assert_money(result.allocations["Подушка"], "0.00")
+        self.assert_money(result.allocations["Стабилизатор дохода"], "1540.00")
+        self.assert_money(result.allocations["Инвестиции"], "360.00")
         self.assertNotIn("Цели:Цель", result.allocations)
         self.assert_money(result.super_income_part, "1000.00")
 
@@ -233,9 +233,9 @@ class ModeTransitionTests(unittest.TestCase):
 
         result = allocator.process_income(D("1500"), "Тест")
 
-        self.assert_money(result.allocations["Подушка"], "100.00")
-        self.assert_money(result.allocations["Стабилизатор дохода"], "1240.00")
-        self.assert_money(result.allocations["Инвестиции"], "160.00")
+        self.assert_money(result.allocations["Подушка"], "0.00")
+        self.assert_money(result.allocations["Стабилизатор дохода"], "1300.00")
+        self.assert_money(result.allocations["Инвестиции"], "200.00")
         self.assertNotIn("Цели:Цель", result.allocations)
         self.assert_money(result.super_income_part, "500.00")
 
@@ -387,9 +387,9 @@ class ModeTransitionTests(unittest.TestCase):
         )
 
         self.assert_money(remainder, "0.00")
-        self.assert_money(allocations["Подушка"], "10.00")
+        self.assert_money(allocations["Подушка"], "33.33")
         self.assert_money(allocations["Бытовой резерв"], "100.00")
-        self.assert_money(allocations["Инвестиции"], "23.33")
+        self.assert_money(allocations["Инвестиции"], "0.00")
 
     def test_super_income_is_repeated_after_mode_change(self):
         allocator = self.make_allocator(stabilizer="900")
