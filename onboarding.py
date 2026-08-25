@@ -188,23 +188,33 @@ class SetupStates(StatesGroup):
 def keyboard(
     rows: list[list[tuple[str, str]]]
 ) -> InlineKeyboardMarkup:
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
+    seen_callbacks: set[str] = set()
+    normalized_rows: list[list[InlineKeyboardButton]] = []
+    for row in rows:
+        normalized_row = []
+        for text, data in row:
+            # Одна и та же команда не должна отображаться в клавиатуре дважды.
+            if data in seen_callbacks:
+                continue
+            seen_callbacks.add(data)
+            normalized_row.append(
                 InlineKeyboardButton(
                     text=(
                         "✖️ Отмена" if text == "Отмена"
                         else "+ Другое" if text == "Другое"
                         else "Продолжить →" if text == "Продолжить"
+                        else "← Назад" if text == "Назад"
+                        else "✔️ Готово" if text == "Готово"
+                        else "✔️ Сохранить" if text == "Сохранить"
                         else text
                     ),
                     callback_data=data,
                 )
-                for text, data in row
-            ]
-            for row in rows
-        ]
+            )
+        if normalized_row:
+            normalized_rows.append(normalized_row)
+    return InlineKeyboardMarkup(
+        inline_keyboard=normalized_rows
     )
 
 
@@ -2053,6 +2063,44 @@ def category_added_totals(data: dict, category: str) -> dict[str, Decimal]:
     return grouped
 
 
+def category_added_entries(data: dict, category: str) -> list[dict]:
+    """Группирует введённые суммы, не заменяя их среднемесячными значениями."""
+    grouped: dict[tuple[str, str, str], dict] = {}
+    items = list(data.get("km_items", [])) + list(data.get("br_items", []))
+    for item in items:
+        if item.get("source_category", item.get("category")) != category:
+            continue
+        name = km_item_display_name(item)
+        months = Decimal(str(item.get("months", "1")))
+        due_date = str(item.get("due_date") or "")
+        key = (name, str(months.normalize()), due_date)
+        amount = Decimal(str(item.get("amount", item.get("monthly", "0"))))
+        if key not in grouped:
+            grouped[key] = {
+                "name": name,
+                "amount": Decimal("0"),
+                "months": months,
+                "due_date": due_date,
+            }
+        grouped[key]["amount"] += amount
+    return list(grouped.values())
+
+
+def input_period_label(months: Decimal, due_date: str = "") -> str:
+    """Человеческий период в тех единицах, которые вводил пользователь."""
+    if due_date:
+        return f"к {date.fromisoformat(due_date).strftime('%d.%m.%Y')}"
+    weekly_months = Decimal("12") / Decimal("52")
+    if abs(months - weekly_months) < Decimal("0.000001"):
+        return "в неделю"
+    if months == Decimal("1"):
+        return "в месяц"
+    if months == Decimal("12"):
+        return "в год"
+    formatted = format(months.normalize(), "f")
+    return f"за {formatted} мес."
+
+
 async def show_km_category_after_save(
     message: Message,
     state: FSMContext,
@@ -2061,11 +2109,13 @@ async def show_km_category_after_save(
 ):
     """Показывает компактный итог текущей категории после сохранения."""
     data = await state.get_data()
-    grouped = category_added_totals(data, category)
+    grouped = category_added_entries(data, category)
     symbol = data.get("phase_currency_symbol", "₽") if data.get("income_rhythm") == "cyclic" else "₽"
     added = "\n".join(
-        f"• <b>{escape(name)}</b> — {format_money_symbol(money2(amount), symbol)} / мес."
-        for name, amount in grouped.items()
+        f"• <b>{escape(entry['name'])}</b> — "
+        f"{format_money_symbol(money2(entry['amount']), symbol)} "
+        f"{input_period_label(entry['months'], entry['due_date'])}"
+        for entry in grouped
     )
     labels = {**{key: value[0] for key, value in KM_CATEGORIES.items()}, **{key: value[0] for key, value in BR_CATEGORIES.items()}}
     heading = labels.get(category, data.get("pending_km_category_label", category)).upper()
@@ -2262,7 +2312,7 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         "pets": [
             [("Корм", "food"), ("Наполнитель", "litter")],
             [("Пелёнки", "pads"), ("Ветеринар", "vet")],
-            [("Аксессуары", "accessories"), ("+ Другое", "other")],
+            [("Аксессуары", "accessories")],
         ],
         "children": [
             [("Детский сад", "kindergarten"), ("Школа", "school")],
@@ -3492,7 +3542,7 @@ async def prepare_education_large_payment(message: Message, state: FSMContext, d
         f"Оплатить до — <b>{due_date.strftime('%d.%m.%Y')}</b>\n"
         f"Откладывать — <b>{rub(monthly)} в месяц</b>",
         reply_markup=keyboard([
-            [("Сохранить", "edupayment:save"), ("Изменить сумму", "edupayment:amount")],
+            [("Изменить сумму", "edupayment:amount"), ("Сохранить", "edupayment:save")],
             [("← Назад", "km:cancel"), ("Изменить срок", "edupayment:due")],
         ]),
     )
@@ -3602,7 +3652,10 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
             "amount": item["amount"],
             "months": item["months"],
             "monthly": item["monthly"],
+            "subcategory": item.get("subcategory"),
         }
+        if item.get("due_date"):
+            br_item["due_date"] = item["due_date"]
         br_items.append(br_item)
         category = item["category"]
         await state.update_data(br_items=br_items, pending_life_destination=None)
@@ -3735,6 +3788,7 @@ async def move_km_item_to_household_reserve(callback: CallbackQuery, state: FSMC
         return
 
     item = dict(km_items.pop(index))
+    item["source_category"] = "communication"
     item["category"] = "subscriptions"
     item["category_label"] = "Подписки"
     br_items = list(data.get("br_items", []))
@@ -4723,7 +4777,7 @@ async def save_br_item(message: Message, state: FSMContext, months: Decimal):
 
     index = len(items) - 1
     await message.answer(
-        f"<b>{escape(item['name'])}</b> — {rub(monthly)} / мес.",
+        f"<b>{escape(item['name'])}</b> — {rub(amount)} {input_period_label(months)}",
         reply_markup=keyboard([[('Изменить', f'bredit:item:{index}'), ('Удалить', f'bredit:delete:{index}')]])
     )
     await show_br_menu(message, state)

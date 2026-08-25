@@ -12,11 +12,14 @@ from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
     build_state_from_data,
+    category_added_entries,
     category_added_totals,
     communication_item_name,
     default_km_storage,
     force_majeure_minimum_for_rhythm,
     housing_item_name,
+    input_period_label,
+    keyboard,
     km_item_display_name,
     km_item_totals_by_name,
     life_classification_reason,
@@ -48,6 +51,27 @@ from storage import (  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_onboarding_keyboard_removes_duplicate_callbacks(self):
+        markup = keyboard([
+            [("Аксессуары", "kmquick:pets:accessories"), ("+ Другое", "kmquick:pets:other")],
+            [("+ Другое", "kmquick:pets:other"), ("✔️ Готово", "km:cancel")],
+        ])
+        buttons = [button for row in markup.inline_keyboard for button in row]
+        callbacks = [button.callback_data for button in buttons]
+        self.assertEqual(callbacks.count("kmquick:pets:other"), 1)
+        self.assertEqual(len(callbacks), len(set(callbacks)))
+
+    def test_onboarding_keyboard_normalizes_service_button_labels(self):
+        markup = keyboard([
+            [("Назад", "back"), ("Сохранить", "save")],
+            [("Отмена", "cancel"), ("Готово", "done")],
+        ])
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertEqual(
+            labels,
+            ["← Назад", "✔️ Сохранить", "✖️ Отмена", "✔️ Готово"],
+        )
+
     def test_category_summary_collects_all_items_and_sums_duplicates(self):
         data = {
             "km_items": [
@@ -63,6 +87,42 @@ class TaxFeatureTests(unittest.TestCase):
 
         self.assertEqual(totals["Вейп"], Decimal("2351.29"))
         self.assertEqual(totals["Сигареты"], Decimal("5000"))
+
+    def test_category_input_summary_keeps_original_amount_and_period(self):
+        data = {
+            "km_items": [
+                {"category": "health", "name": "Стоматолог", "amount": "12000", "months": "12", "monthly": "1000"},
+                {"category": "health", "name": "Стоматолог", "amount": "8000", "months": "12", "monthly": "666.67"},
+                {"category": "health", "name": "Стоматолог", "amount": "5000", "months": "6", "monthly": "833.33"},
+            ],
+            "br_items": [],
+        }
+
+        entries = category_added_entries(data, "health")
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["amount"], Decimal("20000"))
+        self.assertEqual(input_period_label(entries[0]["months"]), "в год")
+        self.assertEqual(entries[1]["amount"], Decimal("5000"))
+        self.assertEqual(input_period_label(entries[1]["months"]), "за 6 мес.")
+
+    def test_category_input_summary_displays_due_date(self):
+        entries = category_added_entries({
+            "km_items": [{
+                "category": "housing",
+                "name": "Налог на имущество · Квартира",
+                "amount": "900",
+                "months": "4",
+                "monthly": "225",
+                "due_date": "2026-12-01",
+            }],
+            "br_items": [],
+        }, "housing")
+
+        self.assertEqual(
+            input_period_label(entries[0]["months"], entries[0]["due_date"]),
+            "к 01.12.2026",
+        )
 
     def test_cyclic_force_majeure_minimum_is_always_six_months(self):
         self.assertEqual(force_majeure_minimum_for_rhythm("cyclic"), 6)
