@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+from datetime import date
 
 from dotenv import load_dotenv
 
@@ -719,6 +720,25 @@ async def set_bot_commands(
 # ============================================================
 
 
+async def period_reminder_worker(bot: Bot):
+    """Раз в час напоминает о запланированном старте; повторов за одну дату нет."""
+    while True:
+        today = date.today().isoformat()
+        for telegram_id, activation_date in db.due_period_reminders(today):
+            try:
+                await bot.send_message(
+                    telegram_id,
+                    "<b>ПОРА НАЧАТЬ ПЕРВЫЙ РАСЧЁТНЫЙ ПЕРИОД</b>\n\n"
+                    "Вы выбрали эту дату при настройке. Начните период, когда будете готовы "
+                    "сделать первое распределение.",
+                    reply_markup=keyboard([[("Начать расчётный период", "periodsetup:today")]]),
+                )
+                db.mark_period_reminder_sent(telegram_id, activation_date)
+            except Exception:
+                logging.exception("Не удалось отправить напоминание пользователю %s", telegram_id)
+        await asyncio.sleep(3600)
+
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -781,6 +801,8 @@ async def main():
         "Финансовый Аллокатор запущен."
     )
 
+    reminder_task = asyncio.create_task(period_reminder_worker(bot))
+
     try:
         await dp.start_polling(
             bot,
@@ -788,6 +810,7 @@ async def main():
         )
 
     finally:
+        reminder_task.cancel()
         db.close()
         await bot.session.close()
 

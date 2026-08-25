@@ -1,13 +1,155 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
 
+from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
 from storage import db
 from ui import keyboard, main_menu_keyboard
 
 router = Router()
+
+
+class FundCurrencyStates(StatesGroup):
+    amount = State()
+    manual_rate = State()
+
+
+def _decimal(text: str | None) -> Decimal | None:
+    try:
+        return Decimal(str(text or "").replace(" ", "").replace(",", "."))
+    except InvalidOperation:
+        return None
+
+
+def _fund_currency_text(allocator) -> str:
+    state = allocator.state
+    lines = []
+    for code, amount in state.fund_salary_currencies.items():
+        rate = state.fund_salary_period_rates.get(code, Decimal("1"))
+        lines.append(
+            f"• <b>{amount} {currency_symbol(code)}</b> · курс {rate} ₽ · "
+            f"эквивалент {(amount * rate).quantize(Decimal('0.01'))} ₽"
+        )
+    if not lines:
+        lines.append("• Валютные остатки пока не указаны")
+    return (
+        "<b>ВАЛЮТЫ ФОНДА ЗАРПЛАТЫ</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\nПлановый эквивалент Фонда — <b>{state.intercontract_reserve} ₽</b>.\n\n"
+        "Курс фиксируется для расчётного периода. Ежедневные колебания не меняют режим. "
+        "После реального обмена укажите новые фактические остатки: это внутреннее перемещение, "
+        "оно не считается доходом."
+    )
+
+
+@router.callback_query(F.data == "fundcurrency:menu")
+async def fund_currency_menu(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or allocator.settings.income_rhythm != "cyclic":
+        return
+    await callback.message.answer(
+        _fund_currency_text(allocator),
+        reply_markup=keyboard([
+            [("₽ RUB", "fundcurrency:add:RUB"), ("$ USD", "fundcurrency:add:USD")],
+            [("€ EUR", "fundcurrency:add:EUR"), ("₹ INR", "fundcurrency:add:INR")],
+            [("د.إ AED", "fundcurrency:add:AED"), ("¥ CNY", "fundcurrency:add:CNY")],
+            [("← Главное меню", "menu:back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("fundcurrency:add:"))
+async def ask_fund_currency_amount(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    code = callback.data.rsplit(":", 1)[-1]
+    await state.update_data(fund_currency_code=code)
+    await state.set_state(FundCurrencyStates.amount)
+    await callback.message.answer(
+        f"<b>СКОЛЬКО {code} ФАКТИЧЕСКИ ЛЕЖИТ В ФОНДЕ ЗАРПЛАТЫ?</b>\n\n"
+        "Введите текущий остаток. Отправьте 0, чтобы удалить валюту из списка.",
+        reply_markup=keyboard([[("← Назад", "fundcurrency:menu")]]),
+    )
+
+
+@router.message(FundCurrencyStates.amount)
+async def save_fund_currency_amount(message: Message, state: FSMContext):
+    amount = _decimal(message.text)
+    if amount is None or amount < 0:
+        await message.answer("Введите сумму от 0 и выше.")
+        return
+    data = await state.get_data()
+    code = data["fund_currency_code"]
+    await state.update_data(fund_currency_amount=str(amount))
+    if code == "RUB" or amount == 0:
+        allocator = db.load_allocator(message.from_user.id)
+        allocator.state.set_fund_salary_currency(code, amount, Decimal("1"))
+        db.save_allocator(message.from_user.id, allocator)
+        await state.clear()
+        await message.answer(_fund_currency_text(allocator), reply_markup=main_menu_keyboard(message.from_user.id))
+        return
+    try:
+        quote = await CurrencyRateService(db).get_rate_async(code)
+    except CurrencyRateUnavailable:
+        await state.set_state(FundCurrencyStates.manual_rate)
+        await message.answer("Автоматический курс сейчас недоступен. Введите, сколько рублей считать за 1 единицу валюты.")
+        return
+    await state.update_data(fund_currency_cbr_rate=str(quote.rub_per_unit))
+    await message.answer(
+        f"Ориентир Банка России на {quote.rate_date.strftime('%d.%m.%Y')}: "
+        f"<b>1 {code} = {quote.rub_per_unit.quantize(Decimal('0.0001'))} ₽</b>.\n\n"
+        "Реальный обмен обычно менее выгоден из-за спреда и комиссии. Можно зафиксировать "
+        "ориентир ЦБ или указать собственный плановый курс.",
+        reply_markup=keyboard([
+            [("Использовать курс ЦБ", "fundcurrency:rate:cbr")],
+            [("Ввести курс вручную", "fundcurrency:rate:manual")],
+            [("✖️ Отмена", "fundcurrency:menu")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "fundcurrency:rate:cbr")
+async def apply_fund_currency_cbr(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    allocator = db.load_allocator(callback.from_user.id)
+    allocator.state.set_fund_salary_currency(
+        data["fund_currency_code"], Decimal(data["fund_currency_amount"]),
+        Decimal(data["fund_currency_cbr_rate"]), locked_at=datetime.now().isoformat(),
+    )
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await callback.message.answer(_fund_currency_text(allocator), reply_markup=main_menu_keyboard(callback.from_user.id))
+
+
+@router.callback_query(F.data == "fundcurrency:rate:manual")
+async def ask_manual_fund_rate(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(FundCurrencyStates.manual_rate)
+    await callback.message.answer("Введите, сколько рублей учитывать за 1 единицу валюты.")
+
+
+@router.message(FundCurrencyStates.manual_rate)
+async def apply_manual_fund_rate(message: Message, state: FSMContext):
+    rate = _decimal(message.text)
+    if rate is None or rate <= 0:
+        await message.answer("Введите курс больше нуля.")
+        return
+    data = await state.get_data()
+    allocator = db.load_allocator(message.from_user.id)
+    allocator.state.set_fund_salary_currency(
+        data["fund_currency_code"], Decimal(data["fund_currency_amount"]), rate,
+        locked_at=datetime.now().isoformat(),
+    )
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await message.answer(_fund_currency_text(allocator), reply_markup=main_menu_keyboard(message.from_user.id))
 
 
 @router.callback_query(F.data == "phaselife:menu")

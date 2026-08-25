@@ -461,6 +461,10 @@ class Database:
                 period_anchor_day INTEGER NOT NULL DEFAULT 0,
                 period_status TEXT NOT NULL DEFAULT 'legacy',
                 period_activation_date TEXT,
+                period_reminder_sent_for TEXT,
+                fund_salary_currencies TEXT NOT NULL DEFAULT '{}',
+                fund_salary_period_rates TEXT NOT NULL DEFAULT '{}',
+                fund_salary_rates_locked_at TEXT,
 
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
@@ -625,6 +629,14 @@ class Database:
             )
         if "period_activation_date" not in state_columns:
             cursor.execute("ALTER TABLE state ADD COLUMN period_activation_date TEXT")
+        if "period_reminder_sent_for" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN period_reminder_sent_for TEXT")
+        if "fund_salary_currencies" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN fund_salary_currencies TEXT NOT NULL DEFAULT '{}'")
+        if "fund_salary_period_rates" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN fund_salary_period_rates TEXT NOT NULL DEFAULT '{}'")
+        if "fund_salary_rates_locked_at" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN fund_salary_rates_locked_at TEXT")
 
         # ----------------------------------------------------
         # Индексы
@@ -701,6 +713,25 @@ class Database:
         ).fetchone()
 
         return row is not None
+
+    def due_period_reminders(self, today: str) -> list[tuple[int, str]]:
+        rows = self.connection.execute(
+            """
+            SELECT telegram_id, period_activation_date FROM state
+            WHERE period_status = 'scheduled'
+              AND period_activation_date <= ?
+              AND (period_reminder_sent_for IS NULL OR period_reminder_sent_for != period_activation_date)
+            """,
+            (today,),
+        ).fetchall()
+        return [(int(row["telegram_id"]), str(row["period_activation_date"])) for row in rows]
+
+    def mark_period_reminder_sent(self, telegram_id: int, activation_date: str) -> None:
+        self.connection.execute(
+            "UPDATE state SET period_reminder_sent_for = ? WHERE telegram_id = ?",
+            (activation_date, telegram_id),
+        )
+        self.connection.commit()
 
     # ========================================================
     # СОХРАНЕНИЕ НАСТРОЕК
@@ -1339,7 +1370,11 @@ class Database:
                 period_ends_at,
                 period_anchor_day,
                 period_status,
-                period_activation_date
+                period_activation_date,
+                period_reminder_sent_for,
+                fund_salary_currencies,
+                fund_salary_period_rates,
+                fund_salary_rates_locked_at
             )
 
             VALUES (
@@ -1349,7 +1384,7 @@ class Database:
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
-                ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
 
             ON CONFLICT(telegram_id)
@@ -1422,7 +1457,12 @@ class Database:
                     excluded.period_status,
 
                 period_activation_date =
-                    excluded.period_activation_date
+                    excluded.period_activation_date,
+
+                period_reminder_sent_for = excluded.period_reminder_sent_for,
+                fund_salary_currencies = excluded.fund_salary_currencies,
+                fund_salary_period_rates = excluded.fund_salary_period_rates,
+                fund_salary_rates_locked_at = excluded.fund_salary_rates_locked_at
             """,
             (
                 telegram_id,
@@ -1498,6 +1538,10 @@ class Database:
                 state.period_anchor_day,
                 state.period_status,
                 state.period_activation_date,
+                state.period_reminder_sent_for,
+                serialize_json(state.fund_salary_currencies),
+                serialize_json(state.fund_salary_period_rates),
+                state.fund_salary_rates_locked_at,
             ),
         )
 
@@ -1626,6 +1670,11 @@ class Database:
 
             period_activation_date=
                 row["period_activation_date"],
+
+            period_reminder_sent_for=row["period_reminder_sent_for"],
+            fund_salary_currencies=deserialize_json(row["fund_salary_currencies"]),
+            fund_salary_period_rates=deserialize_json(row["fund_salary_period_rates"]),
+            fund_salary_rates_locked_at=row["fund_salary_rates_locked_at"],
         )
 
         return state

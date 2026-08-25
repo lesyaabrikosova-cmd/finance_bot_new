@@ -179,6 +179,41 @@ class CurrencyFoundationTests(unittest.TestCase):
             allocator.state.intercontract_months_remaining,
         )
 
+    def test_salary_fund_keeps_native_currency_and_fixed_period_rate(self):
+        state = AllocatorState()
+        state.set_fund_salary_currency("USD", Decimal("2400"), Decimal("80"))
+        self.assertEqual(state.fund_salary_currencies["USD"], Decimal("2400"))
+        self.assertEqual(state.intercontract_reserve, Decimal("192000.00"))
+        # Новый биржевой курс ничего не меняет, пока пользователь его не зафиксировал.
+        self.assertEqual(state.fund_salary_period_rates["USD"], Decimal("80"))
+
+    def test_real_currency_exchange_is_not_income(self):
+        state = AllocatorState(
+            period_income=Decimal("57000"), cycle_income=Decimal("840000"), period_tax=Decimal("1000")
+        )
+        state.set_fund_salary_currency("USD", Decimal("2400"), Decimal("80"))
+        before = (state.period_income, state.cycle_income, state.period_tax)
+        state.convert_fund_salary_currency(
+            "USD", "RUB", Decimal("800"), Decimal("63000"), Decimal("1")
+        )
+        self.assertEqual((state.period_income, state.cycle_income, state.period_tax), before)
+        self.assertEqual(state.fund_salary_currencies["USD"], Decimal("1600"))
+        self.assertEqual(state.fund_salary_currencies["RUB"], Decimal("63000"))
+
+    def test_database_migrates_and_persists_multicurrency_salary_fund(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "test.db")
+            state = AllocatorState(period_status="scheduled", period_activation_date="2026-09-01")
+            state.set_fund_salary_currency("INR", Decimal("840000"), Decimal("0.925"))
+            database.save_state(991002, state)
+            restored = database.load_state(991002)
+            self.assertEqual(restored.fund_salary_currencies["INR"], Decimal("840000"))
+            self.assertEqual(restored.fund_salary_period_rates["INR"], Decimal("0.925"))
+            self.assertEqual(database.due_period_reminders("2026-09-01"), [(991002, "2026-09-01")])
+            database.mark_period_reminder_sent(991002, "2026-09-01")
+            self.assertEqual(database.due_period_reminders("2026-09-01"), [])
+            database.close()
+
 
 if __name__ == "__main__":
     unittest.main()

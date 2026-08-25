@@ -799,6 +799,14 @@ class AllocatorState:
     period_anchor_day: int = 0
     period_status: str = "legacy"
     period_activation_date: Optional[str] = None
+    period_reminder_sent_for: Optional[str] = None
+
+    # Фактические деньги Фонда Зарплаты могут храниться в разных валютах.
+    # Курсы фиксируются пользователем на расчётный период: ежедневные колебания
+    # биржевого ориентира не должны самопроизвольно менять финансовый режим.
+    fund_salary_currencies: Dict[str, Decimal] = field(default_factory=dict)
+    fund_salary_period_rates: Dict[str, Decimal] = field(default_factory=dict)
+    fund_salary_rates_locked_at: Optional[str] = None
 
     def __post_init__(self):
         self.life_balance = D(self.life_balance)
@@ -841,6 +849,19 @@ class AllocatorState:
         if self.period_status not in {"legacy", "not_started", "scheduled", "active"}:
             self.period_status = "legacy"
 
+        self.fund_salary_currencies = {
+            str(code).strip().upper(): max(ZERO, D(amount))
+            for code, amount in (self.fund_salary_currencies or {}).items()
+            if str(code).strip() and D(amount) > ZERO
+        }
+        self.fund_salary_period_rates = {
+            str(code).strip().upper(): D(rate)
+            for code, rate in (self.fund_salary_period_rates or {}).items()
+            if str(code).strip() and D(rate) > ZERO
+        }
+        if "RUB" in self.fund_salary_currencies:
+            self.fund_salary_period_rates["RUB"] = Decimal("1")
+
         self.period_income = D(self.period_income)
         self.cycle_income = D(self.cycle_income)
         self.period_tax = D(self.period_tax)
@@ -874,6 +895,87 @@ class AllocatorState:
         self.period_status = "scheduled"
         self.period_activation_date = start.isoformat()
         self.period_anchor_day = start.day
+
+    def fund_salary_rub_equivalent(self) -> Decimal:
+        return money(sum(
+            amount * self.fund_salary_period_rates.get(code, Decimal("1") if code == "RUB" else ZERO)
+            for code, amount in self.fund_salary_currencies.items()
+        ))
+
+    def set_fund_salary_currency(
+        self,
+        currency_code: str,
+        amount: Decimal,
+        rub_per_unit: Decimal,
+        *,
+        locked_at: Optional[str] = None,
+    ) -> Decimal:
+        code = str(currency_code or "RUB").strip().upper()
+        balance = max(ZERO, D(amount))
+        rate = Decimal("1") if code == "RUB" else D(rub_per_unit)
+        if rate <= ZERO:
+            raise ValueError("Курс валюты должен быть больше нуля.")
+        if balance == ZERO:
+            self.fund_salary_currencies.pop(code, None)
+            self.fund_salary_period_rates.pop(code, None)
+        else:
+            self.fund_salary_currencies[code] = balance
+            self.fund_salary_period_rates[code] = rate
+        self.fund_salary_rates_locked_at = locked_at or datetime.now().isoformat()
+        self.intercontract_reserve = self.fund_salary_rub_equivalent()
+        return self.intercontract_reserve
+
+    def convert_fund_salary_currency(
+        self,
+        from_code: str,
+        to_code: str,
+        amount_spent: Decimal,
+        amount_received: Decimal,
+        to_rub_per_unit: Decimal,
+    ) -> Decimal:
+        """Фиксирует реальный обмен внутри Фонда без создания нового дохода."""
+        source = str(from_code).strip().upper()
+        target = str(to_code).strip().upper()
+        spent = D(amount_spent)
+        received = D(amount_received)
+        if source == target or spent <= ZERO or received < ZERO:
+            raise ValueError("Проверьте валюты и суммы обмена.")
+        available = self.fund_salary_currencies.get(source, ZERO)
+        if spent > available:
+            raise ValueError("В Фонде Зарплаты недостаточно этой валюты.")
+        source_rate = self.fund_salary_period_rates.get(source, Decimal("1") if source == "RUB" else ZERO)
+        self.set_fund_salary_currency(source, available - spent, source_rate)
+        target_balance = self.fund_salary_currencies.get(target, ZERO) + received
+        self.set_fund_salary_currency(target, target_balance, to_rub_per_unit)
+        return self.intercontract_reserve
+
+    def reconcile_fund_salary_currencies(self) -> None:
+        """Подгоняет фактический валютный состав к уже рассчитанному размеру Фонда."""
+        if not self.fund_salary_currencies:
+            return
+        target = money(self.intercontract_reserve)
+        current = self.fund_salary_rub_equivalent()
+        difference = target - current
+        if difference > ZERO:
+            self.fund_salary_currencies["RUB"] = self.fund_salary_currencies.get("RUB", ZERO) + difference
+            self.fund_salary_period_rates["RUB"] = Decimal("1")
+            return
+        to_remove = -difference
+        for code in (["RUB"] if "RUB" in self.fund_salary_currencies else []) + [
+            code for code in self.fund_salary_currencies if code != "RUB"
+        ]:
+            if to_remove <= ZERO:
+                break
+            rate = self.fund_salary_period_rates.get(code, ZERO)
+            if rate <= ZERO:
+                continue
+            balance = self.fund_salary_currencies.get(code, ZERO)
+            units = min(balance, to_remove / rate)
+            self.fund_salary_currencies[code] = balance - units
+            to_remove -= units * rate
+            if self.fund_salary_currencies[code] <= CENT:
+                self.fund_salary_currencies.pop(code, None)
+                self.fund_salary_period_rates.pop(code, None)
 
     @property
     def pillow_balance(self) -> Decimal:
@@ -1341,6 +1443,8 @@ class FinancialAllocator:
                 st.investments += overflow
                 result["Инвестиции"] = overflow
 
+        st.reconcile_fund_salary_currencies()
+
         return {name: money(value) for name, value in result.items() if value > ZERO}
 
     # ========================================================
@@ -1394,6 +1498,7 @@ class FinancialAllocator:
         missing_life = max(ZERO, self.settings.household_life - self.state.life_balance)
         amount = min(self.intercontract_monthly_salary, missing_life, self.state.intercontract_reserve)
         self.state.intercontract_reserve -= amount
+        self.state.reconcile_fund_salary_currencies()
         self.state.life_balance += amount
         self.state.intercontract_months_remaining -= ONE
         self.state.current_phase_months_remaining = self.state.intercontract_months_remaining
@@ -2903,6 +3008,8 @@ class FinancialAllocator:
         self.state.distribution_history.append(
             operation
         )
+
+        self.state.reconcile_fund_salary_currencies()
 
         return DistributionResult(
             income=income,
