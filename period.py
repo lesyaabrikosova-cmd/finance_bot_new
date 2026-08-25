@@ -10,6 +10,54 @@ from ui import keyboard, main_menu_keyboard
 router = Router()
 
 
+@router.callback_query(F.data == "phaselife:menu")
+async def show_phase_life_menu(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or allocator.settings.income_rhythm != "cyclic":
+        return
+    rows = []
+    for phase, label in (("work", "Рабочая жизнь"), ("break", "Жизнь в перерыве")):
+        budget = allocator.settings.phase_life(phase)
+        status = "✓" if budget and budget.completed else "⚠️"
+        action = "Изменить" if budget and budget.completed else "Заполнить"
+        rows.append([(f"{status} {action}: {label}", f"phaselife:fill:{phase}")])
+    rows.extend([
+        [("ℹ️ Как считать две жизни", "phaselife:help")],
+        [("← Главное меню", "menu:back")],
+    ])
+    await callback.message.answer(
+        "<b>ЖИЗНЬ В РАЗНЫХ ЧАСТЯХ ЦИКЛА</b>\n\n"
+        "Расходы на работе и в перерыве могут отличаться. Здесь можно заполнить или изменить "
+        "каждую часть отдельно.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "phaselife:help")
+async def show_phase_life_help(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "<b>КАК СЧИТАТЬ ДВЕ ЖИЗНИ</b>\n\n"
+        "Аллокатор отдельно запоминает расходы во время работы и во время перерыва. "
+        "Не усредняйте их между собой.\n\n"
+        "• Если транспорт, здоровье или связь оплачиваются только дома — добавляйте их только "
+        "в жизнь в перерыве.\n"
+        "• Если расход возникает только на работе — добавляйте его только в рабочую жизнь.\n"
+        "• Домашние обязательства, которые продолжаются во время отъезда, отметьте при отдельной "
+        "проверке: Аллокатор зарезервирует их заранее.\n"
+        "• Расходы, которые работодатель оплачивает напрямую, не добавляйте.\n\n"
+        "Смотрите банковскую аналитику только за сопоставимые месяцы нужной части цикла. Например, "
+        "при графике 5 / 7 расходы в России считайте по российским месяцам, а не делите на весь год. "
+        "При графике месяц через месяц берите несколько домашних или несколько рабочих месяцев.\n\n"
+        "Для зарубежной работы можно выбрать местную валюту. Аллокатор сохранит исходные суммы и "
+        "покажет рублёвый эквивалент по выбранному курсу.",
+        reply_markup=keyboard([
+            [("← Назад", "phaselife:menu")],
+        ]),
+    )
+
+
 @router.callback_query(F.data == "intercontract:start")
 async def start_intercontract_period(callback: CallbackQuery):
     await callback.answer()

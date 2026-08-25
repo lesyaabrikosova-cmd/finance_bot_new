@@ -288,8 +288,19 @@ async def send_state(
     )
 
     if settings.income_rhythm == "cyclic":
+        phase_name = "Перерыв" if state.current_cycle_phase == "break" else "Рабочая часть"
+        phase_months = (
+            state.intercontract_months_remaining
+            if state.current_cycle_phase == "break"
+            else state.current_phase_months_remaining
+        )
         text += (
-            "\n\n<b>Фонд Зарплаты</b>: "
+            "\n\n<b>Финансовый цикл</b>: "
+            f"<b>{format(settings.income_work_months.normalize(), 'f')} / "
+            f"{format(settings.income_gap_months.normalize(), 'f')}</b>\n"
+            "<b>Текущая фаза</b>: "
+            f"<b>{phase_name} · осталось {format(phase_months.normalize(), 'f')} мес.</b>\n"
+            "<b>Фонд Зарплаты</b>: "
             f"<b>{fmt_money(state.intercontract_reserve)} ₽</b> / "
             f"{fmt_money(settings.intercontract_full_limit)} ₽\n"
             "<b>Обязательства рабочей части</b>: "

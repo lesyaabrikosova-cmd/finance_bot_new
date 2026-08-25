@@ -6488,7 +6488,6 @@ async def show_confirmation(
         for index, (icon, name) in enumerate(accounts, start=1)
     )
 
-    income_label = "Стабильный доход" if settings.profile_type == "stable" else "Средний доход"
     deficit = settings.total_critical_life - settings.average_income
     deficit_warning = ""
     if deficit > 0:
@@ -6511,36 +6510,41 @@ async def show_confirmation(
                 f"{format(state_object.intercontract_months_remaining.normalize(), 'f')} мес."
             )
         else:
-            phase_text = "Рабочая часть"
+            phase_text = (
+                "Рабочая часть · осталось "
+                f"{format(state_object.current_phase_months_remaining.normalize(), 'f')} мес."
+            )
         cycle_text = (
-            f"\nФинансовый цикл — <b>{settings.income_work_months} / {settings.income_gap_months}</b> "
-            f"({settings.income_work_months} мес. работы · {settings.income_gap_months} мес. перерыва)\n"
-            f"Текущая фаза — <b>{phase_text}</b>\n"
-            f"Стабилизатор — <b>{settings.stabilizer_target_months} мес.</b>\n"
-            f"Фонд Зарплаты сейчас — <b>{rub(state_object.intercontract_reserve)}</b> / "
-            f"<b>{rub(allocator.intercontract_current_limit)}</b>\n"
-            f"Обязательства на время контракта — <b>{rub(settings.contract_obligations_total)}</b>"
+            f"➖ <b>Финансовый цикл</b> — {settings.income_work_months} / {settings.income_gap_months}  "
+            f"({settings.income_work_months} мес. работы · {settings.income_gap_months} мес. перерыва)\n\n"
+            f"➖ <b>Текущая фаза</b> — {phase_text}\n\n"
+            f"➖ <b>Обязательства на время контракта</b> — {rub(settings.contract_obligations_total)}\n\n"
+            f"➖ <b>Фонд Зарплаты сейчас</b> — {rub(state_object.intercontract_reserve)} / "
+            f"{rub(allocator.intercontract_current_limit)}\n\n"
+            f"➖ <b>Стабилизатор</b> — {settings.stabilizer_target_months} мес.\n\n"
         )
 
     await state.set_state(SetupStates.confirmation)
     confirmation_text = (
         "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
-        f"Профиль — <b>{rhythm_labels.get(settings.income_rhythm)}</b>\n"
-        f"{income_label} — <b>{rub(settings.average_income)}</b>\n"
-        f"{cycle_text}\n"
-        f"Критический минимум — <b>{rub(settings.critical_life)}</b>\n"
-        f"Бытовой резерв — <b>{rub(settings.household_reserve)}</b>\n"
-        f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>\n"
-        f"Баланс жизни сейчас — <b>{rub(state_object.life_balance)}</b>\n"
-        f"\n<b>ТИПЫ ДОХОДОВ</b>\n{tax_types}"
+        f"➖ <b>Профиль</b> — {rhythm_labels.get(settings.income_rhythm)}\n\n"
+        f"{cycle_text}"
+        f"➖ <b>Средний доход</b> — {rub(settings.average_income)}\n\n"
+        f"➖ <b>Критический Минимум</b> — {rub(settings.critical_life)}\n\n"
+        f"➖ <b>Бытовой Резерв</b> — {rub(settings.household_reserve)}\n\n"
+        f"➖ <b>Устойчивая Жизнь</b> — {rub(settings.household_life)}\n\n"
+        f"➖ <b>Баланс жизни сейчас</b> — {rub(state_object.life_balance)}"
         f"{deficit_warning}\n\n"
-        "<b>ПОДГОТОВЬТЕ СЧЕТА И ФИНАНСОВЫЕ КОНВЕРТЫ:</b>\n\n"
+        f"<b><u>ТИПЫ ДОХОДОВ:</u></b>\n\n{tax_types}\n\n"
+        "<b><u>КОНВЕРТЫ:</u></b>\n\n"
+        "Откройте накопительные счета на ежедневный остаток в своём банке. Переименуйте.\n\n"
         f"{accounts_text}\n\n"
-        "<b>СТАРТОВЫЙ РЕЖИМ:</b>\n\n"
+        "<b><u>СТАРТОВЫЙ РЕЖИМ:</u></b>\n\n"
         f"{mode_progress}\n\n"
-        f"{escape(mode_name)}\n\n"
-        "<b>P.S.:</b> Цели и инвестиции появятся тогда, когда ваш финансовый режим "
-        "действительно будет готов направлять туда деньги."
+        f"«{escape(mode_name)}»\n\n"
+        "<b><u>P.S.:</u></b>\n\n"
+        "Цели и инвестиции появятся тогда, когда ваш финансовый режим действительно будет "
+        "готов направлять туда деньги."
     )
     confirmation_markup = keyboard([
         [("Сохранить профиль", "confirm:save")],

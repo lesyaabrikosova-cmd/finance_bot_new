@@ -50,6 +50,7 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         rows.append([("Распределить текущие деньги", "firstallocation:start")])
 
     if allocator and allocator.settings.income_rhythm == "cyclic":
+        rows.append([("Жизнь в рабочей части и перерыве", "phaselife:menu")])
         missing_phase = next(
             (
                 phase for phase in ("work", "break")
