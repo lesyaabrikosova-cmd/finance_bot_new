@@ -75,6 +75,27 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         self.assertEqual(allocations["Фонд Зарплаты"], Decimal("100000.00"))
         self.assertEqual(allocations["Стабилизатор дохода"], Decimal("100000.00"))
 
+    def test_first_rebalance_uses_existing_current_life(self):
+        allocator = self.cyclic_allocator({
+            "break": PhaseLifeBudget(
+                critical_life="40000", household_reserve="10000", completed=True
+            ),
+        })
+        allocator.settings.contract_obligations = {"ЖКХ": Decimal("27055")}
+        allocator.state.current_cycle_phase = "break"
+        allocator.state.intercontract_break_active = True
+        allocator.state.intercontract_months_remaining = Decimal("2")
+        allocator.state.life_balance = Decimal("42000")
+        allocator.state.intercontract_reserve = Decimal("192000")
+
+        before, after = allocator.rebalance_first_distribution()
+
+        self.assertEqual(before["Текущая жизнь"], Decimal("42000.00"))
+        self.assertEqual(after["Текущая жизнь"], Decimal("50000.00"))
+        self.assertEqual(after["Обязательства на время работы"], Decimal("27055.00"))
+        self.assertEqual(after["Фонд Зарплаты"], Decimal("100000.00"))
+        self.assertEqual(after["Стабилизатор дохода"], Decimal("56945.00"))
+
     def test_piecework_waterfall_fills_stabilizer_before_force_majeure(self):
         settings = UserSettings(
             has_debts=False,

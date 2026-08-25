@@ -1228,6 +1228,25 @@ class FinancialAllocator:
             + st.pillow_force_majeure
         )
 
+    def first_distribution_balances(self) -> Dict[str, Decimal]:
+        """Текущие остатки, которые участвуют в первом перераспределении."""
+        st = self.state
+        return {
+            "Текущая жизнь": money(st.life_balance),
+            "Минимальная подушка": money(st.pillow_minimum),
+            "Обязательства на время работы": money(st.contract_obligations_reserve),
+            "Фонд Зарплаты": money(st.intercontract_reserve),
+            "Стабилизатор дохода": money(st.pillow_stabilizer),
+            "Форс-мажорная подушка": money(st.pillow_force_majeure),
+        }
+
+    def rebalance_first_distribution(self) -> tuple[Dict[str, Decimal], Dict[str, Decimal]]:
+        """Перекладывает уже разделённые деньги и возвращает (до, после)."""
+        before = self.first_distribution_balances()
+        self.apply_first_distribution(sum(before.values(), ZERO))
+        after = self.first_distribution_balances()
+        return before, after
+
     def apply_first_distribution(self, total: Decimal) -> Dict[str, Decimal]:
         """Раскладывает уже имеющиеся деньги по актуальному защитному водопаду.
 

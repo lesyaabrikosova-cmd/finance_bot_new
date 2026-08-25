@@ -12,8 +12,10 @@ from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
     build_state_from_data,
+    category_added_totals,
     communication_item_name,
     default_km_storage,
+    force_majeure_minimum_for_rhythm,
     housing_item_name,
     km_item_display_name,
     km_item_totals_by_name,
@@ -46,6 +48,25 @@ from storage import (  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_category_summary_collects_all_items_and_sums_duplicates(self):
+        data = {
+            "km_items": [
+                {"category": "habits", "name": "Вейп", "monthly": "2000"},
+                {"category": "habits", "name": "Сигареты", "monthly": "5000"},
+            ],
+            "br_items": [
+                {"category": "habits", "name": "Вейп", "monthly": "351.29"},
+            ],
+        }
+
+        totals = category_added_totals(data, "habits")
+
+        self.assertEqual(totals["Вейп"], Decimal("2351.29"))
+        self.assertEqual(totals["Сигареты"], Decimal("5000"))
+
+    def test_cyclic_force_majeure_minimum_is_always_six_months(self):
+        self.assertEqual(force_majeure_minimum_for_rhythm("cyclic"), 6)
+
     def test_life_summary_groups_raw_amounts_by_category_and_period(self):
         text = life_expense_summary([
             {

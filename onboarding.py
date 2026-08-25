@@ -167,8 +167,6 @@ class SetupStates(StatesGroup):
     current_pillow = State()
     current_stabilizer = State()
     current_intercontract = State()
-    current_cycle_phase = State()
-    current_cycle_gap_remaining = State()
     current_life_balance = State()
     current_minimum_payments = State()
 
@@ -1388,6 +1386,7 @@ async def save_initial_cycle_phase(callback: CallbackQuery, state: FSMContext):
         else "ДО СЛЕДУЮЩЕЙ РАБОЧЕЙ ЧАСТИ"
     )
     await callback.message.answer(
+        f"{setup_progress(await state.get_data(), 6)}\n\n"
         f"<b>СКОЛЬКО ЦЕЛЫХ МЕСЯЦЕВ ОСТАЛОСЬ {label}?</b>\n\n"
         "Если осталось меньше месяца, укажите 1. Это значение можно будет изменить позже.",
         reply_markup=keyboard([
@@ -1941,6 +1940,12 @@ async def choose_combined_reserve_category(callback: CallbackQuery, state: FSMCo
         pending_km_category_label=label,
         pending_km_subcategory=None,
     )
+    data = await state.get_data()
+    existing = list(data.get("km_items", [])) + list(data.get("br_items", []))
+    if any(item.get("source_category", item.get("category")) == key for item in existing):
+        await state.set_state(SetupStates.km_menu)
+        await show_km_category_after_save(callback.message, state, key, notice="")
+        return
     if key in LIFE_BR_OPTIONS:
         rows = [[(text, f"lifebrquick:{key}:{code}") for text, code in row] for row in LIFE_BR_OPTIONS[key]]
         rows.append([("← Назад", "km:cancel"), ("+ Другое", f"lifebrquick:{key}:other")])
@@ -2034,30 +2039,58 @@ async def choose_life_reserve_item(callback: CallbackQuery, state: FSMContext):
     )
 
 
+def category_added_totals(data: dict, category: str) -> dict[str, Decimal]:
+    """Собирает все уже введённые позиции категории из обеих частей жизни."""
+    category_items = [
+        item
+        for item in list(data.get("km_items", [])) + list(data.get("br_items", []))
+        if item.get("source_category", item.get("category")) == category
+    ]
+    grouped: dict[str, Decimal] = {}
+    for item in category_items:
+        name = km_item_display_name(item)
+        grouped[name] = grouped.get(name, Decimal("0")) + Decimal(str(item.get("monthly", "0")))
+    return grouped
+
+
 async def show_km_category_after_save(
     message: Message,
     state: FSMContext,
     category: str,
     notice: str,
 ):
-    """Возвращает пользователя в текущую категорию после сохранения расхода."""
+    """Показывает компактный итог текущей категории после сохранения."""
+    data = await state.get_data()
+    grouped = category_added_totals(data, category)
+    symbol = data.get("phase_currency_symbol", "₽") if data.get("income_rhythm") == "cyclic" else "₽"
+    added = "\n".join(
+        f"• <b>{escape(name)}</b> — {format_money_symbol(money2(amount), symbol)} / мес."
+        for name, amount in grouped.items()
+    )
+    labels = {**{key: value[0] for key, value in KM_CATEGORIES.items()}, **{key: value[0] for key, value in BR_CATEGORIES.items()}}
+    heading = labels.get(category, data.get("pending_km_category_label", category)).upper()
+    text = f"<b>{escape(heading)}</b>\n\nДобавлено:\n\n{added}"
+
     if category == "housing":
-        await show_housing_landing(message, state, notice=notice)
+        await message.answer(
+            text,
+            reply_markup=keyboard([[('+ Добавить расход', 'kmhousing:add'), ('✔️ Готово', 'km:cancel')]]),
+        )
         return
     if category == "communication":
         await message.answer(
-            notice + "\n\n<b>СВЯЗЬ И ПОДПИСКИ</b>\n\nВыберите следующий расход.",
+            text,
             reply_markup=keyboard([
                 [("Мобильная связь", "kmcommunication:mobile"), ("Домашний интернет", "kmcommunication:internet")],
                 [("VPN", "kmcommunication:vpn"), ("Подписки", "kmcommunication:subscription")],
-                [("ТВ", "kmcommunication:tv"), ("+ Свой расход", "kmcommunication:other")],
-                [("← Назад", "km:cancel")],
+                [("ТВ", "kmcommunication:tv")],
+                [("+ Другое", "kmcommunication:other"), ("✔️ Готово", "km:cancel")],
             ]),
         )
         return
     if category == "transport":
         await message.answer(
-            notice + "\n\n<b>ТРАНСПОРТ</b>\n\nВыберите следующий расход.",
+            text,
             reply_markup=keyboard([
                 [("Общественный транспорт", "kmtransport:public")],
                 [("Безлимитный проездной", "kmtransport:pass")],
@@ -2065,13 +2098,13 @@ async def show_km_category_after_save(
                 [("Обычное такси", "kmtransport:optional_taxi")],
                 [("Автомобиль", "kmtransport:car")],
                 [("Транспортный налог", "kmtransport:tax")],
-                [("← Назад", "km:cancel")],
+                [("+ Другое", "kmtransport:other"), ("✔️ Готово", "km:cancel")],
             ]),
         )
         return
     if category == "education":
         await message.answer(
-            notice + "\n\n<b>ОБРАЗОВАНИЕ</b>\n\nДобавьте расходы на обучение, развитие и занятия.",
+            text,
             reply_markup=keyboard([
                 [("Колледж и ВУЗ", "kmeducation:college")],
                 [("Курс", "kmeducation:course"), ("Репетитор", "kmeducation:tutor")],
@@ -2080,7 +2113,16 @@ async def show_km_category_after_save(
                 [("Профессиональное обучение", "kmeducation:professional")],
                 [("Мастер-классы", "kmeducation:masterclass"), ("Хобби", "kmeducation:hobby")],
                 [("Абонемент", "kmeducation:pass")],
-                [("← Назад", "km:cancel")],
+                [("+ Другое", "kmeducation:other"), ("✔️ Готово", "km:cancel")],
+            ]),
+        )
+        return
+    if category == "clothes":
+        await message.answer(
+            text,
+            reply_markup=keyboard([
+                [("Добавить общую сумму", "lifeclothes:total")],
+                [("+ Уточнить покупку", "lifeclothes:detail"), ("✔️ Готово", "km:cancel")],
             ]),
         )
         return
@@ -2125,11 +2167,16 @@ async def show_km_category_after_save(
             [(text, f"kmquick:{category}:{code}") for text, code in row]
             for row in quick_rows[category]
         ]
-        rows.append([("← Назад", "km:cancel"), ("+ Другое", f"kmquick:{category}:other")])
+        rows.append([("+ Другое", f"kmquick:{category}:other"), ("✔️ Готово", "km:cancel")])
         await message.answer(
-            notice + f"\n\n<b>{escape(label.upper())}</b>\n\n{hint}\n\nВыберите следующий расход или добавьте свой.",
+            text,
             reply_markup=keyboard(rows),
         )
+        return
+    if category in LIFE_BR_OPTIONS:
+        rows = [[(button, f"lifebrquick:{category}:{code}") for button, code in row] for row in LIFE_BR_OPTIONS[category]]
+        rows.append([("+ Другое", f"lifebrquick:{category}:other"), ("✔️ Готово", "km:cancel")])
+        await message.answer(text, reply_markup=keyboard(rows))
         return
     await show_km_menu(message, state)
 
@@ -2148,6 +2195,12 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
         pending_km_category_label=label,
         pending_km_subcategory=None,
     )
+    data = await state.get_data()
+    existing = list(data.get("km_items", [])) + list(data.get("br_items", []))
+    if any(item.get("source_category", item.get("category")) == key for item in existing):
+        await state.set_state(SetupStates.km_menu)
+        await show_km_category_after_save(callback.message, state, key, notice="")
+        return
     if key == "housing":
         await state.set_state(SetupStates.km_menu)
         await show_housing_landing(callback.message, state)
@@ -3555,26 +3608,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         await state.update_data(br_items=br_items, pending_life_destination=None)
         await state.set_state(SetupStates.km_menu)
         notice = f"Добавлено: <b>{escape(br_item['name'])}</b> — {monthly_text} / мес."
-        if category in {"transport", "children", "food"}:
-            await show_km_category_after_save(message, state, category, notice)
-        elif category == "clothes":
-            await message.answer(
-                notice + "\n\n<b>ОДЕЖДА</b>\n\nВыберите следующий способ добавления.",
-                reply_markup=keyboard([
-                    [("Добавить общую сумму", "lifeclothes:total")],
-                    [("← Назад", "km:cancel"), ("+ Уточнить покупку", "lifeclothes:detail")],
-                ]),
-            )
-        elif category in LIFE_BR_OPTIONS:
-            label, hint = BR_CATEGORIES[category]
-            rows = [[(text, f"lifebrquick:{category}:{code}") for text, code in row] for row in LIFE_BR_OPTIONS[category]]
-            rows.append([("← Назад", "km:cancel"), ("+ Другое", f"lifebrquick:{category}:other")])
-            await message.answer(
-                notice + f"\n\n<b>{escape(label.upper())}</b>\n\n{hint}\n\nВыберите следующий расход.",
-                reply_markup=keyboard(rows),
-            )
-        else:
-            await show_km_menu(message, state, notice=notice)
+        await show_km_category_after_save(message, state, category, notice)
         return
     items = list(data.get("km_items", []))
     auto_reserve = should_auto_route_to_reserve(
@@ -3584,6 +3618,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     )
     if auto_reserve:
         moved_item = dict(item)
+        moved_item["source_category"] = item["category"]
         if item["category"] == "communication":
             moved_item["category"] = "subscriptions"
             moved_item["category_label"] = "Подписки"
@@ -3623,29 +3658,6 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     if item.get("due_date"):
         tax_due_text = f"\nСрок уплаты — <b>{date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}</b>"
     notice = f"Добавлено: <b>{escape(km_item_display_name(item))}</b> — {monthly_text} / мес.{tax_due_text}"
-    if item["category"] == "transport" and str(item.get("subcategory") or "").startswith("car_"):
-        await message.answer(
-            notice + "\n\n<b>АВТОМОБИЛЬ</b>\n\nВыберите следующий расход.",
-            reply_markup=keyboard([
-                [("Бензин", "kmtransportcar:fuel"), ("Страхование", "kmtransportcar:insurance")],
-                [("ТО", "kmtransportcar:maintenance"), ("Расходники", "kmtransportcar:supplies")],
-                [("Автосервис", "kmtransportcar:service"), ("Шиномонтаж", "kmtransportcar:tireservice")],
-                [("Платные дороги", "kmtransportcar:tolls"), ("Мойка", "kmtransportcar:wash")],
-                [("Резина", "kmtransportcar:tires"), ("Штрафы ГИБДД", "kmtransportcar:fines")],
-                [("← Назад", "kmtransport:back"), ("+ Другое", "kmtransportcar:other")],
-            ]),
-        )
-        return
-    if item.get("one_time") and item["category"] == "education":
-        await message.answer(
-            "<b>ЕСТЬ ЕЩЁ ОДИН ОБЯЗАТЕЛЬНЫЙ ПЛАТЁЖ ЗА ОБУЧЕНИЕ?</b>\n\n"
-            "Например, оплата следующего семестра или дополнительный взнос по договору.",
-            reply_markup=keyboard([
-                [("Добавить ещё", "edupayment:add"), ("Нет, продолжить", "edupayment:continue")],
-                [("← Назад", f"kmedit:item:{index}")],
-            ]),
-        )
-        return
     await show_km_category_after_save(message, state, item["category"], notice)
 
 
@@ -5088,15 +5100,12 @@ async def save_minimum_months(callback: CallbackQuery, state: FSMContext):
 async def show_force_majeure_question_new(message: Message, state: FSMContext):
     data = await state.get_data()
     rhythm = data.get("income_rhythm", "monthly")
-    gap = Decimal(str(data.get("income_gap_months", "1")))
-    if rhythm == "cyclic" and gap > 1:
-        minimum = 6
+    minimum = force_majeure_minimum_for_rhythm(rhythm)
+    if rhythm == "cyclic":
         buttons = [[("6 месяцев", "fmmonths:6"), ("9 месяцев", "fmmonths:9")], [("12 месяцев", "fmmonths:12"), ("Свой вариант", "fmmonths:custom")]]
     elif rhythm == "irregular":
-        minimum = 4
         buttons = [[("4 месяца", "fmmonths:4"), ("6 месяцев", "fmmonths:6")], [("9 месяцев", "fmmonths:9"), ("12 месяцев", "fmmonths:12")], [("Свой вариант", "fmmonths:custom")]]
     else:
-        minimum = 3
         buttons = [[("3 месяца", "fmmonths:3"), ("4 месяца", "fmmonths:4")], [("6 месяцев", "fmmonths:6"), ("Свой вариант", "fmmonths:custom")]]
     await state.update_data(force_majeure_minimum=str(minimum))
     hint = f"Допустимый диапазон для вашего профиля — <b>{minimum}–12 месяцев Критического минимума</b>."
@@ -5112,6 +5121,14 @@ async def show_force_majeure_question_new(message: Message, state: FSMContext):
         + hint,
         reply_markup=keyboard(buttons),
     )
+
+
+def force_majeure_minimum_for_rhythm(rhythm: str) -> int:
+    if rhythm == "cyclic":
+        return 6
+    if rhythm == "irregular":
+        return 4
+    return 3
 
 
 @router.callback_query(SetupStates.force_majeure_months, F.data.startswith("fmmonths:"))
@@ -5677,20 +5694,6 @@ async def start_current_state(
 ):
 
     data = await state.get_data()
-    step = 9 if data.get("has_debts") else 8
-
-    if data.get("income_rhythm") == "cyclic":
-        await state.set_state(SetupStates.current_cycle_phase)
-        await message.answer(
-            f"{setup_progress(data, step)}\n\n"
-            "<b>ГДЕ ВЫ СЕЙЧАС В ФИНАНСОВОМ ЦИКЛЕ?</b>\n\n"
-            "Выберите текущую фазу — это определит, на сколько месяцев жизни сейчас нужен Фонд Зарплаты.",
-            reply_markup=keyboard([
-                [("Рабочая часть", "cyclephase:work"), ("Перерыв", "cyclephase:break")],
-            ]),
-        )
-        return
-
     if data.get("income_rhythm") == "cyclic":
         await ask_current_intercontract(message, state)
         return
@@ -5709,54 +5712,6 @@ async def ask_current_intercontract(message: Message, state: FSMContext):
         "между рабочими месяцами по контракту.\n\n"
         "Если Фонда пока нет — отправьте <code>0</code>."
     )
-
-
-@router.callback_query(SetupStates.current_cycle_phase, F.data.startswith("cyclephase:"))
-async def save_current_cycle_phase(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    phase = callback.data.rsplit(":", 1)[1]
-    if phase == "work":
-        await state.update_data(
-            current_cycle_phase="work",
-            current_cycle_gap_remaining="0",
-        )
-        await ask_current_intercontract(callback.message, state)
-        return
-    await state.update_data(current_cycle_phase="break")
-    await state.set_state(SetupStates.current_cycle_gap_remaining)
-    await callback.message.answer(
-        "<b>СКОЛЬКО ЦЕЛЫХ МЕСЯЦЕВ ОСТАЛОСЬ ДО СЛЕДУЮЩЕЙ РАБОЧЕЙ ЧАСТИ?</b>\n\n"
-        "Укажите плановый остаток перерыва. Если до работы осталось меньше месяца, укажите 1.",
-        reply_markup=keyboard([
-            [("1 месяц", "cycleremaining:1"), ("2 месяца", "cycleremaining:2")],
-            [("3 месяца", "cycleremaining:3"), ("6 месяцев", "cycleremaining:6")],
-            [("Указать другое", "cycleremaining:custom")],
-        ]),
-    )
-
-
-@router.callback_query(
-    SetupStates.current_cycle_gap_remaining,
-    F.data.startswith("cycleremaining:"),
-)
-async def save_cycle_gap_remaining_button(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    value = callback.data.rsplit(":", 1)[1]
-    if value == "custom":
-        await callback.message.answer("Введите целое количество месяцев от 1 до 24.")
-        return
-    await state.update_data(current_cycle_gap_remaining=value)
-    await ask_current_intercontract(callback.message, state)
-
-
-@router.message(SetupStates.current_cycle_gap_remaining)
-async def save_cycle_gap_remaining_text(message: Message, state: FSMContext):
-    value = parse_decimal(message.text)
-    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
-        await message.answer("Введите целое количество месяцев от 1 до 24.")
-        return
-    await state.update_data(current_cycle_gap_remaining=str(value))
-    await ask_current_intercontract(message, state)
 
 
 async def ask_current_pillow(message: Message, state: FSMContext):
@@ -6722,6 +6677,35 @@ def first_allocation_preview_text(allocator: FinancialAllocator, total: Decimal)
     )
 
 
+def separated_first_allocation_text(allocator: FinancialAllocator) -> str:
+    preview = deepcopy(allocator)
+    before, after = preview.rebalance_first_distribution()
+    lines = []
+    for name, final in after.items():
+        initial = before.get(name, Decimal("0"))
+        difference = money2(final - initial)
+        if difference > 0:
+            action = f"добавить {rub(difference)}"
+        elif difference < 0:
+            action = f"перевести дальше {rub(-difference)}"
+        elif final > 0:
+            action = "оставить без изменений"
+        else:
+            continue
+        lines.append(
+            f"• <b>{escape(name)}</b> — {action} · итог {rub(final)}"
+        )
+    return (
+        "<b>ПЕРВОЕ ПЕРЕРАСПРЕДЕЛЕНИЕ</b>\n\n"
+        f"Всего в конвертах — <b>{rub(sum(before.values(), Decimal('0')))}</b>\n\n"
+        + ("\n".join(lines) or "• Переводы не требуются")
+        + "\n\nАллокатор учёл уже отложенные суммы. Например, если текущая жизнь "
+        "наполнена частично, здесь указана только недостающая сумма.\n\n"
+        "Это внутреннее перераспределение, а не новый доход: налог и статистика "
+        "поступлений не изменятся."
+    )
+
+
 @router.callback_query(F.data == "firstallocation:start")
 async def start_first_allocation(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -6746,6 +6730,7 @@ async def start_first_allocation(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "firstallocation:pile")
 async def ask_first_allocation_total(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    await state.update_data(first_allocation_kind="pile")
     await state.set_state(SetupStates.first_allocation_amount)
     await callback.message.answer(
         "<b>СКОЛЬКО ДЕНЕГ ДОСТУПНО ДЛЯ РАСПРЕДЕЛЕНИЯ?</b>\n\n"
@@ -6761,16 +6746,19 @@ async def show_first_allocation_preview(
     state: FSMContext,
     telegram_id: int,
     total: Decimal,
+    kind: str = "pile",
 ):
     allocator = db.load_allocator(telegram_id)
     if allocator is None:
         await state.clear()
         await message.answer("Профиль не найден. Запустите /start.")
         return
-    await state.update_data(first_allocation_total=str(total))
+    await state.update_data(first_allocation_total=str(total), first_allocation_kind=kind)
     await state.set_state(SetupStates.first_allocation_confirm)
     await message.answer(
-        first_allocation_preview_text(allocator, total),
+        separated_first_allocation_text(allocator)
+        if kind == "separated"
+        else first_allocation_preview_text(allocator, total),
         reply_markup=keyboard([
             [("← Назад", "firstallocation:start"), ("✔️ Применить", "firstallocation:apply")],
         ]),
@@ -6788,6 +6776,7 @@ async def preview_separated_first_allocation(callback: CallbackQuery, state: FSM
         state,
         callback.from_user.id,
         allocator.first_distribution_source_total(),
+        kind="separated",
     )
 
 
@@ -6808,13 +6797,35 @@ async def apply_first_allocation(callback: CallbackQuery, state: FSMContext):
         return
     data = await state.get_data()
     total = Decimal(str(data.get("first_allocation_total", "0")))
-    allocations = allocator.apply_first_distribution(total)
+    kind = data.get("first_allocation_kind", "pile")
+    if kind == "separated":
+        before, after = allocator.rebalance_first_distribution()
+        allocations = after
+    else:
+        before = {}
+        allocations = allocator.apply_first_distribution(total)
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
-    lines = "\n".join(
-        f"• <b>{escape(name)}</b> — {rub(amount)}"
-        for name, amount in allocations.items()
-    ) or "• Распределять пока нечего"
+    if kind == "separated":
+        lines_list = []
+        for name, final in allocations.items():
+            initial = before.get(name, Decimal("0"))
+            difference = money2(final - initial)
+            if difference > 0:
+                action = f"добавить {rub(difference)}"
+            elif difference < 0:
+                action = f"перевести дальше {rub(-difference)}"
+            elif final > 0:
+                action = "оставить без изменений"
+            else:
+                continue
+            lines_list.append(f"• <b>{escape(name)}</b> — {action} · итог {rub(final)}")
+        lines = "\n".join(lines_list) or "• Переводы не требуются"
+    else:
+        lines = "\n".join(
+            f"• <b>{escape(name)}</b> — {rub(amount)}"
+            for name, amount in allocations.items()
+        ) or "• Распределять пока нечего"
     await callback.message.answer(
         "<b>ПЕРВОЕ РАСПРЕДЕЛЕНИЕ СОХРАНЕНО</b>\n\n"
         f"{lines}\n\n"
