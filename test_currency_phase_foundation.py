@@ -144,11 +144,18 @@ class CurrencyFoundationTests(unittest.TestCase):
             state = AllocatorState(
                 current_cycle_phase="work",
                 current_phase_months_remaining=Decimal("3"),
+                period_started_at="2026-08-25T00:00:00",
+                period_ends_at="2026-09-24",
+                period_anchor_day=25,
+                period_status="active",
             )
             database.save_allocator(991001, FinancialAllocator(settings, state))
             restored = database.load_allocator(991001)
             self.assertEqual(restored.state.current_cycle_phase, "work")
             self.assertEqual(restored.state.current_phase_months_remaining, Decimal("3"))
+            self.assertEqual(restored.state.period_ends_at, "2026-09-24")
+            self.assertEqual(restored.state.period_anchor_day, 25)
+            self.assertEqual(restored.state.period_status, "active")
 
             service = CurrencyRateService(database, downloader=lambda: CBR_XML)
             quote = service.get_rate("USD", force_refresh=True)

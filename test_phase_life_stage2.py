@@ -1,12 +1,34 @@
 import unittest
+from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
-from financial_engine import FinancialAllocator, PhaseLifeBudget, UserSettings
+from financial_engine import AllocatorState, FinancialAllocator, PhaseLifeBudget, UserSettings, next_anchor_date
 from ui import main_menu_keyboard
 
 
 class PhaseLifeStageTwoTests(unittest.TestCase):
+    def test_personal_period_can_start_on_any_day(self):
+        state = AllocatorState()
+        start, end = state.activate_budget_period(date(2026, 8, 25))
+        self.assertEqual(start, date(2026, 8, 25))
+        self.assertEqual(end, date(2026, 9, 24))
+        self.assertEqual(state.period_anchor_day, 25)
+        self.assertEqual(state.period_status, "active")
+
+    def test_period_anchor_handles_short_months(self):
+        self.assertEqual(next_anchor_date(date(2027, 1, 31), 31), date(2027, 2, 28))
+        self.assertEqual(next_anchor_date(date(2028, 1, 31), 31), date(2028, 2, 29))
+
+    def test_scheduled_period_is_visible_in_main_menu(self):
+        allocator = self.cyclic_allocator({})
+        allocator.state.schedule_budget_period(date(2026, 9, 10))
+        with patch("ui.db.load_allocator", return_value=allocator):
+            texts = self.button_texts(main_menu_keyboard(1))
+        self.assertIn("Начать первый период сейчас", texts)
+        self.assertIn("Выбрать дату начала", texts)
+        self.assertNotIn("Новый доход", texts)
+
     def cyclic_allocator(self, budgets):
         settings = UserSettings(
             has_debts=False,

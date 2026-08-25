@@ -457,6 +457,10 @@ class Database:
                 period_tax TEXT NOT NULL,
 
                 period_started_at TEXT,
+                period_ends_at TEXT,
+                period_anchor_day INTEGER NOT NULL DEFAULT 0,
+                period_status TEXT NOT NULL DEFAULT 'legacy',
+                period_activation_date TEXT,
 
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
@@ -609,6 +613,18 @@ class Database:
             cursor.execute(
                 "ALTER TABLE state ADD COLUMN current_phase_months_remaining TEXT NOT NULL DEFAULT '0'"
             )
+        if "period_ends_at" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN period_ends_at TEXT")
+        if "period_anchor_day" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN period_anchor_day INTEGER NOT NULL DEFAULT 0"
+            )
+        if "period_status" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN period_status TEXT NOT NULL DEFAULT 'legacy'"
+            )
+        if "period_activation_date" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN period_activation_date TEXT")
 
         # ----------------------------------------------------
         # Индексы
@@ -1319,7 +1335,11 @@ class Database:
                 cycle_income,
                 period_tax,
 
-                period_started_at
+                period_started_at,
+                period_ends_at,
+                period_anchor_day,
+                period_status,
+                period_activation_date
             )
 
             VALUES (
@@ -1329,7 +1349,7 @@ class Database:
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
-                ?
+                ?, ?, ?, ?, ?
             )
 
             ON CONFLICT(telegram_id)
@@ -1390,7 +1410,19 @@ class Database:
                     excluded.period_tax,
 
                 period_started_at =
-                    excluded.period_started_at
+                    excluded.period_started_at,
+
+                period_ends_at =
+                    excluded.period_ends_at,
+
+                period_anchor_day =
+                    excluded.period_anchor_day,
+
+                period_status =
+                    excluded.period_status,
+
+                period_activation_date =
+                    excluded.period_activation_date
             """,
             (
                 telegram_id,
@@ -1462,6 +1494,10 @@ class Database:
                 ),
 
                 state.period_started_at,
+                state.period_ends_at,
+                state.period_anchor_day,
+                state.period_status,
+                state.period_activation_date,
             ),
         )
 
@@ -1578,6 +1614,18 @@ class Database:
 
             period_started_at=
                 row["period_started_at"],
+
+            period_ends_at=
+                row["period_ends_at"],
+
+            period_anchor_day=
+                row["period_anchor_day"],
+
+            period_status=
+                row["period_status"],
+
+            period_activation_date=
+                row["period_activation_date"],
         )
 
         return state

@@ -178,6 +178,7 @@ class SetupStates(StatesGroup):
     confirmation = State()
     first_allocation_amount = State()
     first_allocation_confirm = State()
+    first_period_date = State()
 
 
 # ============================================================
@@ -5828,7 +5829,7 @@ async def save_current_pillow(
         )
         return
 
-    await ask_current_life_balance(message, state)
+    await continue_after_current_reserves(message, state)
 
 
 @router.message(SetupStates.current_stabilizer)
@@ -5838,7 +5839,31 @@ async def save_current_stabilizer(message: Message, state: FSMContext):
         await message.answer("Введите сумму от 0 ₽ и выше.")
         return
     await state.update_data(current_stabilizer=str(value))
-    await ask_current_life_balance(message, state)
+    await continue_after_current_reserves(message, state)
+
+
+async def continue_after_current_reserves(message: Message, state: FSMContext):
+    """Новая жизнь начнётся после онбординга, поэтому её прежний баланс не спрашиваем."""
+    await state.update_data(current_life_balance="0")
+    data = await state.get_data()
+    if data["has_debts"]:
+        await state.set_state(SetupStates.current_minimum_payments)
+        total_minimum = sum(Decimal(item["minimum_payment"]) for item in data["credits"])
+        step = 9 if data.get("has_debts") else 8
+        await message.answer(
+            f"{setup_progress(data, step)}\n\n"
+            "<b>СКОЛЬКО УЖЕ ОТЛОЖЕНО НА МИНИМАЛЬНЫЕ ПЛАТЕЖИ?</b>\n\n"
+            "Укажите деньги, уже зарезервированные на ближайшие обязательные платежи по кредитам.\n\n"
+            f"Полная сумма: <b>{rub(total_minimum)}</b>\n\n"
+            "Если пока ничего не отложено — отправьте <code>0</code>."
+        )
+        return
+    await state.update_data(
+        current_minimum_payments="0",
+        calculate_interest_savings=False,
+        developer_mode=False,
+    )
+    await show_confirmation(message, state)
 
 
 async def ask_current_life_balance(message: Message, state: FSMContext):
@@ -6514,19 +6539,22 @@ async def show_confirmation(
     cycle_text = ""
     if settings.income_rhythm == "cyclic":
         if state_object.intercontract_break_active:
-            phase_text = (
-                "Перерыв · до рабочей части "
+            phase_name = "Перерыв"
+            phase_remaining = (
+                "до рабочей части "
                 f"{format(state_object.intercontract_months_remaining.normalize(), 'f')} мес."
             )
         else:
-            phase_text = (
-                "Рабочая часть · осталось "
+            phase_name = "Рабочая часть"
+            phase_remaining = (
+                "осталось "
                 f"{format(state_object.current_phase_months_remaining.normalize(), 'f')} мес."
             )
         cycle_text = (
-            f"➖ <b>Финансовый цикл</b> — {settings.income_work_months} / {settings.income_gap_months}  "
+            f"➖ <b>Финансовый цикл</b> — {settings.income_work_months} / {settings.income_gap_months}\n"
             f"({settings.income_work_months} мес. работы · {settings.income_gap_months} мес. перерыва)\n\n"
-            f"➖ <b>Текущая фаза</b> — {phase_text}\n\n"
+            f"➖ <b>Текущая фаза</b> — {phase_name}\n"
+            f"{phase_remaining}\n\n"
             f"➖ <b>Обязательства на время контракта</b> — {rub(settings.contract_obligations_total)}\n\n"
             f"➖ <b>Фонд Зарплаты сейчас</b> — {rub(state_object.intercontract_reserve)} / "
             f"{rub(allocator.intercontract_current_limit)}\n\n"
@@ -6541,14 +6569,13 @@ async def show_confirmation(
         f"➖ <b>Средний доход</b> — {rub(settings.average_income)}\n\n"
         f"➖ <b>Критический Минимум</b> — {rub(settings.critical_life)}\n\n"
         f"➖ <b>Бытовой Резерв</b> — {rub(settings.household_reserve)}\n\n"
-        f"➖ <b>Устойчивая Жизнь</b> — {rub(settings.household_life)}\n\n"
-        f"➖ <b>Баланс жизни сейчас</b> — {rub(state_object.life_balance)}"
+        f"➖ <b>Устойчивая Жизнь</b> — {rub(settings.household_life)}"
         f"{deficit_warning}\n\n"
         f"<b><u>ТИПЫ ДОХОДОВ:</u></b>\n\n{tax_types}\n\n"
         "<b><u>КОНВЕРТЫ:</u></b>\n\n"
         "Откройте накопительные счета на ежедневный остаток в своём банке. Переименуйте.\n\n"
         f"{accounts_text}\n\n"
-        "<b><u>СТАРТОВЫЙ РЕЖИМ:</u></b>\n\n"
+        "<b><u>ПРЕДВАРИТЕЛЬНЫЙ РЕЖИМ:</u></b>\n\n"
         f"{mode_progress}\n\n"
         f"«{escape(mode_name)}»\n\n"
         "<b><u>P.S.:</u></b>\n\n"
@@ -6624,6 +6651,7 @@ async def confirm_save(
         settings=settings,
         state=state_object,
     )
+    allocator.state.period_status = "not_started"
 
     telegram_id = (
         callback.from_user.id
@@ -6700,15 +6728,87 @@ async def confirm_save(
     await callback.message.answer(
         "<b>ФИНАНСОВЫЙ ПРОФИЛЬ СОХРАНЁН</b>\n\n"
 
-        "Аллокатор готов к работе.\n\n"
+        "Осталось выбрать начало первого расчётного периода.\n\n"
 
-        f"Текущий режим: <b>{mode}</b>"
+        f"Предварительный режим: <b>{mode}</b>"
         f"{next_text}\n\n"
 
-        "Теперь можно добавить первое поступление денег "
-        "или посмотреть текущее финансовое состояние.",
+        "Расчётный период — ваш личный финансовый месяц. Он необязательно начинается "
+        "первого числа. Если начать сегодня, предыдущие траты учитывать не потребуется. "
+        "Либо сначала закончите привычный период и выберите будущую дату запуска.",
+        reply_markup=keyboard([
+            [("Начать новый период сегодня", "periodsetup:today")],
+            [("Выбрать дату начала", "periodsetup:date")],
+        ]),
+    )
+
+
+async def show_first_period_started(message: Message, allocator: FinancialAllocator) -> None:
+    start = date.fromisoformat(allocator.state.period_started_at[:10])
+    end = date.fromisoformat(allocator.state.period_ends_at)
+    await message.answer(
+        "<b>ПЕРВЫЙ РАСЧЁТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
+        f"Период: <b>{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}</b>.\n\n"
+        "Расходы до даты запуска не учитываются. Теперь зафиксируйте деньги, которыми "
+        "располагаете прямо сейчас, и сделайте первое распределение.",
         reply_markup=keyboard([
             [("Сделать первое распределение", "firstallocation:start")],
+            [("Перейти в Главное меню", "menu:back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "periodsetup:today")
+async def start_first_period_today(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    allocator.state.activate_budget_period(date.today())
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_first_period_started(callback.message, allocator)
+
+
+@router.callback_query(F.data == "periodsetup:date")
+async def ask_first_period_date(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.first_period_date)
+    await callback.message.answer(
+        "<b>КОГДА НАЧАТЬ ПЕРВЫЙ РАСЧЁТНЫЙ ПЕРИОД?</b>\n\n"
+        "В выбранный день вы зафиксируете фактические остатки и сделаете первое распределение. "
+        "Расходы до этой даты Аллокатор учитывать не будет.\n\n"
+        "——————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "menu:back")]]),
+    )
+
+
+@router.message(SetupStates.first_period_date)
+async def save_first_period_date(message: Message, state: FSMContext):
+    selected = parse_tax_due_date(message.text)
+    if selected is None or selected < date.today():
+        await message.answer("Введите сегодняшнюю или будущую дату в формате <code>ДД.ММ.ГГГГ</code>.")
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    if allocator is None:
+        await state.clear()
+        return
+    if selected == date.today():
+        allocator.state.activate_budget_period(selected)
+        db.save_allocator(message.from_user.id, allocator)
+        await state.clear()
+        await show_first_period_started(message, allocator)
+        return
+    allocator.state.schedule_budget_period(selected)
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await message.answer(
+        "<b>ПЕРВЫЙ ПЕРИОД ЗАПЛАНИРОВАН</b>\n\n"
+        f"Дата запуска — <b>{selected.strftime('%d.%m.%Y')}</b>.\n\n"
+        "До этой даты продолжайте пользоваться деньгами привычным способом. Траты до запуска "
+        "не войдут в первый расчётный период.",
+        reply_markup=keyboard([
+            [("Начать сейчас", "periodsetup:today")],
             [("Перейти в Главное меню", "menu:back")],
         ]),
     )
@@ -6767,6 +6867,27 @@ async def start_first_allocation(callback: CallbackQuery, state: FSMContext):
     if allocator is None:
         await callback.message.answer("Профиль не найден. Запустите /start.")
         return
+    period_status = allocator.state.period_status
+    if period_status in {"not_started", "scheduled"}:
+        activation_text = allocator.state.period_activation_date
+        activation = date.fromisoformat(activation_text) if activation_text else None
+        if activation is not None and activation <= date.today():
+            allocator.state.activate_budget_period(activation)
+            db.save_allocator(callback.from_user.id, allocator)
+        else:
+            waiting = (
+                f"Первый расчётный период запланирован на <b>{activation.strftime('%d.%m.%Y')}</b>."
+                if activation is not None
+                else "Первый расчётный период ещё не начат."
+            )
+            await callback.message.answer(
+                f"<b>СНАЧАЛА НАЧНИТЕ РАСЧЁТНЫЙ ПЕРИОД</b>\n\n{waiting}",
+                reply_markup=keyboard([
+                    [("Начать сейчас", "periodsetup:today")],
+                    [("Выбрать дату начала", "periodsetup:date")],
+                ]),
+            )
+            return
     await state.clear()
     await callback.message.answer(
         "<b>КАК СЕЙЧАС ЛЕЖАТ ВАШИ ДЕНЬГИ?</b>\n\n"
@@ -6860,6 +6981,10 @@ async def apply_first_allocation(callback: CallbackQuery, state: FSMContext):
         allocations = allocator.apply_first_distribution(total)
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
+    confirmed_mode = allocator.active_mode()
+    confirmed_progress = "🏆" * confirmed_mode + "➖" * (
+        allocator.profile_mode_total - confirmed_mode
+    )
     if kind == "separated":
         lines_list = []
         for name, final in allocations.items():
@@ -6883,7 +7008,10 @@ async def apply_first_allocation(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "<b>ПЕРВОЕ РАСПРЕДЕЛЕНИЕ СОХРАНЕНО</b>\n\n"
         f"{lines}\n\n"
-        "Теперь физически переведите указанные суммы по соответствующим счетам и конвертам.",
+        "Теперь физически переведите указанные суммы по соответствующим счетам и конвертам.\n\n"
+        "<b><u>СТАРТОВЫЙ РЕЖИМ ПОДТВЕРЖДЁН:</u></b>\n\n"
+        f"{confirmed_progress}\n\n"
+        f"«{escape(allocator.mode_title(confirmed_mode))}»",
         reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 

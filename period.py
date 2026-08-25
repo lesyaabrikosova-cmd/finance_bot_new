@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
@@ -88,7 +88,7 @@ async def start_intercontract_period(callback: CallbackQuery):
         "Сейчас начинается накопление этого резерва. Он получает приоритет раньше Фонда Зарплаты, "
         "Стабилизатора и Подушки. Если денег пока недостаточно, Аллокатор покажет дефицит и будет "
         "закрывать его из следующих поступлений.\n\n"
-        "В начале каждого месяца сначала начните новый расчётный период и добавьте внешние "
+        "В начале каждого личного расчётного периода добавьте внешние "
         "поступления, если они уже пришли. Затем нажмите «Заплатить себе из Фонда Зарплаты».",
         reply_markup=main_menu_keyboard(callback.from_user.id),
     )
@@ -217,6 +217,13 @@ async def ask_new_period(callback: CallbackQuery):
         await callback.message.answer("Сначала нужно создать финансовый профиль через /start.")
         return
 
+    period_note = ""
+    if allocator.state.period_status == "active" and allocator.state.period_ends_at:
+        end = date.fromisoformat(allocator.state.period_ends_at)
+        period_note = (
+            f"\n\nТекущий период рассчитан до <b>{end.strftime('%d.%m.%Y')}</b>. "
+            "Если начать новый период сейчас, прежний будет закрыт досрочно."
+        )
     await callback.message.answer(
         "📅 <b>НАЧАТЬ НОВЫЙ РАСЧЁТНЫЙ ПЕРИОД?</b>\n\n"
         "Будут обнулены только показатели текущего периода:\n"
@@ -234,7 +241,8 @@ async def ask_new_period(callback: CallbackQuery):
         "📜 история операций\n\n"
         "Для Цикличного (контрактного) профиля также сохраняются Фонд Зарплаты и общий доход "
         "текущего финансового цикла.\n\n"
-        "Дата начала нового периода будет сохранена автоматически.",
+        "Дата начала нового периода будет сохранена автоматически."
+        f"{period_note}",
         reply_markup=keyboard([
             [("✅ Начать новый период", "period:confirm")],
             [("Отмена", "period:cancel")],
@@ -259,7 +267,7 @@ async def confirm_new_period(callback: CallbackQuery):
 
     allocator.reset_period()
     work_months_left = allocator.advance_work_month()
-    allocator.state.period_started_at = datetime.now().isoformat()
+    period_start, period_end = allocator.state.activate_budget_period(date.today())
     db.save_allocator(callback.from_user.id, allocator)
     db.save_operation(
         callback.from_user.id,
@@ -278,6 +286,7 @@ async def confirm_new_period(callback: CallbackQuery):
         )
     await callback.message.answer(
         "✅ <b>НОВЫЙ РАСЧЁТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
+        f"Период: <b>{period_start.strftime('%d.%m.%Y')} — {period_end.strftime('%d.%m.%Y')}</b>.\n\n"
         "Баланс жизни и месячные категории начаты заново.\n"
         "Подушка, цели, инвестиции, кредиты и история сохранены. Для Цикличного (контрактного) "
         "профиля Фонд Зарплаты и счётчик полного финансового цикла тоже не сбрасываются."

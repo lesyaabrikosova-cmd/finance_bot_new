@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 from math import log
 from typing import Dict, List, Optional, Tuple
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from calendar import monthrange
 
 
 # ============================================================
@@ -116,12 +117,12 @@ def normalize_profile_id(profile_type: str | None, employment_type: str, income_
 
 
 MODE_NAMES = {
-    MODE_1: "🟤 1",
-    MODE_2: "🔴 2",
-    MODE_3: "🟠 3",
-    MODE_4: "🟣 4",
-    MODE_5: "🔵 5",
-    MODE_6: "🟢 Максимальный режим",
+    MODE_1: "Режим 1",
+    MODE_2: "Режим 2",
+    MODE_3: "Режим 3",
+    MODE_4: "Режим 4",
+    MODE_5: "Режим 5",
+    MODE_6: "Максимальный режим",
 }
 
 
@@ -794,6 +795,10 @@ class AllocatorState:
     # ----------------------------
 
     period_started_at: Optional[str] = None
+    period_ends_at: Optional[str] = None
+    period_anchor_day: int = 0
+    period_status: str = "legacy"
+    period_activation_date: Optional[str] = None
 
     def __post_init__(self):
         self.life_balance = D(self.life_balance)
@@ -831,6 +836,11 @@ class AllocatorState:
             self.early_repayment
         )
 
+        self.period_anchor_day = max(0, min(31, int(self.period_anchor_day or 0)))
+        self.period_status = str(self.period_status or "legacy")
+        if self.period_status not in {"legacy", "not_started", "scheduled", "active"}:
+            self.period_status = "legacy"
+
         self.period_income = D(self.period_income)
         self.cycle_income = D(self.cycle_income)
         self.period_tax = D(self.period_tax)
@@ -849,6 +859,21 @@ class AllocatorState:
             name: D(balance)
             for name, balance in self.period_allocations.items()
         }
+
+    def activate_budget_period(self, start: date) -> tuple[date, date]:
+        """Активирует личный финансовый месяц без сброса введённых остатков."""
+        next_start = next_anchor_date(start, start.day)
+        self.period_started_at = datetime.combine(start, datetime.min.time()).isoformat()
+        self.period_ends_at = (next_start - timedelta(days=1)).isoformat()
+        self.period_anchor_day = start.day
+        self.period_status = "active"
+        self.period_activation_date = None
+        return start, next_start - timedelta(days=1)
+
+    def schedule_budget_period(self, start: date) -> None:
+        self.period_status = "scheduled"
+        self.period_activation_date = start.isoformat()
+        self.period_anchor_day = start.day
 
     @property
     def pillow_balance(self) -> Decimal:
@@ -891,6 +916,16 @@ class AllocatorState:
 
         self.period_life_topups = {}
         self.period_allocations = {}
+
+
+def next_anchor_date(current_start: date, anchor_day: int) -> date:
+    """Следующая дата периода; 29–31 безопасно сокращаются в коротких месяцах."""
+    if current_start.month == 12:
+        year, month = current_start.year + 1, 1
+    else:
+        year, month = current_start.year, current_start.month + 1
+    day = min(max(1, anchor_day), monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 # ============================================================
@@ -1324,6 +1359,14 @@ class FinancialAllocator:
             return self.intercontract_monthly_salary * self.state.intercontract_months_remaining
         return self.settings.intercontract_full_limit
 
+    @property
+    def intercontract_current_life_limit(self) -> Decimal:
+        if self.settings.income_rhythm != "cyclic":
+            return ZERO
+        if self.state.intercontract_months_remaining > ZERO:
+            return self.settings.critical_life * self.state.intercontract_months_remaining
+        return self.settings.intercontract_life_limit
+
     def start_intercontract_break(self) -> dict:
         if self.settings.income_rhythm != "cyclic":
             raise ValueError("Межконтрактный период доступен только циклическому профилю.")
@@ -1400,9 +1443,9 @@ class FinancialAllocator:
             return 2
 
         if self.profile_id == PROFILE_CYCLIC:
-            if st.intercontract_reserve < s.intercontract_life_limit:
+            if st.intercontract_reserve < self.intercontract_current_life_limit:
                 return 3
-            if st.intercontract_reserve < s.intercontract_full_limit:
+            if st.intercontract_reserve < self.intercontract_current_limit:
                 return 4
             if st.pillow_stabilizer < s.stabilizer_life_limit:
                 return 5
@@ -1431,9 +1474,8 @@ class FinancialAllocator:
     def mode_display_name(self, mode: Optional[int] = None) -> str:
         selected = self.active_mode() if mode is None else mode
         if selected == self.profile_mode_total:
-            return "🟢 Максимальный режим"
-        colors = {1: "🟤", 2: "🔴", 3: "🟠", 4: "🟣", 5: "🔵", 6: "🟡", 7: "⚪️"}
-        return f"{colors.get(selected, '⚪️')} {selected}"
+            return "Максимальный режим"
+        return f"Режим {selected}"
 
     def allocation_mode(self) -> int:
         """
@@ -1602,8 +1644,8 @@ class FinancialAllocator:
             return sum((c.principal_balance for c in s.credits if c.active), ZERO)
         if self.profile_id == PROFILE_CYCLIC:
             targets = {
-                3: (s.intercontract_life_limit, st.intercontract_reserve),
-                4: (s.intercontract_full_limit, st.intercontract_reserve),
+                3: (self.intercontract_current_life_limit, st.intercontract_reserve),
+                4: (self.intercontract_current_limit, st.intercontract_reserve),
                 5: (s.stabilizer_life_limit, st.pillow_stabilizer),
                 6: (s.stabilizer_full_limit, st.pillow_stabilizer),
                 7: (s.force_majeure_limit, st.pillow_force_majeure),
@@ -2988,6 +3030,7 @@ class FinancialAllocator:
                 "critical_target": self.settings.intercontract_life_limit,
                 "full_target": self.settings.intercontract_full_limit,
                 "current_target": self.intercontract_current_limit,
+                "current_critical_target": self.intercontract_current_life_limit,
                 "months_remaining": self.state.intercontract_months_remaining,
             },
 

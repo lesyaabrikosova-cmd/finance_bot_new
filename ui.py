@@ -35,6 +35,17 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         )
     )
 
+    period_pending = bool(
+        allocator
+        and allocator.state.period_status in {"not_started", "scheduled"}
+    )
+    if period_pending:
+        return keyboard([
+            [("Начать первый период сейчас", "periodsetup:today")],
+            [("Выбрать дату начала", "periodsetup:date")],
+            [("Режим", "menu:state"), ("Настройки", "settings:open")],
+        ])
+
     rows = [
         [("Новый доход", "menu:income")],
         [("Балансы", "menu:analytics"), ("Анализ доходов", "menu:income_analysis")],

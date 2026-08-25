@@ -66,6 +66,28 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertEqual(cyclic.mode_title(3), "Заплати будущему себе.")
         self.assertEqual(cyclic.mode_title(4), "Не на хлебе и воде.")
 
+    def test_cyclic_mode_uses_only_remaining_break_months_for_newcomer(self):
+        cyclic = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            profile_type="cyclic",
+            income_rhythm="cyclic",
+            income_gap_months=D("7"),
+            critical_life=D("39000"),
+            household_reserve=D("11000"),
+            average_income=D("57000"),
+            force_majeure_months=D("6"),
+        ))
+        cyclic.state.current_cycle_phase = "break"
+        cyclic.state.intercontract_break_active = True
+        cyclic.state.intercontract_months_remaining = D("2")
+        cyclic.state.intercontract_reserve = D("100000")
+
+        self.assertEqual(cyclic.intercontract_current_life_limit, D("78000"))
+        self.assertEqual(cyclic.intercontract_current_limit, D("100000"))
+        self.assertEqual(cyclic.active_mode(), 5)
+        self.assertEqual(cyclic.mode_display_name(), "Режим 5")
+
     def test_cyclic_work_obligations_are_reserved_before_modes(self):
         settings = UserSettings(
             has_debts=False,
