@@ -83,6 +83,7 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
             rows.append([("Начать перерыв", "intercontract:start")])
         elif allocator.state.intercontract_months_remaining > 0:
             rows.append([("Заплатить себе из Фонда Зарплаты", "intercontract:salary")])
+            rows.append([("Начать рабочую часть", "intercontract:finish")])
         else:
             rows.append([("Начать рабочую часть", "intercontract:finish")])
         rows.append([("Как работает Фонд Зарплаты", "fundsalary:help")])

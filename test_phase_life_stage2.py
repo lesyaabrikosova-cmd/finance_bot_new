@@ -66,6 +66,19 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         self.assertNotIn("⚠️ Заполнить рабочую жизнь", texts)
         self.assertNotIn("⚠️ Заполнить жизнь в перерыве", texts)
 
+    def test_early_work_phase_button_is_available_during_break(self):
+        allocator = self.cyclic_allocator({
+            "break": PhaseLifeBudget(critical_life="40000", completed=True),
+            "work": PhaseLifeBudget(critical_life="25000", completed=True),
+        })
+        allocator.state.intercontract_break_active = True
+        allocator.state.current_cycle_phase = "break"
+        allocator.state.intercontract_months_remaining = Decimal("2")
+        with patch("ui.db.load_allocator", return_value=allocator):
+            texts = self.button_texts(main_menu_keyboard(1))
+        self.assertIn("Заплатить себе из Фонда Зарплаты", texts)
+        self.assertIn("Начать рабочую часть", texts)
+
     def test_foreign_phase_budget_keeps_native_values_and_rub_equivalent(self):
         budget = PhaseLifeBudget(
             critical_life="40000",

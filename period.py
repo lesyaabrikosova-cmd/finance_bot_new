@@ -132,6 +132,29 @@ async def finish_intercontract_period(callback: CallbackQuery):
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is None:
         return
+    if allocator.state.intercontract_months_remaining > 0:
+        await callback.message.answer(
+            "<b>НАЧАТЬ РАБОЧУЮ ЧАСТЬ РАНЬШЕ?</b>\n\n"
+            f"По прежнему плану до работы оставалось <b>{allocator.state.intercontract_months_remaining} мес.</b> "
+            "Фактическое начало работы заменит этот прогноз.",
+            reply_markup=keyboard([
+                [("← Назад", "menu:back"), ("✔️ Начать", "intercontract:finish:confirm")],
+            ]),
+        )
+        return
+    await validate_work_phase_start(callback, allocator)
+
+
+@router.callback_query(F.data == "intercontract:finish:confirm")
+async def confirm_early_work_phase(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    await validate_work_phase_start(callback, allocator)
+
+
+async def validate_work_phase_start(callback: CallbackQuery, allocator):
     work_life = allocator.settings.phase_life("work")
     if work_life is None or not work_life.completed:
         await callback.message.answer(
@@ -143,24 +166,7 @@ async def finish_intercontract_period(callback: CallbackQuery):
             ]),
         )
         return
-    missing_obligations = max(
-        0,
-        allocator.settings.contract_obligations_total
-        - allocator.state.contract_obligations_reserve,
-    )
-    if missing_obligations > 0:
-        await callback.message.answer(
-            "<b>РЕЗЕРВ НА РАБОЧУЮ ЧАСТЬ НЕ СОБРАН</b>\n\n"
-            f"Не хватает <b>{missing_obligations} ₽</b> на обязательства, которые продолжатся во время работы.\n\n"
-            "Добавьте доступные деньги через «Распределить текущие деньги» или новое поступление. "
-            "Начать работу всё равно можно, но тогда часть обязательств останется без покрытия.",
-            reply_markup=keyboard([
-                [("← Главное меню", "menu:back")],
-                [("Начать работу без полного резерва", "intercontract:finish:force")],
-            ]),
-        )
-        return
-    await complete_work_phase_start(callback, allocator)
+    await complete_work_phase_start(callback, allocator, allow_early=True)
 
 
 @router.callback_query(F.data == "intercontract:finish:force")
@@ -169,23 +175,22 @@ async def force_finish_intercontract_period(callback: CallbackQuery):
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is None:
         return
-    await complete_work_phase_start(callback, allocator)
+    await complete_work_phase_start(callback, allocator, allow_early=True)
 
 
-async def complete_work_phase_start(callback: CallbackQuery, allocator):
+async def complete_work_phase_start(callback: CallbackQuery, allocator, allow_early: bool = False):
     try:
-        allocator.start_new_work_phase()
+        allocator.start_new_work_phase(allow_early=allow_early)
     except ValueError as error:
         await callback.message.answer(str(error))
         return
     db.save_allocator(callback.from_user.id, allocator)
     await callback.message.answer(
-        "<b>НАЧАЛАСЬ НОВАЯ РАБОЧАЯ ЧАСТЬ</b>\n\n"
-        "Предыдущий финансовый цикл завершён. Счётчик дохода обнулён, и следующие поступления "
-        "будут учитываться в новом цикле.\n\n"
-        f"Резерв обязательств: <b>{allocator.state.contract_obligations_reserve} ₽</b> / "
-        f"<b>{allocator.settings.contract_obligations_total} ₽</b>.",
-        reply_markup=main_menu_keyboard(callback.from_user.id),
+        "<b>РАБОЧАЯ ЧАСТЬ НАЧАЛАСЬ</b>\n\n"
+        "Проверьте, что все обязательства уплачены. Оставшиеся деньги на счёте «Зарплата» "
+        "<b>после оплаты счетов</b> переведите в <b>Фонд Зарплаты</b>. Они пригодятся в следующем перерыве.\n\n"
+        "Бытовой резерв и остальные финансовые конверты не трогайте.",
+        reply_markup=keyboard([[("✔️ Хорошо", "menu:back")]]),
     )
 
 

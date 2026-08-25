@@ -1399,10 +1399,10 @@ class FinancialAllocator:
         self.state.current_phase_months_remaining = self.state.intercontract_months_remaining
         return amount
 
-    def start_new_work_phase(self) -> None:
+    def start_new_work_phase(self, allow_early: bool = False) -> None:
         if not self.state.intercontract_break_active:
             raise ValueError("Межконтрактный период ещё не начат.")
-        if self.state.intercontract_months_remaining > ZERO:
+        if self.state.intercontract_months_remaining > ZERO and not allow_early:
             raise ValueError("Сначала проведите все запланированные месяцы перерыва.")
         self.state.intercontract_break_active = False
         self.state.current_cycle_phase = "work"

@@ -171,6 +171,34 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertFalse(allocator.state.intercontract_break_active)
         self.assertEqual(allocator.state.cycle_income, D("0"))
 
+    def test_work_phase_can_start_before_predicted_break_end_without_moving_balances(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            profile_type="cyclic",
+            income_rhythm="cyclic",
+            income_work_months=D("5"),
+            income_gap_months=D("7"),
+            critical_life=D("39000"),
+            household_reserve=D("11000"),
+            average_income=D("57000"),
+        ))
+        allocator.state.intercontract_break_active = True
+        allocator.state.current_cycle_phase = "break"
+        allocator.state.intercontract_months_remaining = D("2")
+        allocator.state.current_phase_months_remaining = D("2")
+        allocator.state.life_balance = D("8000")
+        allocator.state.intercontract_reserve = D("100000")
+
+        with self.assertRaises(ValueError):
+            allocator.start_new_work_phase()
+        allocator.start_new_work_phase(allow_early=True)
+
+        self.assertEqual(allocator.state.current_cycle_phase, "work")
+        self.assertEqual(allocator.state.current_phase_months_remaining, D("5"))
+        self.assertEqual(allocator.state.life_balance, D("8000"))
+        self.assertEqual(allocator.state.intercontract_reserve, D("100000"))
+
     def make_allocator(
         self,
         *,
