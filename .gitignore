@@ -1,5 +1,10 @@
 .env
+.env.production
+.env.*.local
 __pycache__/
 *.pyc
 allocator.db
+allocator.db-shm
+allocator.db-wal
+backups/
 .DS_Store

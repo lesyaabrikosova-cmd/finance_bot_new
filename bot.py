@@ -69,6 +69,7 @@ from dashboard import (
 
 from taxes import router as taxes_router
 from debts import router as debts_router
+from health_server import start_health_server
 
 from ui import (
     keyboard,
@@ -856,6 +857,7 @@ async def main():
         "Финансовый Аллокатор запущен."
     )
 
+    health_server = await start_health_server()
     reminder_task = asyncio.create_task(period_reminder_worker(bot))
 
     try:
@@ -866,6 +868,9 @@ async def main():
 
     finally:
         reminder_task.cancel()
+        await asyncio.gather(reminder_task, return_exceptions=True)
+        health_server.close()
+        await health_server.wait_closed()
         db.close()
         await bot.session.close()
 
