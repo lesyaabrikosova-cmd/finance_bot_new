@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from html import escape
@@ -71,6 +72,7 @@ class IncomeStates(StatesGroup):
     custom_income_confirm = State()
     income_date = State()
     confirmation = State()
+    strategy_choice = State()
 
     # Редактирование налога конкретного поступления
     tax_edit = State()
@@ -1138,6 +1140,77 @@ async def confirm_income(
         data["income_date"]
     )
 
+    tax_override_raw = data.get("tax_override")
+    tax_override = (
+        None if tax_override_raw is None else Decimal(str(tax_override_raw))
+    )
+
+    chosen_strategy = data.get("income_strategy")
+    if not allocator.settings.goals:
+        chosen_strategy = "protection"
+    if chosen_strategy not in {"balanced", "protection"}:
+        try:
+            variants = {}
+            for strategy in ("balanced", "protection"):
+                simulated = deepcopy(allocator)
+                simulated.settings.protective_stage_c_strategy = strategy
+                variants[strategy] = simulated.process_income(
+                    income=income,
+                    income_type=income_type,
+                    income_date=income_date,
+                    tax_override=tax_override,
+                )
+        except Exception as error:
+            await callback.message.answer(
+                "⚠️ Не удалось подготовить варианты распределения.\n\n"
+                f"<code>{escape(str(error))}</code>"
+            )
+            return
+
+        balanced = variants["balanced"]
+        protection = variants["protection"]
+        if balanced.allocations != protection.allocations:
+            def choice_totals(result):
+                allocations = result.allocations
+                protection_total = sum((
+                    allocations.get("Подушка", Decimal("0")),
+                    allocations.get("Фонд Зарплаты", Decimal("0")),
+                    allocations.get("Стабилизатор дохода", Decimal("0")),
+                ), Decimal("0"))
+                goals_total = sum(
+                    (value for key, value in allocations.items() if key.startswith("Цели:")),
+                    Decimal("0"),
+                )
+                return protection_total, goals_total
+
+            balanced_protection, balanced_goals = choice_totals(balanced)
+            full_protection, full_goals = choice_totals(protection)
+            protection_labels = {
+                "Подушка": protection.allocations.get("Подушка", Decimal("0")),
+                "Фонд Зарплаты": protection.allocations.get("Фонд Зарплаты", Decimal("0")),
+                "Стабилизатор": protection.allocations.get("Стабилизатор дохода", Decimal("0")),
+            }
+            destination = max(protection_labels, key=protection_labels.get)
+            await state.set_state(IncomeStates.strategy_choice)
+            await callback.message.answer(
+                "<b>КАК РАСПРЕДЕЛИТЬ СВОБОДНУЮ ЧАСТЬ?</b>\n\n"
+                "Сначала Аллокатор в любом случае обеспечит текущую жизнь и обязательные платежи. "
+                "Для оставшейся части доступны два варианта.\n\n"
+                "<b>Оставить место для целей</b>\n"
+                f"• защита — примерно <b>{rub(balanced_protection)}</b>\n"
+                f"• цели — примерно <b>{rub(balanced_goals)}</b>\n\n"
+                f"<b>Быстрее наполнить «{escape(destination)}»</b>\n"
+                f"• защита — примерно <b>{rub(full_protection)}</b>\n"
+                f"• цели — <b>{rub(full_goals)}</b>\n\n"
+                "Это предварительный расчёт. Деньги ещё не распределены.",
+                reply_markup=keyboard([
+                    [("Часть — в цели", "income:strategy:balanced"), ("Без части на цели", "income:strategy:protection")],
+                    [("← Назад", "income:strategy:back"), ("✖️ Отмена", "income:cancel")],
+                ]),
+            )
+            return
+        chosen_strategy = "balanced"
+
     # ========================================================
     # ЗАПУСК ФИНАНСОВОГО ЯДРА
     # ========================================================
@@ -1146,25 +1219,17 @@ async def confirm_income(
     refresh_planned_tax_targets(telegram_id, allocator, income_date)
 
     try:
-
-        tax_override_raw = data.get(
-            "tax_override"
-        )
-
-        tax_override = (
-            None
-            if tax_override_raw is None
-            else Decimal(
-                str(tax_override_raw)
-            )
-        )
-
+        original_strategy = allocator.settings.protective_stage_c_strategy
+        allocator.settings.protective_stage_c_strategy = chosen_strategy
         result = allocator.process_income(
             income=income,
             income_type=income_type,
             income_date=income_date,
             tax_override=tax_override,
         )
+        # Выбор относится только к этому поступлению и не становится скрытой
+        # постоянной настройкой следующего распределения.
+        allocator.settings.protective_stage_c_strategy = original_strategy
 
     except Exception as error:
 
@@ -1243,6 +1308,26 @@ async def confirm_income(
         allocator,
         result,
     )
+
+
+@router.callback_query(
+    IncomeStates.strategy_choice,
+    F.data.startswith("income:strategy:") & ~F.data.endswith(":back"),
+)
+async def choose_income_strategy(callback: CallbackQuery, state: FSMContext):
+    strategy = callback.data.rsplit(":", 1)[1]
+    if strategy not in {"balanced", "protection"}:
+        return
+    await state.update_data(income_strategy=strategy)
+    await state.set_state(IncomeStates.confirmation)
+    await confirm_income(callback, state)
+
+
+@router.callback_query(IncomeStates.strategy_choice, F.data == "income:strategy:back")
+async def income_strategy_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(income_strategy=None)
+    await show_income_confirmation(callback.message, state, callback.from_user.id)
 
 
 # ============================================================
@@ -1334,7 +1419,13 @@ async def send_distribution_report(
 
     for key, value in allocations.items():
         if key.startswith("Рабочие обязательства:"):
-            add_distribution_line("📌", key.split(":", 1)[1], value)
+            parts = key.split(":", 2)
+            if len(parts) == 3:
+                _, envelope, expense = parts
+                label = f"{expense} → {envelope}"
+            else:
+                label = key.split(":", 1)[1]
+            add_distribution_line("📌", label, value)
 
     for name in settings.life_categories.keys():
 

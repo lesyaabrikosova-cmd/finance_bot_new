@@ -147,7 +147,6 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("Плановые платежи", "settings:planned")],
             [("❤️ Категории КЖ", "settings:life_categories")],
             [("⭐️ Проценты целей", "settings:goals")],
-            [("⚖️ Цели / Подушка этапа C", "settings:c_split")],
             [(dev_button, "settings:developer")],
             [("🗑 Полный сброс учёта", "settings:full_reset")],
             [("🔄 Пройти настройку заново", "setup:restart")],
@@ -1163,13 +1162,20 @@ async def save_goal_percentages(message: Message, state: FSMContext):
 @router.callback_query(F.data == "settings:c_split")
 async def edit_c_split(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    allocator = db.load_allocator(callback.from_user.id)
-    await state.set_state(EditSettingsStates.c_split)
     await callback.message.answer(
-        "⚖️ <b>ЭТАП C: ЦЕЛИ / ПОДУШКА</b>\n\n"
-        f"Сейчас: ⭐️ цели {allocator.settings.goals_share_c}% / 🛡️ подушка {allocator.settings.pillow_share_c}%\n\n"
-        "Введите два числа через запятую. Например: <code>60,40</code>\n"
-        "Первое — цели, второе — Подушка. В сумме должно быть 100%."
+        "Теперь этот выбор появляется непосредственно при каждом распределении дохода. "
+        "Постоянная стратегия больше не нужна.",
+        reply_markup=keyboard([[("← Назад", "settings:open")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("settings:c_strategy:"))
+async def save_c_strategy(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer(
+        "Постоянный вариант больше не сохраняется. Бот предложит выбор при следующем "
+        "распределении дохода, если после текущей жизни останется свободная часть.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 @router.message(EditSettingsStates.c_split)

@@ -53,8 +53,7 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         [("Налоги", "menu:taxes")],
     ]
 
-    if has_active_debts:
-        rows.append([("Кредиты", "menu:credits")])
+    rows.append([("Долги", "menu:credits")])
 
     if allocator:
         rows.append([("Прогноз распределения дохода", "menu:forecast")])
@@ -85,8 +84,10 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         elif allocator.state.intercontract_months_remaining > 0:
             rows.append([("Заплатить себе из Фонда Зарплаты", "intercontract:salary")])
             rows.append([("Начать рабочую часть", "intercontract:finish")])
+            rows.append([("Продлить перерыв", "intercontract:extend")])
         else:
             rows.append([("Начать рабочую часть", "intercontract:finish")])
+            rows.append([("Продлить перерыв", "intercontract:extend")])
         rows.append([("Как работает Фонд Зарплаты", "fundsalary:help")])
 
     rows.extend([

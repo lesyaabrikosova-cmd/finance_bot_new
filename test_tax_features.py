@@ -28,6 +28,8 @@ from onboarding import (  # noqa: E402
     matching_housing_total,
     matching_communication_total,
     months_until_due_date,
+    months_until_tax_ready,
+    next_annual_tax_due_date,
     normalize_pass_months,
     parse_tax_due_date,
     planned_taxes_from_storage,
@@ -35,10 +37,13 @@ from onboarding import (  # noqa: E402
 )
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets  # noqa: E402
 from taxes import (  # noqa: E402
+    annual_tax_due_date,
     apply_planned_tax_allocation,
     make_pie_chart,
     refresh_planned_tax_targets,
     report_text,
+    tax_funding_date,
+    tax_months_remaining,
 )
 from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
 from storage import (  # noqa: E402
@@ -224,6 +229,20 @@ class TaxFeatureTests(unittest.TestCase):
         )
         restored = deserialize_income_rhythm(serialize_income_types(settings))
         self.assertEqual(restored["household_reserve_categories"], {"Дети": Decimal("20")})
+
+    def test_contract_obligation_storage_survives_settings_serialization(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            income_rhythm="cyclic",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("50"),
+            average_income=Decimal("100"),
+            contract_obligations={"ЖКХ": Decimal("500")},
+            contract_obligation_storage={"ЖКХ": "Недвижимость"},
+        )
+        restored = deserialize_income_rhythm(serialize_income_types(settings))
+        self.assertEqual(restored["contract_obligation_storage"], {"ЖКХ": "Недвижимость"})
 
     def test_combined_onboarding_routes_nonmonthly_ambiguous_expenses_to_reserve(self):
         for category in ("communication", "habits", "fees"):
@@ -790,7 +809,9 @@ class TaxFeatureTests(unittest.TestCase):
         )
         apply_planned_tax_allocation(telegram_id, allocator, Decimal("1000"))
         self.assertNotIn("Налоги", allocator.settings.life_categories)
-        self.assertEqual(db.load_tax_obligations(telegram_id), [])
+        item = db.load_tax_obligations(telegram_id)[0]
+        self.assertEqual(item["saved_before"], Decimal("1000"))
+        self.assertEqual(item["monthly_amount"], Decimal("0"))
 
     def test_tax_target_recalculates_from_concrete_due_date(self):
         telegram_id = 880008
@@ -804,12 +825,33 @@ class TaxFeatureTests(unittest.TestCase):
         db.save_allocator(telegram_id, allocator)
         db.add_tax_obligation(
             telegram_id, "Налог на имущество", "Дом", Decimal("3000"),
-            Decimal("1000"), 4, Decimal("500"), "2026-11-01",
+            Decimal("1000"), 4, Decimal("500"), "2026-12-01",
         )
         refresh_planned_tax_targets(telegram_id, allocator, date(2026, 9, 1))
         item = db.load_tax_obligations(telegram_id)[0]
         self.assertEqual(item["monthly_amount"], Decimal("1000.00"))
         self.assertEqual(allocator.settings.life_categories["Налоги"], Decimal("1000.00"))
+
+    def test_property_taxes_are_ready_one_month_before_payment_deadline(self):
+        due = date(2026, 12, 1)
+        self.assertEqual(tax_funding_date("Налог на имущество", due), date(2026, 11, 1))
+        self.assertEqual(tax_months_remaining("Налог на имущество", due, date(2026, 9, 1)), 2)
+        self.assertEqual(months_until_tax_ready(date(2026, 9, 1), due), 2)
+        self.assertEqual(next_annual_tax_due_date(date(2026, 8, 29)), due)
+        self.assertEqual(annual_tax_due_date(date(2026, 8, 29)), due)
+
+    def test_tax_readiness_reminder_is_returned_only_once(self):
+        telegram_id = 880009
+        db.ensure_user(telegram_id)
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Земельный налог", "Дача", Decimal("900"),
+            Decimal("900"), 1, Decimal("0"), "2026-12-01",
+        )
+        rows = db.due_tax_readiness_reminders("2026-11-01")
+        self.assertTrue(any(row["id"] == obligation_id for row in rows))
+        db.mark_tax_readiness_reminder_sent(telegram_id, obligation_id)
+        rows = db.due_tax_readiness_reminders("2026-11-01")
+        self.assertFalse(any(row["id"] == obligation_id for row in rows))
 
 
 if __name__ == "__main__":

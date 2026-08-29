@@ -104,11 +104,12 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         allocations = allocator.apply_first_distribution(Decimal("250000"))
 
         self.assertEqual(allocator.state.life_balance, Decimal("50000"))
-        self.assertEqual(allocator.state.intercontract_reserve, Decimal("100000"))
-        self.assertEqual(allocator.state.pillow_stabilizer, Decimal("100000"))
-        self.assertEqual(allocator.state.pillow_force_majeure, Decimal("0"))
-        self.assertEqual(allocations["Фонд Зарплаты"], Decimal("100000.00"))
-        self.assertEqual(allocations["Стабилизатор дохода"], Decimal("100000.00"))
+        self.assertEqual(allocator.state.intercontract_reserve, Decimal("50000"))
+        self.assertEqual(allocator.state.pillow_stabilizer, Decimal("0"))
+        self.assertEqual(allocator.state.pillow_force_majeure, Decimal("150000"))
+        self.assertEqual(allocations["Фонд Зарплаты"], Decimal("50000.00"))
+        self.assertEqual(allocations["Форс-мажорная подушка"], Decimal("150000.00"))
+        self.assertEqual(allocator.state.intercontract_months_remaining, Decimal("2"))
 
     def test_first_rebalance_uses_existing_current_life(self):
         allocator = self.cyclic_allocator({
@@ -128,10 +129,28 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         self.assertEqual(before["Текущая жизнь"], Decimal("42000.00"))
         self.assertEqual(after["Текущая жизнь"], Decimal("50000.00"))
         self.assertEqual(after["Обязательства на время работы"], Decimal("27055.00"))
-        self.assertEqual(after["Фонд Зарплаты"], Decimal("100000.00"))
-        self.assertEqual(after["Стабилизатор дохода"], Decimal("56945.00"))
+        self.assertEqual(after["Фонд Зарплаты"], Decimal("50000.00"))
+        self.assertEqual(after["Стабилизатор дохода"], Decimal("0.00"))
+        self.assertEqual(after["Форс-мажорная подушка"], Decimal("106945.00"))
 
-    def test_piecework_waterfall_fills_stabilizer_before_force_majeure(self):
+    def test_first_distribution_does_not_count_current_break_month_twice(self):
+        allocator = self.cyclic_allocator({
+            "break": PhaseLifeBudget(
+                critical_life="39000", household_reserve="12000", completed=True
+            ),
+        })
+        allocator.settings.contract_obligations = {"Домашние обязательства": Decimal("27055")}
+        allocator.state.current_cycle_phase = "break"
+        allocator.state.intercontract_break_active = True
+        allocator.state.intercontract_months_remaining = Decimal("2")
+
+        allocations = allocator.apply_first_distribution(Decimal("190000"))
+
+        self.assertEqual(allocations["Текущая жизнь"], Decimal("50000.00"))
+        self.assertEqual(allocations["Фонд Зарплаты"], Decimal("50000.00"))
+        self.assertEqual(allocator.state.intercontract_months_remaining, Decimal("2"))
+
+    def test_piecework_waterfall_fills_force_majeure_before_stabilizer(self):
         settings = UserSettings(
             has_debts=False,
             employment_type="Фрилансер",
@@ -145,8 +164,8 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         )
         allocator = FinancialAllocator(settings=settings)
         allocator.apply_first_distribution(Decimal("30000"))
-        self.assertEqual(allocator.state.pillow_stabilizer, Decimal("10000"))
-        self.assertEqual(allocator.state.pillow_force_majeure, Decimal("10000"))
+        self.assertEqual(allocator.state.pillow_stabilizer, Decimal("0"))
+        self.assertEqual(allocator.state.pillow_force_majeure, Decimal("20000"))
 
     def test_starting_break_opens_next_work_obligations_again(self):
         allocator = self.cyclic_allocator({

@@ -149,7 +149,7 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 7,
+        "version": 8,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
@@ -168,6 +168,7 @@ def serialize_income_types(settings: UserSettings) -> str:
             name: decimal_to_string(amount)
             for name, amount in settings.contract_obligations.items()
         },
+        "contract_obligation_storage": dict(settings.contract_obligation_storage),
         "household_reserve_categories": {
             name: decimal_to_string(amount)
             for name, amount in settings.household_reserve_categories.items()
@@ -198,7 +199,7 @@ def serialize_income_types(settings: UserSettings) -> str:
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -210,7 +211,7 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
@@ -222,6 +223,10 @@ def deserialize_income_rhythm(value) -> dict:
             "contract_obligations": {
                 str(name): string_to_decimal(amount)
                 for name, amount in raw.get("contract_obligations", {}).items()
+            },
+            "contract_obligation_storage": {
+                str(name): str(envelope)
+                for name, envelope in raw.get("contract_obligation_storage", {}).items()
             },
             "household_reserve_categories": {
                 str(name): string_to_decimal(amount)
@@ -356,6 +361,8 @@ class Database:
 
                 goals_share_c TEXT NOT NULL,
                 pillow_share_c TEXT NOT NULL,
+                protective_stage_c_strategy TEXT NOT NULL DEFAULT 'balanced',
+                use_contract_obligations_fund INTEGER NOT NULL DEFAULT 0,
 
                 life_categories TEXT NOT NULL,
 
@@ -462,8 +469,11 @@ class Database:
                 period_status TEXT NOT NULL DEFAULT 'legacy',
                 period_activation_date TEXT,
                 period_reminder_sent_for TEXT,
+                initial_distribution_completed INTEGER NOT NULL DEFAULT 0,
+                break_period_salary_paid INTEGER NOT NULL DEFAULT 0,
                 fund_salary_currencies TEXT NOT NULL DEFAULT '{}',
                 fund_salary_period_rates TEXT NOT NULL DEFAULT '{}',
+                fund_salary_start_reserves TEXT NOT NULL DEFAULT '{}',
                 fund_salary_rates_locked_at TEXT,
 
                 FOREIGN KEY (telegram_id)
@@ -549,6 +559,7 @@ class Database:
                 saved_before TEXT NOT NULL DEFAULT '0',
                 months INTEGER NOT NULL,
                 monthly_amount TEXT NOT NULL,
+                ready_reminder_sent_at TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
@@ -584,6 +595,8 @@ class Database:
         }
         if "due_date" not in tax_columns:
             cursor.execute("ALTER TABLE tax_obligations ADD COLUMN due_date TEXT")
+        if "ready_reminder_sent_at" not in tax_columns:
+            cursor.execute("ALTER TABLE tax_obligations ADD COLUMN ready_reminder_sent_at TEXT")
 
         state_columns = {
             row["name"]
@@ -631,12 +644,33 @@ class Database:
             cursor.execute("ALTER TABLE state ADD COLUMN period_activation_date TEXT")
         if "period_reminder_sent_for" not in state_columns:
             cursor.execute("ALTER TABLE state ADD COLUMN period_reminder_sent_for TEXT")
+        if "initial_distribution_completed" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN initial_distribution_completed INTEGER NOT NULL DEFAULT 0")
+        if "break_period_salary_paid" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN break_period_salary_paid INTEGER NOT NULL DEFAULT 0")
         if "fund_salary_currencies" not in state_columns:
             cursor.execute("ALTER TABLE state ADD COLUMN fund_salary_currencies TEXT NOT NULL DEFAULT '{}'")
         if "fund_salary_period_rates" not in state_columns:
             cursor.execute("ALTER TABLE state ADD COLUMN fund_salary_period_rates TEXT NOT NULL DEFAULT '{}'")
+        if "fund_salary_start_reserves" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN fund_salary_start_reserves TEXT NOT NULL DEFAULT '{}'")
         if "fund_salary_rates_locked_at" not in state_columns:
             cursor.execute("ALTER TABLE state ADD COLUMN fund_salary_rates_locked_at TEXT")
+
+        settings_columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(settings)").fetchall()
+        }
+        if "protective_stage_c_strategy" not in settings_columns:
+            cursor.execute(
+                "ALTER TABLE settings ADD COLUMN protective_stage_c_strategy "
+                "TEXT NOT NULL DEFAULT 'balanced'"
+            )
+        if "use_contract_obligations_fund" not in settings_columns:
+            cursor.execute(
+                "ALTER TABLE settings ADD COLUMN use_contract_obligations_fund "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
         # ----------------------------------------------------
         # Индексы
@@ -788,6 +822,8 @@ class Database:
 
                 goals_share_c,
                 pillow_share_c,
+                protective_stage_c_strategy,
+                use_contract_obligations_fund,
 
                 life_categories,
 
@@ -798,11 +834,11 @@ class Database:
             )
 
             VALUES (
-                ?, ?, ?,
+                ?, ?, ?, ?,
                 ?, ?, ?,
                 ?,
                 ?,
-                ?, ?,
+                ?, ?, ?,
                 ?, ?, ?, ?, ?,
                 ?, ?,
                 ?,
@@ -860,6 +896,12 @@ class Database:
 
                 pillow_share_c =
                     excluded.pillow_share_c,
+
+                protective_stage_c_strategy =
+                    excluded.protective_stage_c_strategy,
+
+                use_contract_obligations_fund =
+                    excluded.use_contract_obligations_fund,
 
                 life_categories =
                     excluded.life_categories,
@@ -932,6 +974,10 @@ class Database:
                 decimal_to_string(
                     settings.pillow_share_c
                 ),
+
+                settings.protective_stage_c_strategy,
+
+                int(settings.use_contract_obligations_fund),
 
                 serialize_json(
                     settings.life_categories
@@ -1294,6 +1340,12 @@ class Database:
                     row["pillow_share_c"]
                 ),
 
+            protective_stage_c_strategy=
+                row["protective_stage_c_strategy"],
+
+            use_contract_obligations_fund=
+                bool(row["use_contract_obligations_fund"]),
+
             life_categories=
                 deserialize_json(
                     row["life_categories"]
@@ -1372,8 +1424,11 @@ class Database:
                 period_status,
                 period_activation_date,
                 period_reminder_sent_for,
+                initial_distribution_completed,
+                break_period_salary_paid,
                 fund_salary_currencies,
                 fund_salary_period_rates,
+                fund_salary_start_reserves,
                 fund_salary_rates_locked_at
             )
 
@@ -1384,7 +1439,7 @@ class Database:
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
 
             ON CONFLICT(telegram_id)
@@ -1460,8 +1515,11 @@ class Database:
                     excluded.period_activation_date,
 
                 period_reminder_sent_for = excluded.period_reminder_sent_for,
+                initial_distribution_completed = excluded.initial_distribution_completed,
+                break_period_salary_paid = excluded.break_period_salary_paid,
                 fund_salary_currencies = excluded.fund_salary_currencies,
                 fund_salary_period_rates = excluded.fund_salary_period_rates,
+                fund_salary_start_reserves = excluded.fund_salary_start_reserves,
                 fund_salary_rates_locked_at = excluded.fund_salary_rates_locked_at
             """,
             (
@@ -1539,8 +1597,11 @@ class Database:
                 state.period_status,
                 state.period_activation_date,
                 state.period_reminder_sent_for,
+                int(state.initial_distribution_completed),
+                int(state.break_period_salary_paid),
                 serialize_json(state.fund_salary_currencies),
                 serialize_json(state.fund_salary_period_rates),
+                serialize_json(state.fund_salary_start_reserves),
                 state.fund_salary_rates_locked_at,
             ),
         )
@@ -1672,8 +1733,11 @@ class Database:
                 row["period_activation_date"],
 
             period_reminder_sent_for=row["period_reminder_sent_for"],
+            initial_distribution_completed=bool(row["initial_distribution_completed"]),
+            break_period_salary_paid=bool(row["break_period_salary_paid"]),
             fund_salary_currencies=deserialize_json(row["fund_salary_currencies"]),
             fund_salary_period_rates=deserialize_json(row["fund_salary_period_rates"]),
+            fund_salary_start_reserves=deserialize_json(row["fund_salary_start_reserves"]),
             fund_salary_rates_locked_at=row["fund_salary_rates_locked_at"],
         )
 
@@ -1972,6 +2036,7 @@ class Database:
                 "months": row["months"],
                 "monthly_amount": string_to_decimal(row["monthly_amount"]),
                 "due_date": row["due_date"],
+                "ready_reminder_sent_at": row["ready_reminder_sent_at"],
                 "active": bool(row["active"]),
             }
             for row in rows
@@ -2126,6 +2191,42 @@ class Database:
             WHERE telegram_id = ? AND id = ?
             """,
             (decimal_to_string(monthly_amount), telegram_id, obligation_id),
+        )
+        self.connection.commit()
+
+    def due_tax_readiness_reminders(self, today: str) -> list[dict]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM tax_obligations
+            WHERE active = 1
+              AND tax_type IN ('Налог на имущество', 'Транспортный налог', 'Земельный налог')
+              AND due_date IS NOT NULL
+              AND (substr(due_date, 1, 4) || '-11-01') <= ?
+              AND ready_reminder_sent_at IS NULL
+            ORDER BY telegram_id, id
+            """,
+            (today,),
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "telegram_id": int(row["telegram_id"]),
+                "tax_type": row["tax_type"],
+                "object_name": row["object_name"],
+                "target_amount": string_to_decimal(row["target_amount"]),
+                "saved_before": string_to_decimal(row["saved_before"]),
+                "due_date": row["due_date"],
+            }
+            for row in rows
+        ]
+
+    def mark_tax_readiness_reminder_sent(self, telegram_id: int, obligation_id: int) -> None:
+        self.connection.execute(
+            """
+            UPDATE tax_obligations SET ready_reminder_sent_at = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (datetime.utcnow().isoformat(), telegram_id, obligation_id),
         )
         self.connection.commit()
 

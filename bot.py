@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from datetime import date
+from html import escape
 
 from dotenv import load_dotenv
 
@@ -67,6 +68,7 @@ from dashboard import (
 )
 
 from taxes import router as taxes_router
+from debts import router as debts_router
 
 from ui import (
     keyboard,
@@ -308,6 +310,15 @@ async def send_state(
             f"<b>{fmt_money(state.contract_obligations_reserve)} ₽</b> / "
             f"{fmt_money(settings.contract_obligations_total)} ₽"
         )
+        if settings.contract_obligations:
+            text += "\n<b>Хранение обязательств</b>:"
+            stored = settings.contract_obligation_reserve_by_envelope(
+                state.contract_obligations_reserve
+            )
+            for envelope, target in settings.contract_obligations_by_envelope.items():
+                amount = stored.get(envelope, 0)
+                text += f"\n  — {escape(envelope)}: <b>{fmt_money(amount)} ₽</b>"
+                text += f" / {fmt_money(target)} ₽"
 
     if next_info:
 
@@ -455,7 +466,10 @@ async def menu_credits(
             "💳 <b>КРЕДИТЫ</b>\n\n"
             "У вас нет активных кредитов "
             "в финансовом профиле.",
-            reply_markup=main_menu_keyboard(callback.from_user.id),
+            reply_markup=keyboard([
+                [("Добавить долг", "debt:add")],
+                [("← Назад", "menu:main")],
+            ]),
         )
 
         return
@@ -498,7 +512,12 @@ async def menu_credits(
 
     await callback.message.answer(
         "\n".join(lines),
-        reply_markup=main_menu_keyboard(callback.from_user.id),
+        reply_markup=keyboard([
+            *[[(f"{number}. {credit.name}", f"debt:view:{number - 1}")]
+              for number, credit in enumerate(credits, start=1)],
+            [("Добавить долг", "debt:add")],
+            [("← Назад", "menu:main")],
+        ]),
     )
 
 
@@ -721,7 +740,7 @@ async def set_bot_commands(
 
 
 async def period_reminder_worker(bot: Bot):
-    """Раз в час напоминает о запланированном старте; повторов за одну дату нет."""
+    """Раз в час проверяет запланированный старт и готовность годовых налогов."""
     while True:
         today = date.today().isoformat()
         for telegram_id, activation_date in db.due_period_reminders(today):
@@ -736,6 +755,41 @@ async def period_reminder_worker(bot: Bot):
                 db.mark_period_reminder_sent(telegram_id, activation_date)
             except Exception:
                 logging.exception("Не удалось отправить напоминание пользователю %s", telegram_id)
+
+        tax_rows = db.due_tax_readiness_reminders(today)
+        by_user: dict[int, list[dict]] = {}
+        for item in tax_rows:
+            by_user.setdefault(item["telegram_id"], []).append(item)
+        for telegram_id, items in by_user.items():
+            lines = []
+            total_missing = 0
+            for item in items:
+                missing = max(0, item["target_amount"] - item["saved_before"])
+                total_missing += missing
+                status = (
+                    "сумма готова"
+                    if missing <= 0 else f"не хватает {fmt_money(missing)} ₽"
+                )
+                lines.append(
+                    f"• {escape(item['tax_type'])} · {escape(item['object_name'])} — {status}"
+                )
+            heading = (
+                "Все запланированные суммы готовы. Проверьте начисления и оплатите их до 1 декабря."
+                if total_missing <= 0 else
+                f"До полной суммы не хватает <b>{fmt_money(total_missing)} ₽</b>. "
+                "Проверьте начисления и постарайтесь закрыть дефицит до оплаты."
+            )
+            try:
+                await bot.send_message(
+                    telegram_id,
+                    "<b>НАЛОГИ ДОЛЖНЫ БЫТЬ ГОТОВЫ</b>\n\n"
+                    + heading + "\n\n" + "\n".join(lines),
+                    reply_markup=keyboard([[('Открыть налоги', 'menu:taxes')]]),
+                )
+                for item in items:
+                    db.mark_tax_readiness_reminder_sent(telegram_id, item["id"])
+            except Exception:
+                logging.exception("Не удалось отправить напоминание о налогах пользователю %s", telegram_id)
         await asyncio.sleep(3600)
 
 
@@ -776,6 +830,7 @@ async def main():
     )
 
     dp.include_router(taxes_router)
+    dp.include_router(debts_router)
 
     # Новый расчётный период
     dp.include_router(

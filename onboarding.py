@@ -85,6 +85,7 @@ class SetupStates(StatesGroup):
     fund_salary_intro = State()
     stabilizer_target_months = State()
     contract_obligations_menu = State()
+    contract_obligations_storage = State()
     income_method = State()
     income_month_amount = State()
 
@@ -1029,6 +1030,17 @@ def parse_tax_due_date(value: str | None) -> date | None:
 def months_until_due_date(today: date, due_date: date) -> int:
     """Количество ежемесячных пополнений до месяца уплаты включительно."""
     return max(1, (due_date.year - today.year) * 12 + due_date.month - today.month)
+
+
+def months_until_tax_ready(today: date, due_date: date) -> int:
+    """Имущественные налоги должны быть полностью собраны к 1 ноября."""
+    ready = date(due_date.year, 11, 1)
+    return months_until_due_date(today, ready)
+
+
+def next_annual_tax_due_date(today: date) -> date:
+    due = date(today.year, 12, 1)
+    return due if today < due else date(today.year + 1, 12, 1)
 
 
 def add_calendar_months(value: date, months: int) -> date:
@@ -3301,16 +3313,19 @@ async def km_item_name(message: Message, state: FSMContext):
     data = await state.get_data()
     is_tax = data.get("pending_km_subcategory") in {"property_tax", "land_tax", "tax"}
     if is_tax:
-        await state.set_state(SetupStates.km_tax_due_date)
         current_date = date.today()
-        example_year = current_date.year if current_date < date(current_date.year, 12, 1) else current_date.year + 1
+        due_date = next_annual_tax_due_date(current_date)
+        ready_date = date(due_date.year, 11, 1)
+        await state.update_data(pending_km_due_date=due_date.isoformat())
+        await state.set_state(SetupStates.km_item_amount)
         await message.answer(
             f"{setup_progress(data, 5)}\n\n"
-            "<b>КОГДА НУЖНО УПЛАТИТЬ НАЛОГ?</b>\n\n"
-            f"Сегодня — <b>{current_date.strftime('%d.%m.%Y')}</b>.\n\n"
-            "——————\n"
-            "<b>→ Введите точную или ориентировочную дату.</b>\n"
-            f"<b>Например:</b> <code>01.12.{example_year}</code>",
+            f"<b>{escape(name.upper())}</b>\n\n"
+            f"Сумма должна быть готова к <b>{ready_date.strftime('%d.%m.%Y')}</b>.\n"
+            f"Оплатить налог нужно до <b>{due_date.strftime('%d.%m.%Y')}</b>.\n\n"
+            "<b>СКОЛЬКО ОСТАЛОСЬ НАКОПИТЬ?</b>\n\n"
+            "Укажите сумму, которой сейчас не хватает в конверте «Налоги».\n\n"
+            "——————\n<b>→ Введите сумму.</b>",
             reply_markup=life_input_keyboard(current_life_back_callback(data)),
         )
         return
@@ -3337,7 +3352,7 @@ async def km_item_amount(message: Message, state: FSMContext):
     subtype = data.get("pending_km_subcategory")
     if subtype in {"property_tax", "land_tax", "tax"} and data.get("pending_km_due_date"):
         due_date = date.fromisoformat(data["pending_km_due_date"])
-        await save_km_item(message, state, Decimal(months_until_due_date(date.today(), due_date)))
+        await save_km_item(message, state, Decimal(months_until_tax_ready(date.today(), due_date)))
         return
     if category == "housing" and subtype in {"rent", "mortgage"}:
         await save_km_item(message, state, Decimal("1"))
@@ -3425,7 +3440,12 @@ async def km_tax_due_date(message: Message, state: FSMContext):
     if due_date <= current_date:
         await message.answer("Срок уплаты должен быть позже сегодняшней даты. Проверьте дату и введите её ещё раз.")
         return
-    months = months_until_due_date(current_date, due_date)
+    data = await state.get_data()
+    is_annual_tax = data.get("pending_km_subcategory") in {"property_tax", "land_tax", "tax"}
+    months = (
+        months_until_tax_ready(current_date, due_date)
+        if is_annual_tax else months_until_due_date(current_date, due_date)
+    )
     await state.update_data(pending_km_due_date=due_date.isoformat())
     data = await state.get_data()
     if data.get("pending_km_item_amount"):
@@ -4211,7 +4231,7 @@ async def km_edit_tax_due_date_save(message: Message, state: FSMContext):
         return
     data=await state.get_data(); index=int(data.get("pending_km_edit_index",-1)); items=list(data.get("km_items",[]))
     if 0 <= index < len(items):
-        item=dict(items[index]); months=months_until_due_date(current_date,due_date); item["due_date"]=due_date.isoformat(); item["months"]=str(months); item["monthly"]=str(money2(Decimal(item["amount"])/Decimal(months))); items[index]=item; await state.update_data(km_items=items)
+        item=dict(items[index]); is_tax=item.get("subcategory") in {"property_tax", "land_tax", "tax"}; months=(months_until_tax_ready(current_date,due_date) if is_tax else months_until_due_date(current_date,due_date)); item["due_date"]=due_date.isoformat(); item["months"]=str(months); item["monthly"]=str(money2(Decimal(item["amount"])/Decimal(months))); items[index]=item; await state.update_data(km_items=items)
     await state.set_state(SetupStates.km_menu); await show_km_menu(message,state)
 
 
@@ -4987,17 +5007,62 @@ async def br_final_continue(callback: CallbackQuery, state: FSMContext):
 
 
 def contract_obligation_entries(data: dict) -> list[tuple[str, dict]]:
+    # Имущественные налоги не спрашиваем повторно: у них собственный конверт
+    # и календарный план до 1 ноября, который действует в обеих фазах цикла.
+    tax_subtypes = {"property_tax", "land_tax", "tax"}
     return (
-        [(f"km:{index}", item) for index, item in enumerate(data.get("km_items", []))]
-        + [(f"br:{index}", item) for index, item in enumerate(data.get("br_items", []))]
+        [
+            (f"km:{index}", item)
+            for index, item in enumerate(data.get("km_items", []))
+            if item.get("subcategory") not in tax_subtypes
+        ]
+        + [
+            (f"br:{index}", item)
+            for index, item in enumerate(data.get("br_items", []))
+            if item.get("subcategory") not in tax_subtypes
+        ]
     )
 
 
-def contract_obligation_amount(item: dict, work_months: Decimal) -> Decimal:
+def contract_obligation_amount(
+    item: dict,
+    work_months: Decimal,
+    gap_months: Decimal = Decimal("1"),
+) -> Decimal:
     months = Decimal(str(item.get("months", "1")))
     if months > 1:
-        return money2(Decimal(str(item.get("amount", "0"))))
+        # Одна периодическая позиция финансируется совместно обеими частями
+        # цикла. В рабочие обязательства попадает только доля рабочих месяцев,
+        # а не второй экземпляр полной суммы.
+        annualized = Decimal(str(item.get("amount", "0"))) * Decimal("12") / months
+        cycle_months = max(Decimal("1"), work_months + gap_months)
+        return money2(annualized * work_months / cycle_months)
     return money2(Decimal(str(item.get("monthly", "0"))) * work_months)
+
+
+def recalculate_cyclic_expense_rates(data: dict) -> tuple[list[dict], list[dict]]:
+    """Пересчитывает периодические расходы без домашней/рабочей копии."""
+    selected = set(data.get("contract_obligation_keys", []))
+    work_months = Decimal(str(data.get("income_work_months", "1")))
+    gap_months = Decimal(str(data.get("income_gap_months", "1")))
+    cycle_months = max(Decimal("1"), work_months + gap_months)
+    home_months_per_year = Decimal("12") * gap_months / cycle_months
+
+    result: dict[str, list[dict]] = {"km": [], "br": []}
+    for prefix, source_name in (("km", "km_items"), ("br", "br_items")):
+        for index, raw_item in enumerate(data.get(source_name, [])):
+            item = dict(raw_item)
+            months = Decimal(str(item.get("months", "1")))
+            is_calendar_tax = item.get("subcategory") in {"property_tax", "land_tax", "tax"}
+            if months > 1 and not is_calendar_tax:
+                annualized = Decimal(str(item.get("amount", "0"))) * Decimal("12") / months
+                if f"{prefix}:{index}" in selected:
+                    monthly = annualized / Decimal("12")
+                else:
+                    monthly = annualized / max(Decimal("1"), home_months_per_year)
+                item["monthly"] = str(money2(monthly))
+            result[prefix].append(item)
+    return result["km"], result["br"]
 
 
 def contract_obligation_button_text(item: dict) -> str:
@@ -5015,6 +5080,7 @@ def build_contract_obligations(
 ) -> tuple[dict[str, str], list[str], Decimal]:
     selected = set(data.get("contract_obligation_keys", []))
     work_months = Decimal(str(data.get("income_work_months", "1")))
+    gap_months = Decimal(str(data.get("income_gap_months", "1")))
     obligations: dict[str, str] = {}
     lines: list[str] = []
     total = Decimal("0")
@@ -5022,14 +5088,14 @@ def build_contract_obligations(
     for item_key, item in contract_obligation_entries(data):
         if item_key not in selected:
             continue
-        amount = contract_obligation_amount(item, work_months)
+        amount = contract_obligation_amount(item, work_months, gap_months)
         obligations[item["name"]] = str(
             Decimal(obligations.get(item["name"], "0")) + amount
         )
         total += amount
         months = Decimal(str(item.get("months", "1")))
         if months > 1:
-            calculation = f"платёж за {months} мес."
+            calculation = "доля рабочей части годового плана"
         else:
             calculation = f"{rub(Decimal(str(item.get('monthly', '0'))))} × {work_months} мес."
         lines.append(
@@ -5037,6 +5103,35 @@ def build_contract_obligations(
         )
 
     return obligations, lines, money2(total)
+
+
+def build_contract_obligation_storage(data: dict, *, use_fund: bool) -> dict[str, str]:
+    """Назначает место хранения рабочей доли, не создавая копию расхода."""
+    selected = set(data.get("contract_obligation_keys", []))
+    storage_items = list(data.get("km_storage_items", []))
+    result: dict[str, str] = {}
+    for key, item in contract_obligation_entries(data):
+        if key not in selected:
+            continue
+        if key.startswith("br:"):
+            envelope = "Бытовой резерв"
+        else:
+            index = int(key.split(":", 1)[1])
+            stored = storage_items[index] if index < len(storage_items) else {}
+            if stored.get("storage") == "separate":
+                envelope = (stored.get("envelope_name") or stored.get("item_name") or item["name"]).strip()
+            else:
+                envelope = "Фонд Обязательств" if use_fund else "Бытовой резерв"
+        result[item["name"]] = envelope
+    return result
+
+
+def contract_storage_lines(data: dict, storage: dict[str, str]) -> list[str]:
+    obligations, _, _ = build_contract_obligations(data)
+    return [
+        f"• <b>{escape(name)}</b> — {rub(Decimal(amount))} · {escape(storage.get(name, 'Бытовой резерв'))}"
+        for name, amount in obligations.items()
+    ]
 
 
 async def show_contract_obligations(message: Message, state: FSMContext):
@@ -5050,10 +5145,15 @@ async def show_contract_obligations(message: Message, state: FSMContext):
     await state.set_state(SetupStates.contract_obligations_menu)
     await message.answer(
         f"{setup_progress(data, 7)}\n\n"
-        "<b>КАКИЕ РАСХОДЫ ПРОДОЛЖАТСЯ ВО ВРЕМЯ РАБОТЫ?</b>\n\n"
-        "Выберите конкретные расходы, которые нужно оплачивать во время рабочей части цикла. "
-        "Аллокатор зарезервирует деньги на весь рабочий период.\n\n"
-        "Например, один номер телефона можно продолжать оплачивать, а другой временно заблокировать.\n\n"
+        "<b>КАКИЕ РАСХОДЫ СОХРАНЯЮТСЯ ВО ВРЕМЯ РАБОТЫ?</b>\n\n"
+        "Отметьте расходы, которые нужно продолжать оплачивать, пока вы на работе.\n\n"
+        "Например: ЖКХ дома, мобильную связь, подписки или налоги.\n\n"
+        "Для годовых и других длительных расходов Аллокатор разделит одну сумму "
+        "между домашними и рабочими месяцами. Часть на время работы подготовит заранее. "
+        "Один и тот же расход не будет учитываться дважды.\n\n"
+        "Имущественный, транспортный и земельный налоги здесь не показываются: "
+        "они всегда копятся в конверте «Налоги» по собственному календарю до 1 ноября.\n\n"
+        "Неотмеченные расходы будут финансироваться только за домашние месяцы.\n\n"
         "Нажмите на расход повторно, чтобы снять выбор.",
         reply_markup=keyboard(rows),
     )
@@ -5061,6 +5161,50 @@ async def show_contract_obligations(message: Message, state: FSMContext):
 
 async def show_contract_obligations_confirmation(message: Message, state: FSMContext):
     data = await state.get_data()
+    km_items, br_items = recalculate_cyclic_expense_rates(data)
+    km_exact = money2(sum((Decimal(item["monthly"]) for item in km_items), Decimal("0")))
+    br_exact = money2(sum((Decimal(item["monthly"]) for item in br_items), Decimal("0")))
+    storage_items = list(data.get("km_storage_items", []))
+    if len(storage_items) == len(km_items):
+        storage_items = [
+            {**stored, "monthly": item["monthly"], "item_name": item.get("name", stored.get("item_name"))}
+            for stored, item in zip(storage_items, km_items)
+        ]
+    else:
+        storage_items = build_default_km_storage(km_items)
+    phase_budgets = dict(data.get("phase_life_budgets", {}))
+    phase = data.get("life_phase")
+    if (
+        phase in {"work", "break"}
+        and phase in phase_budgets
+        and phase_budgets[phase].get("currency_code", "RUB") == "RUB"
+    ):
+        phase_budget = dict(phase_budgets[phase])
+        phase_budget.update({
+            "critical_life": str(round_up_thousand(km_exact)),
+            "household_reserve": str(round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")),
+            "household_reserve_categories": {
+                name: str(value) for name, value in br_group_totals(br_items).items()
+            },
+        })
+        phase_budgets[phase] = phase_budget
+    await state.update_data(
+        km_items=km_items,
+        br_items=br_items,
+        critical_life_exact=str(km_exact),
+        critical_life=str(round_up_thousand(km_exact)),
+        household_reserve_exact=str(br_exact),
+        household_reserve=str(round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")),
+        km_storage_items=storage_items,
+        life_categories={
+            name: str(value) for name, value in life_categories_from_storage(storage_items).items()
+        },
+        household_reserve_categories={
+            name: str(value) for name, value in br_group_totals(br_items).items()
+        },
+        phase_life_budgets=phase_budgets,
+    )
+    data = {**data, "km_items": km_items, "br_items": br_items}
     obligations, lines, total = build_contract_obligations(data)
     await state.update_data(contract_obligations=obligations)
     await message.answer(
@@ -5074,6 +5218,86 @@ async def show_contract_obligations_confirmation(message: Message, state: FSMCon
     )
 
 
+async def ask_contract_obligations_storage(message: Message, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("contract_obligation_keys", []))
+    storage_items = list(data.get("km_storage_items", []))
+    entries = dict(contract_obligation_entries(data))
+    without_envelope_names: set[str] = set()
+    for key in selected:
+        if not key.startswith("km:"):
+            continue
+        index = int(key.split(":", 1)[1])
+        if index >= len(storage_items) or storage_items[index].get("storage") == "salary":
+            item = entries.get(key, {})
+            without_envelope_names.add(str(item.get("name") or key))
+
+    without_envelope = len(without_envelope_names)
+
+    if without_envelope < 2:
+        storage = build_contract_obligation_storage(data, use_fund=False)
+        await state.update_data(
+            use_contract_obligations_fund=False,
+            contract_obligation_storage=storage,
+            progress_offset=4,
+        )
+        lines = contract_storage_lines(data, storage)
+        if lines:
+            await message.answer(
+                "<b>ГДЕ БУДУТ ХРАНИТЬСЯ ОБЯЗАТЕЛЬСТВА</b>\n\n"
+                + "\n".join(lines)
+                + "\n\nДополнительный счёт не нужен: расходов без собственного конверта меньше двух."
+            )
+        await ask_pillow_policy(message, state)
+        return
+
+    await state.set_state(SetupStates.contract_obligations_storage)
+    await message.answer(
+        "<b>ГДЕ ХРАНИТЬ ОБЯЗАТЕЛЬСТВА НА ВРЕМЯ РАБОТЫ?</b>\n\n"
+        f"У вас найдено расходов без собственного конверта: <b>{without_envelope}</b>.\n\n"
+        "Для них удобно открыть отдельный счёт <b>«Фонд Обязательств»</b>. "
+        "Если дополнительный счёт не нужен, зарезервированная сумма останется "
+        "внутри Бытового резерва.",
+        reply_markup=keyboard([
+            [("Создать Фонд Обязательств", "contractstorage:fund")],
+            [("Хранить в Бытовом резерве", "contractstorage:household")],
+            [("← Назад", "contractobligation:edit")],
+        ]),
+    )
+
+
+@router.callback_query(
+    SetupStates.contract_obligations_storage,
+    F.data.startswith("contractstorage:"),
+)
+async def save_contract_obligations_storage(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    choice = callback.data.rsplit(":", 1)[1]
+    data = await state.get_data()
+    storage = build_contract_obligation_storage(data, use_fund=(choice == "fund"))
+    await state.update_data(
+        use_contract_obligations_fund=(choice == "fund"),
+        contract_obligation_storage=storage,
+        progress_offset=4,
+    )
+    lines = contract_storage_lines(data, storage)
+    await callback.message.answer(
+        "<b>ГДЕ БУДУТ ХРАНИТЬСЯ ОБЯЗАТЕЛЬСТВА</b>\n\n"
+        + ("\n".join(lines) if lines else "• Обязательства не выбраны")
+        + "\n\nЭто места хранения частей уже учтённых расходов, а не новые расходы."
+    )
+    await ask_pillow_policy(callback.message, state)
+
+
+@router.callback_query(
+    SetupStates.contract_obligations_storage,
+    F.data == "contractobligation:edit",
+)
+async def contract_storage_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_contract_obligations(callback.message, state)
+
+
 @router.callback_query(SetupStates.contract_obligations_menu, F.data.startswith("contractobligation:"))
 async def toggle_contract_obligation(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -5085,8 +5309,7 @@ async def toggle_contract_obligation(callback: CallbackQuery, state: FSMContext)
         await show_contract_obligations(callback.message, state)
         return
     if key == "confirm":
-        await state.update_data(progress_offset=4)
-        await ask_pillow_policy(callback.message, state)
+        await ask_contract_obligations_storage(callback.message, state)
         return
     selected = set((await state.get_data()).get("contract_obligation_keys", []))
     if key in selected:
@@ -5125,23 +5348,12 @@ async def br_override_save(message: Message, state: FSMContext):
 
 async def ask_pillow_policy(message: Message, state: FSMContext):
     data = await state.get_data()
-    step = 7
-    bar = setup_progress(data, step)
-
-    if data.get("has_debts"):
-        await state.set_state(SetupStates.minimum_reserve_months)
-        await message.answer(
-            f"{bar}\n\n"
-            "<b>КАКОЙ МИНИМАЛЬНЫЙ ЗАПАС СОЗДАТЬ ДО АКТИВНОГО ПОГАШЕНИЯ ДОЛГОВ?</b>\n\n"
-            "Один месяц — быстрее перейти к досрочному погашению. Два месяца — больше защиты от нового долга.",
-            reply_markup=keyboard([
-                [("1 месяц", "minmonths:1"), ("2 месяца", "minmonths:2")],
-            ]),
-        )
-    else:
-        await state.update_data(minimum_reserve_months="0")
-        await state.set_state(SetupStates.force_majeure_months)
-        await show_force_majeure_question_new(message, state)
+    # МП — нижний слой той же Подушки. Цель сохраняется в профиле даже у
+    # недолжника, чтобы при появлении нового долга режим пересчитался сразу.
+    minimum_months = "1" if data.get("income_rhythm", "monthly") == "monthly" else "2"
+    await state.update_data(minimum_reserve_months=minimum_months)
+    await state.set_state(SetupStates.force_majeure_months)
+    await show_force_majeure_question_new(message, state)
 
 
 @router.callback_query(SetupStates.minimum_reserve_months, F.data.startswith("minmonths:"))
@@ -6300,6 +6512,13 @@ def build_settings_from_data(
             name: Decimal(str(amount))
             for name, amount in data.get("contract_obligations", {}).items()
         },
+        contract_obligation_storage={
+            str(name): str(envelope)
+            for name, envelope in data.get("contract_obligation_storage", {}).items()
+        },
+        use_contract_obligations_fund=bool(
+            data.get("use_contract_obligations_fund", False)
+        ),
         phase_life_budgets=phase_life_budgets,
 
         tax_rate=Decimal(
@@ -6505,6 +6724,8 @@ async def show_confirmation(
 
     if settings.income_rhythm == "cyclic":
         accounts.append(("🏦", "Фонд Зарплаты"))
+        if settings.use_contract_obligations_fund:
+            accounts.append(("🏦", "Фонд Обязательств"))
 
     if settings.needs_stabilizer:
         accounts.append(("🛟", "Стабилизатор дохода"))
@@ -6577,7 +6798,6 @@ async def show_confirmation(
         f"{accounts_text}\n\n"
         "<b><u>ПРЕДВАРИТЕЛЬНЫЙ РЕЖИМ:</u></b>\n\n"
         f"{mode_progress}\n\n"
-        f"«{escape(mode_name)}»\n\n"
         "<b><u>P.S.:</u></b>\n\n"
         "Цели и инвестиции появятся тогда, когда ваш финансовый режим действительно будет "
         "готов направлять туда деньги."
@@ -6606,7 +6826,7 @@ async def show_confirmation(
         # Для необычно большого профиля сохраняем и картинку, и полный текст.
         short_caption = (
             "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
-            f"{escape(mode_name)}"
+            f"{mode_progress}"
         )
         try:
             await message.answer_photo(
@@ -6703,42 +6923,19 @@ async def confirm_save(
 
     await state.clear()
 
-    snapshot = (
-        allocator.get_state_snapshot()
-    )
-
-    mode = snapshot[
-        "mode_name"
-    ]
-
-    next_info = (
-        allocator.next_mode_info()
-    )
-
-    next_text = ""
-
-    if next_info:
-
-        next_text = (
-            f"\nДо следующего режима "
-            f"{next_info['next_name']} осталось: "
-            f"<b>{rub(next_info['remaining'])}</b>"
-        )
-
     await callback.message.answer(
-        "<b>ФИНАНСОВЫЙ ПРОФИЛЬ СОХРАНЁН</b>\n\n"
-
-        "Осталось выбрать начало первого расчётного периода.\n\n"
-
-        f"Предварительный режим: <b>{mode}</b>"
-        f"{next_text}\n\n"
-
-        "Расчётный период — ваш личный финансовый месяц. Он необязательно начинается "
-        "первого числа. Если начать сегодня, предыдущие траты учитывать не потребуется. "
-        "Либо сначала закончите привычный период и выберите будущую дату запуска.",
+        "<b>КОГДА НАЧАТЬ?</b>\n\n"
+        "ℹ️ Аллокатор лучше запускать <b>с начала нового финансового месяца</b> — так мы "
+        "начнём с чистого листа и правильно распределим все деньги с первого дня.\n\n"
+        "Финансовый месяц необязательно начинается 1-го числа. Например, если вы привыкли "
+        "планировать деньги от зарплаты до зарплаты, период может начинаться <b>в день зарплаты</b>.\n\n"
+        "——————\n"
+        "→ Выберите <b>дату</b>, с которой хотите начать жить по новой системе. Если вы решите "
+        "сначала закончить привычный месяц, то я пришлю вам <b>напоминание</b> в назначенный день.",
         reply_markup=keyboard([
-            [("Начать новый период сегодня", "periodsetup:today")],
+            [("Начать новый месяц сегодня", "periodsetup:today")],
             [("Выбрать дату начала", "periodsetup:date")],
+            [("✖️ Отмена", "periodsetup:cancel")],
         ]),
     )
 
@@ -6747,13 +6944,47 @@ async def show_first_period_started(message: Message, allocator: FinancialAlloca
     start = date.fromisoformat(allocator.state.period_started_at[:10])
     end = date.fromisoformat(allocator.state.period_ends_at)
     await message.answer(
-        "<b>ПЕРВЫЙ РАСЧЁТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
-        f"Период: <b>{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}</b>.\n\n"
-        "Расходы до даты запуска не учитываются. Теперь зафиксируйте деньги, которыми "
-        "располагаете прямо сейчас, и сделайте первое распределение.",
+        "<b>НОВАЯ ФИНАНСОВАЯ СИСТЕМА ЗАПУЩЕНА</b>\n\n"
+        "Первый расчётный период:\n"
+        f"<b>{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}</b>\n\n"
+        "<b>Начинаем с чистого листа.</b>\n\n"
+        "Теперь зафиксируйте деньги, которыми располагаете прямо сейчас, и сделайте первое распределение.",
         reply_markup=keyboard([
             [("Сделать первое распределение", "firstallocation:start")],
             [("Перейти в Главное меню", "menu:back")],
+            [("✖️ Отмена", "periodsetup:cancel_start")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "periodsetup:cancel")
+async def cancel_period_choice(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "Выбор даты отложен. Вернуться к нему можно из Главного меню.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data == "periodsetup:cancel_start")
+async def cancel_started_first_period(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    allocator.state.period_status = "not_started"
+    allocator.state.period_started_at = None
+    allocator.state.period_ends_at = None
+    allocator.state.period_anchor_day = 0
+    allocator.state.period_activation_date = None
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await callback.message.answer(
+        "<b>ЗАПУСК ОТМЕНЁН</b>\n\nВыберите другую дату начала.",
+        reply_markup=keyboard([
+            [("Начать новый месяц сегодня", "periodsetup:today")],
+            [("Выбрать дату начала", "periodsetup:date")],
+            [("✖️ Отмена", "periodsetup:cancel")],
         ]),
     )
 
@@ -6889,16 +7120,47 @@ async def start_first_allocation(callback: CallbackQuery, state: FSMContext):
             )
             return
     await state.clear()
+    known_total = allocator.first_distribution_source_total()
+    currency_button = (
+        [[("Уточнить валюты Фонда Зарплаты", "fundcurrency:menu")]]
+        if allocator.settings.income_rhythm == "cyclic"
+        else []
+    )
     await callback.message.answer(
-        "<b>КАК СЕЙЧАС ЛЕЖАТ ВАШИ ДЕНЬГИ?</b>\n\n"
-        "Если деньги лежат одной суммой, Аллокатор разложит её с нуля.\n\n"
-        "Если вы уже указали отдельные суммы Фонда Зарплаты, Стабилизатора, Подушки и текущей "
-        "жизни, Аллокатор соберёт их для расчёта и предложит правильный водопад.",
+        "<b>ПЕРВОЕ РАСПРЕДЕЛЕНИЕ</b>\n\n"
+        f"Во время настройки вы уже указали остатки на сумму <b>{rub(known_total)}</b>. "
+        "Аллокатор использует их автоматически — повторно вводить те же деньги не нужно.\n\n"
+        "Если есть дополнительные свободные деньги, которые ещё нигде не учтены, добавьте "
+        "только эту дополнительную сумму.\n\n"
+        "Если часть Фонда Зарплаты хранится в валюте, можно сохранить фактический валютный "
+        "остаток и зафиксировать курс на расчётный период. Ежедневно пересчитывать его не потребуется.",
         reply_markup=keyboard([
-            [("Все деньги лежат вместе", "firstallocation:pile")],
-            [("Деньги уже разделены", "firstallocation:separated")],
+            [("Распределить известные деньги", "firstallocation:separated")],
+            [("Добавить свободные деньги", "firstallocation:extra")],
+            *currency_button,
             [("✖️ Отмена", "menu:back")],
         ]),
+    )
+
+
+@router.callback_query(F.data == "firstallocation:extra")
+async def ask_first_allocation_extra(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    await state.update_data(
+        first_allocation_kind="pile",
+        first_allocation_known=str(allocator.first_distribution_source_total()),
+    )
+    await state.set_state(SetupStates.first_allocation_amount)
+    await callback.message.answer(
+        "<b>СКОЛЬКО ЕЩЁ СВОБОДНЫХ ДЕНЕГ НЕ УЧТЕНО?</b>\n\n"
+        "Не повторяйте остатки, уже введённые в онбординге. Укажите только деньги сверх них.\n\n"
+        "Для валюты используйте зафиксированный плановый рублёвый эквивалент. Реальный курс "
+        "обмена может отличаться из-за спреда и комиссии.\n\n"
+        "——————\n<b>→ Введите дополнительную сумму в рублях.</b>",
+        reply_markup=keyboard([[('← Назад', 'firstallocation:start'), ('✖️ Отмена', 'menu:back')]]),
     )
 
 
@@ -6961,7 +7223,9 @@ async def save_first_allocation_total(message: Message, state: FSMContext):
     if value is None or value < 0:
         await message.answer("Введите сумму от 0 ₽ и выше.")
         return
-    await show_first_allocation_preview(message, state, message.from_user.id, value)
+    data = await state.get_data()
+    known = Decimal(str(data.get("first_allocation_known", "0")))
+    await show_first_allocation_preview(message, state, message.from_user.id, known + value)
 
 
 @router.callback_query(SetupStates.first_allocation_confirm, F.data == "firstallocation:apply")

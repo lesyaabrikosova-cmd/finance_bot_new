@@ -24,14 +24,14 @@ def profile_route(profile: str, include_debt_stages: bool = True) -> tuple[str, 
     routes = {
         STABLE_EMPLOYEE: ("ФМ-подушка", "Максимальный режим"),
         STABLE_FREELANCER: (
-            "Стабилизатор-КМ", "Стабилизатор-УЖ", "ФМ-подушка", "Максимальный режим"
+            "ФМ-подушка", "Стабилизатор-КМ", "Стабилизатор-УЖ", "Максимальный режим"
         ),
         CYCLIC: (
             "Фонд Зарплаты-КМ",
             "Фонд Зарплаты-УЖ",
+            "ФМ-подушка",
             "Стабилизатор-КМ",
             "Стабилизатор-УЖ",
-            "ФМ-подушка",
             "Максимальный режим",
         ),
     }
@@ -108,9 +108,9 @@ class CyclicIncomePlan:
         layers = (
             ("Фонд Зарплаты-КМ", self.intercontract_critical),
             ("Фонд Зарплаты-УЖ", self.intercontract_full - self.intercontract_critical),
+            ("ФМ-подушка", self.force_majeure),
             ("Стабилизатор-КМ", self.stabilizer_critical),
             ("Стабилизатор-УЖ", self.stabilizer_full - self.stabilizer_critical),
-            ("ФМ-подушка", self.force_majeure),
         )
         remaining = available
         for name, target in layers:
