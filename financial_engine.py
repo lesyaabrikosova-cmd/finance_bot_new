@@ -1170,7 +1170,7 @@ class FinancialAllocator:
             raise ValueError(
                 "Ошибки настроек:\n"
                 + "\n".join(
-                    f"- {error}"
+                    f"• {error}"
                     for error in errors
                 )
             )

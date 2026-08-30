@@ -19,9 +19,9 @@ PROFILE_MODE_ASSETS = {
     "piecework": {
         1: "minimum_reserve",
         2: "debt_repayment",
-        3: "stabilizer_critical",
-        4: "stabilizer_sustainable",
-        5: "force_majeure",
+        3: "force_majeure",
+        4: "stabilizer_critical",
+        5: "stabilizer_sustainable",
         6: "maximum",
     },
     "cyclic": {
@@ -29,9 +29,9 @@ PROFILE_MODE_ASSETS = {
         2: "debt_repayment",
         3: "salary_fund_critical",
         4: "salary_fund_sustainable",
-        5: "contract_delay",
-        6: "stabilizer_sustainable",
-        7: "force_majeure",
+        5: "force_majeure",
+        6: "contract_delay",
+        7: "stabilizer_sustainable",
         8: "maximum",
     },
 }

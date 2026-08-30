@@ -6,8 +6,8 @@ from mode_presentation import MODE_IMAGES_DIR, PROFILE_MODE_ASSETS, mode_image_p
 class ModePresentationTests(unittest.TestCase):
     def test_shared_meanings_resolve_across_profiles(self):
         self.assertEqual(mode_image_path("stable", 3).name, "force_majeure.png")
-        self.assertEqual(mode_image_path("piecework", 3).name, "stabilizer_critical.png")
-        self.assertEqual(mode_image_path("cyclic", 7).name, "force_majeure.png")
+        self.assertEqual(mode_image_path("piecework", 3).name, "force_majeure.png")
+        self.assertEqual(mode_image_path("cyclic", 5).name, "force_majeure.png")
 
         self.assertEqual(mode_image_path("stable", 4).name, "maximum.png")
         self.assertEqual(mode_image_path("piecework", 6).name, "maximum.png")
@@ -17,8 +17,9 @@ class ModePresentationTests(unittest.TestCase):
         expected = {
             3: "salary_fund_critical.png",
             4: "salary_fund_sustainable.png",
-            5: "contract_delay.png",
-            6: "stabilizer_sustainable.png",
+            5: "force_majeure.png",
+            6: "contract_delay.png",
+            7: "stabilizer_sustainable.png",
         }
         for mode, filename in expected.items():
             self.assertEqual(mode_image_path("cyclic", mode).name, filename)

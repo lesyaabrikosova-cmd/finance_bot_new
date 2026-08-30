@@ -97,6 +97,7 @@ class SetupStates(StatesGroup):
     km_communication_name = State()
     km_item_amount = State()
     km_item_period = State()
+    km_pass_accumulated = State()
     km_tax_due_date = State()
     km_education_lesson_count = State()
     km_education_custom_count = State()
@@ -753,6 +754,12 @@ def round_up_thousand(value: Decimal) -> Decimal:
 def normalize_pass_months(value: Decimal) -> Decimal:
     """Берёт число полных накопительных месяцев до покупки проездного."""
     return Decimal(max(1, int(Decimal(value))))
+
+
+def pass_monthly_saving(cost: Decimal, accumulated: Decimal, months: Decimal) -> Decimal:
+    """Считает взнос только с ещё не накопленной стоимости проездного."""
+    remaining = max(Decimal("0"), Decimal(cost) - Decimal(accumulated))
+    return money2(remaining / Decimal(months))
 
 
 def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
@@ -2137,7 +2144,13 @@ async def show_km_category_after_save(
     if category == "housing":
         await message.answer(
             text,
-            reply_markup=keyboard([[('+ Добавить расход', 'kmhousing:add'), ('✔️ Готово', 'km:cancel')]]),
+            reply_markup=keyboard([
+                [("ЖКХ", "kmhousingexpense:utilities"), ("Аренда", "kmhousingexpense:rent")],
+                [("Ипотека", "kmhousingexpense:mortgage"), ("Страхование", "kmhousingexpense:insurance")],
+                [("Налог на имущество", "kmhousingexpense:property_tax")],
+                [("Земельный налог", "kmhousingexpense:land_tax")],
+                [("← Назад", "km:cancel"), ("✔️ Готово", "km:cancel")],
+            ]),
         )
         return
     if category == "communication":
@@ -2393,9 +2406,13 @@ async def show_housing_landing(message: Message, state: FSMContext, notice: str 
         (notice + "\n\n" if notice else "")
         + f"{setup_progress(await state.get_data(), 5)}\n\n"
         "<b>НЕДВИЖИМОСТЬ</b>\n\n"
-        "Здесь учитываются обязательные расходы на жильё и другие необходимые помещения.",
+        "Выберите расход.",
         reply_markup=keyboard([
-            [("← Назад", "km:cancel"), ("+ Добавить расход", "kmhousing:add")],
+            [("ЖКХ", "kmhousingexpense:utilities"), ("Аренда", "kmhousingexpense:rent")],
+            [("Ипотека", "kmhousingexpense:mortgage"), ("Страхование", "kmhousingexpense:insurance")],
+            [("Налог на имущество", "kmhousingexpense:property_tax")],
+            [("Земельный налог", "kmhousingexpense:land_tax")],
+            [("← Назад", "km:cancel"), ("✔️ Готово", "km:cancel")],
         ]),
     )
 
@@ -3618,6 +3635,13 @@ async def km_item_period(callback: CallbackQuery, state: FSMContext):
             reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
         )
         return
+    data = await state.get_data()
+    if (
+        data.get("pending_km_category") == "transport"
+        and data.get("pending_km_subcategory") == "pass"
+    ):
+        await ask_pass_accumulated(callback.message, state, Decimal(value))
+        return
     await save_km_item(callback.message, state, Decimal(value))
 
 
@@ -3638,13 +3662,52 @@ async def km_custom_period(message: Message, state: FSMContext):
                 f"Чтобы сумма была готова вовремя, срок округлён до <b>{safe_months}</b> полн. мес."
             )
         months = safe_months
+        await ask_pass_accumulated(message, state, months)
+        return
     await save_km_item(message, state, months)
+
+
+async def ask_pass_accumulated(message: Message, state: FSMContext, months: Decimal):
+    """Перед расчётом проездного учитывает уже собранную часть его стоимости."""
+    await state.update_data(pending_km_payment_months=str(months))
+    await state.set_state(SetupStates.km_pass_accumulated)
+    await message.answer(
+        "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО?</b>\n\n"
+        "Укажите сумму, которая уже отложена на следующий проездной. "
+        "Если пока ничего не накоплено — отправьте 0.\n\n"
+        "——————\n<b>→ Введите сумму.</b>",
+        reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
+    )
+
+
+@router.message(SetupStates.km_pass_accumulated)
+async def save_pass_accumulated(message: Message, state: FSMContext):
+    accumulated = parse_decimal(message.text)
+    if accumulated is None or accumulated < 0:
+        await message.answer("Введите сумму от 0 и выше.")
+        return
+    data = await state.get_data()
+    full_price = Decimal(data["pending_km_item_amount"])
+    if accumulated > full_price:
+        await message.answer(
+            "Накопленная сумма не может быть больше стоимости проездного. "
+            "Проверьте сумму и введите её ещё раз."
+        )
+        return
+    await state.update_data(pending_km_accumulated=str(accumulated))
+    await save_km_item(message, state, Decimal(data["pending_km_payment_months"]))
 
 
 async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     data = await state.get_data()
     amount = Decimal(data["pending_km_item_amount"])
-    monthly = money2(amount / months)
+    accumulated = (
+        Decimal(str(data.get("pending_km_accumulated", "0")))
+        if data.get("pending_km_subcategory") == "pass"
+        else Decimal("0")
+    )
+    remaining = max(Decimal("0"), amount - accumulated)
+    monthly = pass_monthly_saving(amount, accumulated, months)
     amount_symbol = (
         data.get("phase_currency_symbol", "₽")
         if data.get("income_rhythm") == "cyclic"
@@ -3660,6 +3723,9 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         "monthly": str(monthly),
         "subcategory": data.get("pending_km_subcategory"),
     }
+    if item["subcategory"] == "pass":
+        item["accumulated"] = str(accumulated)
+        item["remaining"] = str(remaining)
     if data.get("pending_km_due_date") and item["subcategory"] in {"property_tax", "land_tax", "tax", "insurance", "large", "college"}:
         item["due_date"] = data["pending_km_due_date"]
     if data.get("pending_km_one_time"):
@@ -5381,10 +5447,10 @@ async def show_force_majeure_question_new(message: Message, state: FSMContext):
         f"{setup_progress(data, 7)}\n\n"
         "<b>РАЗМЕР ФОРС-МАЖОРНОЙ ПОДУШКИ</b>\n\n"
         "ℹ️ <b>Подушка</b> — это резерв на случай событий, которые действительно переворачивают жизнь с ног на голову:\n"
-        "- потеря жилья\n"
-        "- серьёзная болезнь\n"
-        "- аварийный переезд\n"
-        "- смерть близкого человека и др.\n\n"
+        "• Потеря жилья\n"
+        "• Серьёзная болезнь\n"
+        "• Аварийный переезд\n"
+        "• Смерть близкого человека и др.\n\n"
         + hint,
         reply_markup=keyboard(buttons),
     )
@@ -5448,8 +5514,8 @@ async def start_credit_block(message: Message, state: FSMContext):
         f"{setup_progress(data, 8)}\n\n"
         "<b>КАК ГАСИТЬ КРЕДИТЫ ДОСРОЧНО?</b>\n\n"
         "Есть 2 метода:\n\n"
-        "- <b>Лавина</b> — сначала долг с самой высокой ставкой. Обычно это минимизирует переплату.\n\n"
-        "- <b>Снежный ком</b> — сначала самый маленький остаток. С экономической стороны способ "
+        "• <b>Лавина</b> — сначала долг с самой высокой ставкой. Обычно это минимизирует переплату.\n\n"
+        "• <b>Снежный ком</b> — сначала самый маленький остаток. С экономической стороны способ "
         "менее выгоден, а с психологической — гасить проще.\n\n"
         "Если не уверены — выбирайте «Лавина».",
         reply_markup=keyboard([

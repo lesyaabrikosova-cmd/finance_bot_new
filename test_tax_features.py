@@ -31,6 +31,7 @@ from onboarding import (  # noqa: E402
     months_until_tax_ready,
     next_annual_tax_due_date,
     normalize_pass_months,
+    pass_monthly_saving,
     parse_tax_due_date,
     planned_taxes_from_storage,
     should_auto_route_to_reserve,
@@ -265,6 +266,16 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(normalize_pass_months(Decimal("1.5")), Decimal("1"))
         self.assertEqual(normalize_pass_months(Decimal("9")), Decimal("9"))
         self.assertEqual(normalize_pass_months(Decimal("0.5")), Decimal("1"))
+
+    def test_pass_saving_subtracts_amount_already_accumulated(self):
+        self.assertEqual(
+            pass_monthly_saving(Decimal("12000"), Decimal("3000"), Decimal("3")),
+            Decimal("3000.00"),
+        )
+        self.assertEqual(
+            pass_monthly_saving(Decimal("12000"), Decimal("12000"), Decimal("3")),
+            Decimal("0.00"),
+        )
 
     def test_car_subcategory_uses_automobile_envelope(self):
         result = default_km_storage(
