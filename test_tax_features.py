@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 import unittest
@@ -34,6 +35,7 @@ from onboarding import (  # noqa: E402
     pass_monthly_saving,
     parse_tax_due_date,
     planned_taxes_from_storage,
+    save_pass_accumulated,
     should_auto_route_to_reserve,
 )
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets  # noqa: E402
@@ -276,6 +278,44 @@ class TaxFeatureTests(unittest.TestCase):
             pass_monthly_saving(Decimal("12000"), Decimal("12000"), Decimal("3")),
             Decimal("0.00"),
         )
+
+    def test_full_pass_onboarding_path_persists_remaining_amount(self):
+        class FakeState:
+            def __init__(self):
+                self.data = {
+                    "pending_km_item_amount": "24900",
+                    "pending_km_payment_months": "9",
+                    "pending_km_category": "transport",
+                    "pending_km_category_label": "Транспорт",
+                    "pending_km_item_name": "Безлимитный проездной",
+                    "pending_km_subcategory": "pass",
+                    "combined_life_onboarding": True,
+                    "km_items": [],
+                    "br_items": [],
+                }
+
+            async def get_data(self):
+                return dict(self.data)
+
+            async def update_data(self, **values):
+                self.data.update(values)
+
+            async def set_state(self, _state):
+                return None
+
+        class FakeMessage:
+            text = "7815"
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+        state = FakeState()
+        asyncio.run(save_pass_accumulated(FakeMessage(), state))
+        item = state.data["km_items"][0]
+        self.assertEqual(item["amount"], "24900")
+        self.assertEqual(item["accumulated"], "7815")
+        self.assertEqual(item["calculation_amount"], "17085")
+        self.assertEqual(item["monthly"], "1898.33")
 
     def test_car_subcategory_uses_automobile_envelope(self):
         result = default_km_storage(

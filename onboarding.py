@@ -762,6 +762,24 @@ def pass_monthly_saving(cost: Decimal, accumulated: Decimal, months: Decimal) ->
     return money2(remaining / Decimal(months))
 
 
+def item_calculation_amount(item: dict) -> Decimal:
+    """База повторного расчёта: для накопительной покупки — только остаток."""
+    if item.get("subcategory") == "pass":
+        if item.get("calculation_amount") is not None:
+            return Decimal(str(item["calculation_amount"]))
+        return max(
+            Decimal("0"),
+            Decimal(str(item.get("amount", "0")))
+            - Decimal(str(item.get("accumulated", "0"))),
+        )
+    return Decimal(str(item.get("amount", "0")))
+
+
+def recalculate_item_monthly(item: dict, months: Decimal | None = None) -> Decimal:
+    period = Decimal(str(months if months is not None else item.get("months", "1")))
+    return money2(item_calculation_amount(item) / period)
+
+
 def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in items:
@@ -3726,6 +3744,7 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     if item["subcategory"] == "pass":
         item["accumulated"] = str(accumulated)
         item["remaining"] = str(remaining)
+        item["calculation_amount"] = str(remaining)
     if data.get("pending_km_due_date") and item["subcategory"] in {"property_tax", "land_tax", "tax", "insurance", "large", "college"}:
         item["due_date"] = data["pending_km_due_date"]
     if data.get("pending_km_one_time"):
@@ -4216,6 +4235,12 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
         f"<b>{escape(km_item_display_name(item))}</b>\n\n"
         f"Категория — {escape(item['category_label'])}\n"
         f"Исходная сумма — {rub(Decimal(item['amount']))}\n"
+        + (
+            f"Уже накоплено — {rub(Decimal(str(item.get('accumulated', '0'))))}\n"
+            f"Осталось накопить — {rub(item_calculation_amount(item))}\n"
+            if item.get("subcategory") == "pass"
+            else ""
+        )
         + period_line
         + f"В расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",
         reply_markup=keyboard(rows),
@@ -4273,7 +4298,11 @@ async def km_edit_amount_save(message: Message, state: FSMContext):
         await message.answer("Введите положительную сумму."); return
     data=await state.get_data(); index=int(data.get("pending_km_edit_index",-1)); items=list(data.get("km_items",[]))
     if 0 <= index < len(items):
-        item=dict(items[index]); item["amount"]=str(value); item["monthly"]=str(money2(value/Decimal(item["months"]))); items[index]=item; await state.update_data(km_items=items)
+        item=dict(items[index]); item["amount"]=str(value)
+        if item.get("subcategory") == "pass":
+            item["calculation_amount"] = str(max(Decimal("0"), value - Decimal(str(item.get("accumulated", "0")))))
+            item["remaining"] = item["calculation_amount"]
+        item["monthly"]=str(recalculate_item_monthly(item)); items[index]=item; await state.update_data(km_items=items)
     await state.set_state(SetupStates.km_menu); await show_km_menu(message,state)
 
 
@@ -4319,7 +4348,7 @@ async def km_edit_custom_period_save(message: Message, state: FSMContext):
 async def apply_km_edit_period(message: Message, state: FSMContext, months: Decimal):
     data=await state.get_data(); index=int(data.get("pending_km_edit_index",-1)); items=list(data.get("km_items",[]))
     if 0 <= index < len(items):
-        item=dict(items[index]); item["months"]=str(months); item["monthly"]=str(money2(Decimal(item["amount"])/months)); items[index]=item; await state.update_data(km_items=items)
+        item=dict(items[index]); item["months"]=str(months); item["monthly"]=str(recalculate_item_monthly(item, months)); items[index]=item; await state.update_data(km_items=items)
     await state.set_state(SetupStates.km_menu); await show_km_menu(message,state)
 
 
@@ -4968,7 +4997,12 @@ async def br_edit_item(callback: CallbackQuery, state: FSMContext):
         [('Удалить',f'bredit:delete:{index}')],
         [('Назад','lifeedit:list' if data.get("combined_life_onboarding") else 'bredit:list')],
     ])
-    await callback.message.answer(f"<b>{escape(item['name'])}</b>\n\nКатегория — {escape(item['category_label'])}\nИсходная сумма — {rub(Decimal(item['amount']))}\nПериод — {item['months']} мес.\nВ расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",reply_markup=keyboard(rows))
+    pass_details = (
+        f"Уже накоплено — {rub(Decimal(str(item.get('accumulated', '0'))))}\n"
+        f"Осталось накопить — {rub(item_calculation_amount(item))}\n"
+        if item.get("subcategory") == "pass" else ""
+    )
+    await callback.message.answer(f"<b>{escape(item['name'])}</b>\n\nКатегория — {escape(item['category_label'])}\nИсходная сумма — {rub(Decimal(item['amount']))}\n{pass_details}Период — {item['months']} мес.\nВ расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",reply_markup=keyboard(rows))
 
 
 @router.callback_query(F.data.startswith("brmove:km:"))
@@ -5032,7 +5066,12 @@ async def br_edit_amount_save(message: Message, state: FSMContext):
     value=parse_decimal(message.text)
     if value is None or value<=0: await message.answer("Введите положительную сумму."); return
     data=await state.get_data(); index=int(data.get('pending_br_edit_index',-1)); items=list(data.get('br_items',[]))
-    if 0<=index<len(items): item=dict(items[index]); item['amount']=str(value); item['monthly']=str(money2(value/Decimal(item['months']))); items[index]=item; await state.update_data(br_items=items)
+    if 0<=index<len(items):
+        item=dict(items[index]); item['amount']=str(value)
+        if item.get("subcategory") == "pass":
+            item["calculation_amount"] = str(max(Decimal("0"), value - Decimal(str(item.get("accumulated", "0")))))
+            item["remaining"] = item["calculation_amount"]
+        item['monthly']=str(recalculate_item_monthly(item)); items[index]=item; await state.update_data(br_items=items)
     await state.set_state(SetupStates.br_menu); await show_br_menu(message,state)
 
 
@@ -5057,7 +5096,7 @@ async def br_edit_custom_period_save(message: Message, state: FSMContext):
 
 async def apply_br_edit_period(message: Message, state: FSMContext, months: Decimal):
     data=await state.get_data(); index=int(data.get('pending_br_edit_index',-1)); items=list(data.get('br_items',[]))
-    if 0<=index<len(items): item=dict(items[index]); item['months']=str(months); item['monthly']=str(money2(Decimal(item['amount'])/months)); items[index]=item; await state.update_data(br_items=items)
+    if 0<=index<len(items): item=dict(items[index]); item['months']=str(months); item['monthly']=str(recalculate_item_monthly(item, months)); items[index]=item; await state.update_data(br_items=items)
     await state.set_state(SetupStates.br_menu); await show_br_menu(message,state)
 
 
@@ -5100,7 +5139,7 @@ def contract_obligation_amount(
         # Одна периодическая позиция финансируется совместно обеими частями
         # цикла. В рабочие обязательства попадает только доля рабочих месяцев,
         # а не второй экземпляр полной суммы.
-        annualized = Decimal(str(item.get("amount", "0"))) * Decimal("12") / months
+        annualized = item_calculation_amount(item) * Decimal("12") / months
         cycle_months = max(Decimal("1"), work_months + gap_months)
         return money2(annualized * work_months / cycle_months)
     return money2(Decimal(str(item.get("monthly", "0"))) * work_months)
@@ -5121,7 +5160,7 @@ def recalculate_cyclic_expense_rates(data: dict) -> tuple[list[dict], list[dict]
             months = Decimal(str(item.get("months", "1")))
             is_calendar_tax = item.get("subcategory") in {"property_tax", "land_tax", "tax"}
             if months > 1 and not is_calendar_tax:
-                annualized = Decimal(str(item.get("amount", "0"))) * Decimal("12") / months
+                annualized = item_calculation_amount(item) * Decimal("12") / months
                 if f"{prefix}:{index}" in selected:
                     monthly = annualized / Decimal("12")
                 else:
