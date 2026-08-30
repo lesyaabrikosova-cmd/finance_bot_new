@@ -1495,7 +1495,10 @@ async def continue_after_phase_currency(message: Message, state: FSMContext):
     if data.get("phase_life_edit_mode"):
         await start_critical_minimum(message, state, reset_items=False)
     else:
-        await ask_stabilizer_target(message, state)
+        # Три дополнительных вопроса циклического маршрута уже пройдены.
+        # Размер Стабилизатора объясним позднее — рядом с текущими резервами.
+        await state.update_data(progress_offset=3)
+        await ask_income(message, state)
 
 
 async def offer_phase_rate(message: Message, state: FSMContext, code: str):
@@ -1592,23 +1595,56 @@ async def save_manual_phase_rate(message: Message, state: FSMContext):
 async def continue_after_fund_salary_intro(callback: CallbackQuery, state: FSMContext):
     """Совместимость с уже отправленными кнопками удалённого экрана."""
     await callback.answer()
-    await state.update_data(reliable_gap_income="0")
-    await ask_stabilizer_target(callback.message, state)
+    await state.update_data(reliable_gap_income="0", progress_offset=3)
+    await ask_income(callback.message, state)
 
 
 async def ask_stabilizer_target(message: Message, state: FSMContext):
+    data = await state.get_data()
+    rhythm = data.get("income_rhythm")
     await state.set_state(SetupStates.stabilizer_target_months)
+    if rhythm == "cyclic":
+        text = (
+            "<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\n"
+            "ℹ️ Даже если рабочий цикл обычно предсказуем, следующая рабочая часть может "
+            "начаться позже запланированного:\n\n"
+            "• Контракт задержался\n"
+            "• Дату выезда перенесли\n"
+            "• Рейс или проект отменили\n"
+            "• Между рабочими частями возник дополнительный перерыв\n\n"
+            "Для таких ситуаций нужен <b>Стабилизатор дохода</b>. Он продлевает финансовую "
+            "защиту, если Фонд Зарплаты уже рассчитан на запланированный перерыв, а новая работа "
+            "вовремя не началась.\n\n"
+            "Это не форс-мажорная Подушка и не деньги на обычный перерыв между рабочими частями.\n\n"
+            "Для вашего профиля рекомендуется сформировать Стабилизатор на <b>2 месяца "
+            "Устойчивой Жизни</b>. Этого резерва обычно достаточно, чтобы спокойно пережить "
+            "задержку следующей рабочей части.\n\n"
+            "——————\n<b>→ Выберите будущий размер Стабилизатора.</b>"
+        )
+        rows = [
+            [("1 месяц", "stabilizermonths:1"), ("✔️ 2 месяца", "stabilizermonths:2")],
+            [("3 месяца", "stabilizermonths:3"), ("Свой вариант", "stabilizermonths:custom")],
+        ]
+    else:
+        text = (
+            "<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\n"
+            "ℹ️ При сдельной работе заработок может снижаться по совершенно обычным причинам:\n\n"
+            "• сезонный спад\n"
+            "• болезнь\n"
+            "• отпуск\n"
+            "• клиент перенёс или задержал оплату\n\n"
+            "Это не форс-мажор. <b>Нестабильность дохода — нормальная часть сдельной работы.</b>\n\n"
+            "Поэтому помимо Подушки мы сформируем <b>Стабилизатор дохода</b> — резерв на обычные "
+            "периоды снижения заработка. Он помогает сохранить привычный уровень жизни, не "
+            "трогать Подушку и не залезать в долги.\n\n"
+            "Для вашего профиля рекомендуемый размер Стабилизатора — <b>1 месяц Устойчивой "
+            "Жизни</b>. Этого резерва хватит, чтобы сгладить обычную просадку дохода.\n\n"
+            "——————\n<b>→ Выберите будущий размер Стабилизатора.</b>"
+        )
+        rows = [[("✔️ 1 месяц", "stabilizermonths:1"), ("2 месяца", "stabilizermonths:2")]]
     await message.answer(
-        f"{setup_progress(await state.get_data(), 5)}\n\n"
-        "<b>НА СКОЛЬКО МОЖЕТ УВЕЛИЧИТЬСЯ ПЕРЕРЫВ МЕЖДУ КОНТРАКТАМИ?</b>\n\n"
-        "Я сформирую <b>Стабилизатор дохода</b>, который защитит вас, если следующий контракт "
-        "задержится, отменится или предыдущий закончится раньше.\n\n"
-        "Рекомендую выбрать 2 месяца.",
-        reply_markup=keyboard([
-            [("1 месяц", "stabilizermonths:1"), ("2 месяца", "stabilizermonths:2")],
-            [("3 месяца", "stabilizermonths:3"), ("6 месяцев", "stabilizermonths:6")],
-            [("Свой вариант", "stabilizermonths:custom")],
-        ]),
+        f"{setup_progress(data, 9 if data.get('has_debts') else 8)}\n\n{text}",
+        reply_markup=keyboard(rows),
     )
 
 
@@ -1619,8 +1655,8 @@ async def save_stabilizer_target_button(callback: CallbackQuery, state: FSMConte
     if value == "custom":
         await callback.message.answer("Введите количество месяцев от 1 до 12.")
         return
-    await state.update_data(stabilizer_target_months=value, progress_offset=3)
-    await ask_income(callback.message, state)
+    await state.update_data(stabilizer_target_months=value)
+    await ask_current_stabilizer(callback.message, state)
 
 
 @router.message(SetupStates.stabilizer_target_months)
@@ -1629,8 +1665,12 @@ async def save_stabilizer_target_text(message: Message, state: FSMContext):
     if value is None or value < 1 or value > 12:
         await message.answer("Введите количество месяцев от 1 до 12.")
         return
-    await state.update_data(stabilizer_target_months=str(value), progress_offset=3)
-    await ask_income(message, state)
+    data = await state.get_data()
+    if data.get("income_rhythm") != "cyclic":
+        await message.answer("Выберите 1 или 2 месяца с помощью кнопок.")
+        return
+    await state.update_data(stabilizer_target_months=str(value))
+    await ask_current_stabilizer(message, state)
 
 
 async def ask_tax(message: Message, state: FSMContext):
@@ -2167,7 +2207,7 @@ async def show_km_category_after_save(
                 [("Ипотека", "kmhousingexpense:mortgage"), ("Страхование", "kmhousingexpense:insurance")],
                 [("Налог на имущество", "kmhousingexpense:property_tax")],
                 [("Земельный налог", "kmhousingexpense:land_tax")],
-                [("← Назад", "km:cancel"), ("✔️ Готово", "km:cancel")],
+                [("✔️ Готово", "km:cancel")],
             ]),
         )
         return
@@ -2430,7 +2470,7 @@ async def show_housing_landing(message: Message, state: FSMContext, notice: str 
             [("Ипотека", "kmhousingexpense:mortgage"), ("Страхование", "kmhousingexpense:insurance")],
             [("Налог на имущество", "kmhousingexpense:property_tax")],
             [("Земельный налог", "kmhousingexpense:land_tax")],
-            [("← Назад", "km:cancel"), ("✔️ Готово", "km:cancel")],
+            [("← Назад", "km:cancel")],
         ]),
     )
 
@@ -5480,16 +5520,19 @@ async def show_force_majeure_question_new(message: Message, state: FSMContext):
     else:
         buttons = [[("3 месяца", "fmmonths:3"), ("4 месяца", "fmmonths:4")], [("6 месяцев", "fmmonths:6"), ("Свой вариант", "fmmonths:custom")]]
     await state.update_data(force_majeure_minimum=str(minimum))
-    hint = f"Допустимый диапазон для вашего профиля — <b>{minimum}–12 месяцев Критического минимума</b>."
+    hint = f"Для вашего профиля рекомендуемый диапазон — <b>от {minimum} до 12 месяцев Критического Минимума</b>."
 
     await message.answer(
         f"{setup_progress(data, 7)}\n\n"
-        "<b>РАЗМЕР ФОРС-МАЖОРНОЙ ПОДУШКИ</b>\n\n"
+        "<b>ОПРЕДЕЛИТЕ РАЗМЕР ПОДУШКИ</b>\n\n"
         "ℹ️ <b>Подушка</b> — это резерв на случай событий, которые действительно переворачивают жизнь с ног на голову:\n"
-        "• Потеря жилья\n"
-        "• Серьёзная болезнь\n"
-        "• Аварийный переезд\n"
-        "• Смерть близкого человека и др.\n\n"
+        "• потеря жилья\n"
+        "• серьёзная болезнь\n"
+        "• аварийный переезд\n"
+        "• смерть близкого человека и др.\n\n"
+        "<b>Размер Подушки</b> измеряется в <b>месяцах Критического Минимума</b>. То есть показывает, "
+        "сколько месяцев вы сможете выполнять обязательства и покрывать самые необходимые расходы, "
+        "даже если полностью потеряете доход.\n\n"
         + hint,
         reply_markup=keyboard(buttons),
     )
@@ -6094,9 +6137,10 @@ async def ask_current_pillow(message: Message, state: FSMContext):
     await message.answer(
         f"{setup_progress(data, step)}\n\n"
         "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В ПОДУШКЕ?</b>\n\n"
-        "Укажите деньги, которые действительно считаете финансовым резервом. "
-        "Не отпуск, не новый телефон и не сумму, которую вы просто стараетесь не трогать.\n\n"
-        "Если Подушки пока нет — отправьте <code>0</code>."
+        "Укажите сумму, которая сейчас действительно находится в вашей Подушке.\n\n"
+        "Если Подушки пока нет — отправьте <b>0</b>. Это нормально: Аллокатор рассчитает, "
+        "как постепенно её сформировать.\n\n"
+        "——————\n<b>→ Введите сумму.</b>"
     )
 
 
@@ -6134,19 +6178,31 @@ async def save_current_pillow(
 
     data = await state.get_data()
     if data.get("profile_type") in {"piecework", "cyclic"}:
-        await state.set_state(SetupStates.current_stabilizer)
-        step = 9 if data.get("has_debts") else 8
-        await message.answer(
-            f"{setup_progress(data, step)}\n\n"
-            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ ДОХОДА?</b>\n\n"
-            "Подушка и Стабилизатор дохода — разные резервы. Стабилизатор дохода — "
-            "это особый запас на случай отмены или задержки контракта.\n\n"
-            "Укажите только деньги, отложенные на случай временного снижения или задержки дохода.\n\n"
-            "Если Стабилизатора пока нет — отправьте <code>0</code>."
-        )
+        await ask_stabilizer_target(message, state)
         return
 
     await continue_after_current_reserves(message, state)
+
+
+async def ask_current_stabilizer(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(SetupStates.current_stabilizer)
+    step = 9 if data.get("has_debts") else 8
+    if data.get("income_rhythm") == "cyclic":
+        text = (
+            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ?</b>\n\n"
+            "Укажите сумму, которую вы уже отложили именно на случай задержки или отмены "
+            "следующей рабочей части.\n\n"
+            "Если Стабилизатора пока нет — отправьте <b>0</b>.\n\n"
+            "——————\n<b>→ Введите сумму.</b>"
+        )
+    else:
+        text = (
+            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ?</b>\n\n"
+            "——————\n<b>→ Введите сумму.</b>\n"
+            "Если Стабилизатора пока нет — отправьте <b>0</b>."
+        )
+    await message.answer(f"{setup_progress(data, step)}\n\n{text}")
 
 
 @router.message(SetupStates.current_stabilizer)

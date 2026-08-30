@@ -562,8 +562,6 @@ class UserSettings:
 
     @property
     def stabilizer_months(self) -> Decimal:
-        if self.income_rhythm == "cyclic":
-            return max(Decimal("2"), self.stabilizer_target_months)
         return self.stabilizer_target_months if self.needs_stabilizer else ONE
 
     @property

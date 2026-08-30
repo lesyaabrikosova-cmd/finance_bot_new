@@ -59,9 +59,9 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertEqual(cyclic.active_mode(), 5)
         cyclic.state.pillow_force_majeure = D("100")
         self.assertEqual(cyclic.active_mode(), 6)
-        cyclic.state.pillow_stabilizer = D("200")
+        cyclic.state.pillow_stabilizer = D("100")
         self.assertEqual(cyclic.active_mode(), 7)
-        cyclic.state.pillow_stabilizer = D("400")
+        cyclic.state.pillow_stabilizer = D("200")
         self.assertEqual(cyclic.active_mode(), 8)
         self.assertEqual(cyclic.mode_title(3), "Заплати будущему себе.")
         self.assertEqual(cyclic.mode_title(4), "Не на хлебе и воде.")
@@ -430,6 +430,10 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertTrue(allocator.settings.needs_stabilizer)
         self.assertEqual(allocator.settings.intercontract_life_limit, D("3000"))
         self.assertEqual(allocator.settings.intercontract_full_limit, D("6000"))
+        self.assertEqual(allocator.settings.stabilizer_life_limit, D("1000"))
+        self.assertEqual(allocator.settings.stabilizer_full_limit, D("2000"))
+
+        allocator.settings.stabilizer_target_months = D("2")
         self.assertEqual(allocator.settings.stabilizer_life_limit, D("2000"))
         self.assertEqual(allocator.settings.stabilizer_full_limit, D("4000"))
 
