@@ -1111,7 +1111,10 @@ async def edit_goal_percentages(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    current = "\n".join(f"• {escape(goal.name)} = {goal.percentage}%" for goal in allocator.settings.goals)
+    current = "\n".join(
+        f"• ⭐️ {escape(goal.name)} = {format(goal.percentage.normalize(), 'f')}%"
+        for goal in allocator.settings.goals
+    )
     await state.set_state(EditSettingsStates.goal_percentages)
     await callback.message.answer(
         "⭐️ <b>ПРОЦЕНТЫ ЦЕЛЕЙ</b>\n\n"

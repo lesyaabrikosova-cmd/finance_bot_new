@@ -16,7 +16,7 @@ from financial_engine import (
     fmt_money,
 )
 from storage import db
-from ui import main_menu_keyboard
+from ui import keyboard, main_menu_keyboard
 from mode_presentation import mode_image_path
 
 
@@ -458,33 +458,6 @@ async def send_mode(
     mode = allocator.active_mode()
 
     reward = "🏆" * mode + "➖" * (allocator.profile_mode_total - mode)
-    descriptions = {
-        "stable": {
-            1: "Сначала формируется минимальная Подушка.",
-            2: "Свободные деньги направляются на досрочное погашение долгов.",
-            3: "Аллокатор формирует форс-мажорную Подушку.",
-            4: "Защитные резервы сформированы: доступны цели и инвестиции.",
-        },
-        "piecework": {
-            1: "Сначала формируется минимальная Подушка.",
-            2: "Свободные деньги направляются на досрочное погашение долгов.",
-            3: "Аллокатор формирует форс-мажорную Подушку.",
-            4: "Формируется первый уровень Стабилизатора дохода.",
-            5: "Стабилизатор растёт до уровня Устойчивой жизни; открыты цели и инвестиции.",
-            6: "Все защитные резервы сформированы.",
-        },
-        "cyclic": {
-            1: "Сначала формируется минимальная Подушка.",
-            2: "Свободные деньги направляются на досрочное погашение долгов.",
-            3: "Фонд Зарплаты обеспечивает Критический минимум во время перерыва.",
-            4: "Фонд Зарплаты растёт до Устойчивой жизни на весь перерыв.",
-            5: "Аллокатор формирует форс-мажорную Подушку.",
-            6: "Стабилизатор защищает Критический минимум при задержке контракта.",
-            7: "Стабилизатор растёт до Устойчивой жизни; открыты цели и инвестиции.",
-            8: "Фонд Зарплаты и все защитные резервы сформированы.",
-        },
-    }
-    description = descriptions[allocator.profile_id][mode]
     profile_label = {
         "stable": "Стабильный",
         "piecework": "Сдельный",
@@ -500,41 +473,46 @@ async def send_mode(
         else "без долгов"
     )
 
-    next_info = (
-        allocator.next_mode_info()
-    )
-
-    if next_info:
-
-        next_text = (
-            "\n\nДо следующего режима осталось: "
-            f"<b>{rub(next_info['remaining'])}</b>"
+    capital = allocator.protective_capital_balance
+    target = allocator.protective_capital_target
+    remaining = allocator.remaining_to_profile_transition()
+    priority = allocator.current_protection_priority()
+    plan = allocator.reserve_rebalancing_plan()
+    if priority:
+        priority_text = (
+            "<b><u>ТЕКУЩИЙ ПРИОРИТЕТ</u></b>\n\n"
+            f"{escape(str(priority['name']))} — не хватает <b>{rub(priority['deficit'])}</b>."
         )
-
     else:
+        priority_text = "<b><u>ТЕКУЩИЙ ПРИОРИТЕТ</u></b>\n\nВсе защитные нормативы сформированы."
 
-        next_text = (
-            "\n\n<b>Максимальный режим достигнут.</b>"
-        )
+    if remaining is None:
+        next_text = "\n\n<b>Максимальный уровень устойчивости достигнут.</b>"
+    else:
+        next_text = f"\n\nДо следующего кубка осталось: <b>{rub(remaining)}</b>"
 
     text = (
-        "<b>ТЕКУЩИЙ РЕЖИМ</b>\n\n"
-        f"Профиль: "
-        f"<b>{profile_label}, "
-        f"{debt_profile}</b>\n\n"
-        f"Уровень: <b>{allocator.mode_display_name(mode)}</b>\n"
-        f"Награда: <b>{reward}</b>\n"
-        f"Название: "
-        f"<b>{escape(allocator.mode_title(mode))}</b>\n\n"
-        f"{escape(description)}"
-        f"{next_text}"
+        "<b>УРОВЕНЬ ФИНАНСОВОЙ УСТОЙЧИВОСТИ</b>\n\n"
+        f"Профиль — <b>{profile_label}, {debt_profile}</b>\n\n"
+        f"<b>{reward}</b>\n\n"
+        f"В защитных резервах — <b>{rub(capital)}</b> из <b>{rub(target)}</b>."
+        f"{next_text}\n\n"
+        f"{priority_text}"
     )
+
+    rows = [[(f"Почему у меня {mode} кубков?", "mode:why")]]
+    if plan["transfers"]:
+        rows.append([("Сбалансировать резервы", "mode:rebalance")])
+    rows.extend([
+        [("Изменить размеры резервов", "settings:open")],
+        [("← Главное меню", "menu:back")],
+    ])
 
     await send_text_with_image(
         message,
         text,
         mode_image_path(allocator.profile_id, mode),
-        reply_markup=main_menu_keyboard(telegram_id),
+        reply_markup=keyboard(rows),
     )
 
 
@@ -569,6 +547,156 @@ async def menu_state(
     await send_mode(
         callback.message,
         callback.from_user.id,
+    )
+
+
+@router.callback_query(F.data == "mode:why")
+async def explain_resilience_mode(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await callback.message.answer("Сначала создайте финансовый профиль через /start.")
+        return
+
+    mode = allocator.active_mode()
+    capital = allocator.protective_capital_balance
+    has_debts = any(credit.active for credit in allocator.settings.credits)
+    if has_debts:
+        if mode == 1:
+            explanation = (
+                "У вас есть активный долг, а Минимальная подушка ещё не сформирована. "
+                "Поэтому действует первый уровень независимо от денег в других резервах."
+            )
+        else:
+            explanation = (
+                "Минимальная подушка сформирована, но остаётся активный долг. "
+                "До его закрытия действует второй уровень."
+            )
+        levels = ""
+    else:
+        level_lines = []
+        for reached_mode, target, name in allocator.resilience_transition_targets():
+            mark = "✔️" if capital >= target else "▫️"
+            level_lines.append(
+                f"{mark} {reached_mode} кубков — {escape(name)}: <b>{rub(target)}</b>"
+            )
+        levels = "\n\n" + "\n".join(level_lines)
+        explanation = (
+            "Аллокатор складывает деньги защитных резервов в один виртуальный сосуд. "
+            "Кубки отражают общий объём защиты, а не то, на каком именно банковском счёте лежат деньги."
+        )
+
+    priority = allocator.current_protection_priority()
+    priority_text = (
+        f"\n\nФактический приоритет — <b>{escape(str(priority['name']))}</b>. "
+        f"Не хватает <b>{rub(priority['deficit'])}</b>."
+        if priority else
+        "\n\nВсе фактические защитные нормативы сформированы."
+    )
+    await callback.message.answer(
+        f"<b>ПОЧЕМУ У ВАС {mode} КУБКОВ</b>\n\n"
+        f"{explanation}\n\n"
+        f"Защитный капитал — <b>{rub(capital)}</b>."
+        f"{levels}{priority_text}\n\n"
+        "Деньги между банковскими счетами автоматически не переводятся.",
+        reply_markup=keyboard([
+            [("← К режиму", "menu:state")],
+            [("← Главное меню", "menu:back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "mode:rebalance")
+async def show_reserve_rebalancing(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await callback.message.answer("Сначала создайте финансовый профиль через /start.")
+        return
+    plan = allocator.reserve_rebalancing_plan()
+    if plan.get("blocked_reason") == "active_debt":
+        await callback.message.answer(
+            "<b>СЕЙЧАС ДЕЙСТВУЕТ ДОЛГОВОЙ МАРШРУТ</b>\n\n"
+            "Сначала Аллокатор проверяет Минимальную подушку и погашение долга. "
+            "Обычная балансировка защитных резервов станет доступна после закрытия долгов.",
+            reply_markup=keyboard([[('← К режиму', 'menu:state')]]),
+        )
+        return
+    account_lines = []
+    for account in plan["accounts"]:
+        details = ""
+        if account["surplus"] > 0:
+            details = f" · профицит <b>{rub(account['surplus'])}</b>"
+        elif account["deficit"] > 0:
+            details = f" · не хватает <b>{rub(account['deficit'])}</b>"
+        else:
+            details = " · ✔️"
+        account_lines.append(
+            f"• <b>{escape(str(account['name']))}</b> — "
+            f"{rub(account['balance'])} из {rub(account['target'])}{details}"
+        )
+    transfer_lines = [
+        f"• <b>{rub(transfer['amount'])}</b>: "
+        f"«{escape(str(transfer['source']))}» → «{escape(str(transfer['destination']))}»"
+        for transfer in plan["transfers"]
+    ]
+    if not transfer_lines:
+        await callback.message.answer(
+            "<b>БАЛАНСИРОВКА НЕ ТРЕБУЕТСЯ</b>\n\n" + "\n".join(account_lines),
+            reply_markup=keyboard([[('← К режиму', 'menu:state')]]),
+        )
+        return
+
+    surplus_text = ""
+    if plan["free_surplus"] > 0:
+        surplus_text = (
+            f"\n\nПосле балансировки останется свободный излишек — "
+            f"<b>{rub(plan['free_surplus'])}</b>. Его распределение по целям и инвестициям "
+            "будет предложено отдельно."
+        )
+    await callback.message.answer(
+        "<b>ПЛАН БАЛАНСИРОВКИ РЕЗЕРВОВ</b>\n\n"
+        + "\n".join(account_lines)
+        + "\n\nРекомендованные переводы:\n\n"
+        + "\n".join(transfer_lines)
+        + surplus_text
+        + "\n\nАллокатор не переводит банковские деньги. Выполните переводы самостоятельно, "
+        "а затем подтвердите их.",
+        reply_markup=keyboard([
+            [("✔️ Переводы выполнены", "mode:rebalance:confirm")],
+            [("Изменить размеры резервов", "settings:open")],
+            [("Пока не выполнять", "menu:state")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "mode:rebalance:confirm")
+async def confirm_reserve_rebalancing(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await callback.message.answer("Сначала создайте финансовый профиль через /start.")
+        return
+    plan = allocator.reserve_rebalancing_plan()
+    if not plan["transfers"]:
+        await callback.message.answer(
+            "Балансы уже изменились, поэтому прежний план больше не требуется.",
+            reply_markup=keyboard([[('Открыть режим', 'menu:state')]]),
+        )
+        return
+    allocator.apply_reserve_rebalancing()
+    db.save_allocator(callback.from_user.id, allocator)
+    lines = [
+        f"• {rub(transfer['amount'])}: «{escape(str(transfer['source']))}» → "
+        f"«{escape(str(transfer['destination']))}»"
+        for transfer in plan["transfers"]
+    ]
+    await callback.message.answer(
+        "<b>БАЛАНСЫ ОБНОВЛЕНЫ</b>\n\n"
+        "Аллокатор зафиксировал подтверждённые переводы:\n\n"
+        + "\n".join(lines)
+        + "\n\nЭта операция не считается новым доходом и не изменяет налоговую статистику.",
+        reply_markup=keyboard([[('Открыть режим', 'menu:state')]]),
     )
 
 
@@ -861,16 +989,16 @@ async def send_balances(
     lines.extend([
         "",
         "<b>ПОРОГИ</b>",
-        f"🎯 До КЖ осталось: "
+        f"→ До КЖ осталось: "
         f"<b>{rub(until_kzh)}</b>",
-        f"🎯 До УЖ осталось: "
+        f"→ До УЖ осталось: "
         f"<b>{rub(until_uzh)}</b>",
     ])
 
     if next_info:
 
         lines.append(
-            f"🎯 До следующего режима "
+            f"→ До следующего режима "
             f"{next_info['next_name']}: "
             f"<b>{rub(next_info['remaining'])}</b>"
         )
@@ -878,7 +1006,7 @@ async def send_balances(
     else:
 
         lines.append(
-            "🎯 До следующего режима: "
+            "→ До следующего режима: "
             "<b>максимальный режим достигнут</b>"
         )
 

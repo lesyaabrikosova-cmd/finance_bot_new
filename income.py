@@ -1204,7 +1204,7 @@ async def confirm_income(
                 f"• цели — <b>{rub(full_goals)}</b>\n\n"
                 "Это предварительный расчёт. Деньги ещё не распределены.",
                 reply_markup=keyboard([
-                    [("Часть — в цели", "income:strategy:balanced"), ("Без части на цели", "income:strategy:protection")],
+                    [("⭐️ Часть — в цели", "income:strategy:balanced"), ("Без части на цели", "income:strategy:protection")],
                     [("← Назад", "income:strategy:back"), ("✖️ Отмена", "income:cancel")],
                 ]),
             )

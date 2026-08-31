@@ -13,11 +13,15 @@ from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
     build_state_from_data,
+    br_group_totals,
     category_added_entries,
     category_added_totals,
     communication_item_name,
+    contract_obligation_entries,
+    cyclic_gift_history_monthly,
     default_km_storage,
     force_majeure_minimum_for_rhythm,
+    gift_history_monthly,
     housing_item_name,
     input_period_label,
     keyboard,
@@ -31,10 +35,12 @@ from onboarding import (  # noqa: E402
     months_until_due_date,
     months_until_tax_ready,
     next_annual_tax_due_date,
+    normalized_onboarding_goals,
     normalize_pass_months,
     pass_monthly_saving,
     parse_tax_due_date,
     planned_taxes_from_storage,
+    reserve_progress_block,
     save_pass_accumulated,
     should_auto_route_to_reserve,
 )
@@ -48,7 +54,7 @@ from taxes import (  # noqa: E402
     tax_funding_date,
     tax_months_remaining,
 )
-from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
+from financial_engine import AllocatorState, FinancialAllocator, Goal, PhaseLifeBudget, UserSettings  # noqa: E402
 from storage import (  # noqa: E402
     db,
     deserialize_income_rhythm,
@@ -59,6 +65,59 @@ from storage import (  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_onboarding_goal_monthly_amounts_become_exact_percentages(self):
+        goals = normalized_onboarding_goals([
+            {"name": "Подарки", "monthly": "3500"},
+            {"name": "Отпуск", "monthly": "6500"},
+        ])
+        self.assertEqual(goals[0], {"name": "Подарки", "percentage": "35.0000"})
+        self.assertEqual(goals[1], {"name": "Отпуск", "percentage": "65.0000"})
+        self.assertEqual(
+            sum(Decimal(item["percentage"]) for item in goals),
+            Decimal("100"),
+        )
+
+    def test_onboarding_goal_percentages_ignore_empty_amounts(self):
+        goals = normalized_onboarding_goals([
+            {"name": "Подарки", "monthly": "0"},
+            {"name": "Замена техники", "monthly": "5000"},
+        ])
+        self.assertEqual(
+            goals,
+            [{"name": "Замена техники", "percentage": "100"}],
+        )
+
+    def test_onboarding_goals_survive_allocator_storage_round_trip(self):
+        telegram_id = 880020
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            income_rhythm="irregular",
+            critical_life=Decimal("90000"),
+            household_reserve=Decimal("20000"),
+            average_income=Decimal("180000"),
+            goals=[
+                Goal("Подарки", Decimal("35")),
+                Goal("Отпуск", Decimal("65")),
+            ],
+        )
+        allocator = FinancialAllocator(
+            settings,
+            AllocatorState(goal_balances={
+                "Подарки": Decimal("3500"),
+                "Отпуск": Decimal("6500"),
+            }),
+        )
+        db.save_allocator(telegram_id, allocator)
+        restored = db.load_allocator(telegram_id)
+        self.assertIsNotNone(restored)
+        self.assertEqual(
+            [(goal.name, goal.percentage) for goal in restored.settings.goals],
+            [("Подарки", Decimal("35")), ("Отпуск", Decimal("65"))],
+        )
+        self.assertEqual(restored.state.goal_balances["Подарки"], Decimal("3500"))
+        self.assertEqual(restored.state.goal_balances["Отпуск"], Decimal("6500"))
+
     def test_onboarding_keyboard_removes_duplicate_callbacks(self):
         markup = keyboard([
             [("Аксессуары", "kmquick:pets:accessories"), ("+ Другое", "kmquick:pets:other")],
@@ -159,6 +218,29 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertIn("<b>Одежда</b> — 55 452,00 ₽ / 7 мес.", text)
         self.assertNotIn("Обязательная жизнь", text)
 
+    def test_life_summary_displays_week_instead_of_internal_month_fraction(self):
+        weekly_months = Decimal("12") / Decimal("52")
+        text = life_expense_summary([{
+            "category": "food",
+            "name": "Питьевая вода",
+            "amount": "105",
+            "months": str(weekly_months),
+            "monthly": "455",
+        }])
+
+        self.assertIn("<b>Питьевая вода</b> — 105,00 ₽ / неделю", text)
+        self.assertNotIn("0.230769", text)
+
+    def test_reserve_progress_block_marks_only_reached_target(self):
+        self.assertEqual(
+            reserve_progress_block("Подушка", Decimal("340000"), Decimal("360000")),
+            "<b><u>ПОДУШКА</u></b>\n340 000 из 360 000 ₽",
+        )
+        self.assertEqual(
+            reserve_progress_block("Стабилизатор", Decimal("110000"), Decimal("110000")),
+            "<b><u>СТАБИЛИЗАТОР</u></b> ✔️\n110 000 из 110 000 ₽",
+        )
+
     def test_cyclic_break_uses_remaining_months_for_salary_fund_target(self):
         settings = UserSettings(
             has_debts=False,
@@ -232,6 +314,94 @@ class TaxFeatureTests(unittest.TestCase):
         )
         restored = deserialize_income_rhythm(serialize_income_types(settings))
         self.assertEqual(restored["household_reserve_categories"], {"Дети": Decimal("20")})
+
+    def test_gifts_are_saved_as_history_but_excluded_from_household_reserve(self):
+        items = [
+            {
+                "category": "gifts",
+                "category_label": "Подарки",
+                "name": "Подарки семье",
+                "monthly": "5000",
+            },
+            {
+                "category": "repairs",
+                "category_label": "Быт",
+                "name": "Бытовые мелочи",
+                "monthly": "2000",
+            },
+            {
+                "category": "children",
+                "subcategory": "gifts",
+                "category_label": "Дети",
+                "name": "Подарки ребёнку",
+                "monthly": "1000",
+            },
+        ]
+
+        self.assertEqual(br_group_totals(items), {"Быт": Decimal("2000.00")})
+        self.assertEqual(gift_history_monthly(items), Decimal("6000.00"))
+
+    def test_gifts_never_appear_as_cyclic_work_obligations(self):
+        entries = contract_obligation_entries({
+            "km_items": [],
+            "br_items": [{
+                "category": "gifts",
+                "subcategory": "family",
+                "name": "Подарки семье",
+                "monthly": "5000",
+            }],
+        })
+        self.assertEqual(entries, [])
+
+    def test_cyclic_gift_history_is_weighted_across_both_phases(self):
+        result = cyclic_gift_history_monthly(
+            {
+                "work": {
+                    "historical_gifts_monthly": "120",
+                    "exchange_rate_to_rub": "80",
+                    "completed": True,
+                },
+                "break": {
+                    "historical_gifts_monthly": "3000",
+                    "exchange_rate_to_rub": "1",
+                    "completed": True,
+                },
+            },
+            Decimal("5"),
+            Decimal("7"),
+        )
+        self.assertEqual(result, Decimal("5750.00"))
+
+    def test_gift_history_survives_settings_serialization(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            income_rhythm="cyclic",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("50"),
+            average_income=Decimal("100"),
+            historical_gifts_monthly=Decimal("5000"),
+            protective_stage_c_goals_share=Decimal("27"),
+            gift_guideline_min=Decimal("2"),
+            gift_guideline_max=Decimal("6"),
+            gift_warning_limit=Decimal("9"),
+            phase_life_budgets={
+                "break": PhaseLifeBudget(
+                    historical_gifts_monthly=Decimal("3000"),
+                    completed=True,
+                ),
+            },
+        )
+        restored = deserialize_income_rhythm(serialize_income_types(settings))
+        self.assertEqual(restored["historical_gifts_monthly"], Decimal("5000"))
+        self.assertEqual(restored["protective_stage_c_goals_share"], Decimal("27"))
+        self.assertEqual(restored["gift_guideline_min"], Decimal("2"))
+        self.assertEqual(restored["gift_guideline_max"], Decimal("6"))
+        self.assertEqual(restored["gift_warning_limit"], Decimal("9"))
+        self.assertEqual(
+            restored["phase_life_budgets"]["break"].historical_gifts_monthly,
+            Decimal("3000"),
+        )
 
     def test_contract_obligation_storage_survives_settings_serialization(self):
         settings = UserSettings(

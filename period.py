@@ -763,10 +763,11 @@ async def period_remainder_amount_save(message: Message, state: FSMContext):
         rows.append([("Стабилизатор дохода", "period:target:stabilizer")])
 
     active_mode = allocator.active_mode()
-    if allocator.settings.goals and active_mode >= 3:
-        rows.append([("Распределить по всем целям", "period:target:goals")])
+    goals_mode = {"stable": 3, "piecework": 3, "cyclic": 5}[allocator.profile_id]
+    if allocator.settings.goals and active_mode >= goals_mode:
+        rows.append([("⭐️ Распределить по всем целям", "period:target:goals")])
         for index, goal in enumerate(allocator.settings.goals):
-            rows.append([(f"Цель: {goal.name}", f"period:target:goal:{index}")])
+            rows.append([(f"⭐️ {goal.name}", f"period:target:goal:{index}")])
 
     investment_mode = {
         "stable": 4,
@@ -790,13 +791,23 @@ async def period_remainder_target(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split(":")
     target = ":".join(parts[2:])
     allocator = db.load_allocator(callback.from_user.id)
+    goals_mode = {"stable": 3, "piecework": 3, "cyclic": 5}[allocator.profile_id]
+    if (
+        (target == "goals" or target.startswith("goal:"))
+        and allocator.active_mode() < goals_mode
+    ):
+        await callback.message.answer(
+            "⭐️ Цели временно недоступны на текущем финансовом уровне. "
+            "Сначала восстановите активный защитный приоритет."
+        )
+        return
     labels = {
         "priority": "текущий финансовый приоритет",
         "salary_fund": "Фонд Зарплаты",
         "household": "Бытовой резерв",
         "pillow": "Подушка",
         "stabilizer": "Стабилизатор дохода",
-        "goals": "все цели в выбранных пропорциях",
+        "goals": "⭐️ все цели в выбранных пропорциях",
         "investments": "Инвестиции",
     }
     if target.startswith("goal:"):
@@ -805,7 +816,7 @@ async def period_remainder_target(callback: CallbackQuery, state: FSMContext):
         except (ValueError, IndexError):
             await callback.message.answer("Цель больше не найдена. Выберите направление заново.")
             return
-        label = f"цель «{goal.name}»"
+        label = f"⭐️ цель «{goal.name}»"
     else:
         label = labels.get(target, "текущий финансовый приоритет")
     data = await state.get_data()

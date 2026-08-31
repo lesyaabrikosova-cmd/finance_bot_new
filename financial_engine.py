@@ -236,6 +236,7 @@ class PhaseLifeBudget:
     household_reserve: Decimal = ZERO
     life_categories: Dict[str, Decimal] = field(default_factory=dict)
     household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
+    historical_gifts_monthly: Decimal = ZERO
     currency_code: str = "RUB"
     currency_symbol: str = "₽"
     exchange_rate_to_rub: Decimal = ONE
@@ -254,6 +255,7 @@ class PhaseLifeBudget:
             str(name): max(ZERO, D(amount))
             for name, amount in self.household_reserve_categories.items()
         }
+        self.historical_gifts_monthly = max(ZERO, D(self.historical_gifts_monthly))
         self.currency_code = str(self.currency_code or "RUB").strip().upper()
         self.currency_symbol = str(self.currency_symbol or self.currency_code).strip()
         self.exchange_rate_to_rub = max(ZERO, D(self.exchange_rate_to_rub))
@@ -360,6 +362,7 @@ class UserSettings:
 
     goals_share_c: Decimal = Decimal("50")
     pillow_share_c: Decimal = Decimal("50")
+    protective_stage_c_goals_share: Decimal = Decimal("35")
     # На защитных ступенях Этап C можно либо делить между защитой
     # и целями (65/35), либо направлять 100% в текущий резерв.
     protective_stage_c_strategy: str = "balanced"
@@ -373,6 +376,12 @@ class UserSettings:
 
     life_categories: Dict[str, Decimal] = field(default_factory=dict)
     household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
+    # Подарки вводятся в меню Жизни только как история будущей Цели.
+    # Они не входят в БР и УЖ.
+    historical_gifts_monthly: Decimal = ZERO
+    gift_guideline_min: Decimal = Decimal("3")
+    gift_guideline_max: Decimal = Decimal("7")
+    gift_warning_limit: Decimal = Decimal("10")
 
     # ----------------------------
     # Цели
@@ -474,6 +483,7 @@ class UserSettings:
 
         self.goals_share_c = D(self.goals_share_c)
         self.pillow_share_c = D(self.pillow_share_c)
+        self.protective_stage_c_goals_share = D(self.protective_stage_c_goals_share)
         if self.protective_stage_c_strategy not in {"balanced", "protection"}:
             self.protective_stage_c_strategy = "balanced"
 
@@ -485,6 +495,10 @@ class UserSettings:
             name: D(amount)
             for name, amount in self.household_reserve_categories.items()
         }
+        self.historical_gifts_monthly = max(ZERO, D(self.historical_gifts_monthly))
+        self.gift_guideline_min = D(self.gift_guideline_min)
+        self.gift_guideline_max = D(self.gift_guideline_max)
+        self.gift_warning_limit = D(self.gift_warning_limit)
 
     # ========================================================
     # ПРОИЗВОДНЫЕ ПЕРЕМЕННЫЕ
@@ -725,6 +739,19 @@ class UserSettings:
             errors.append(
                 "Доля целей C + Доля подушки C должна "
                 "равняться 100%."
+            )
+
+        if not ZERO <= self.protective_stage_c_goals_share <= HUNDRED:
+            errors.append("Доля целей защитного этапа C должна быть от 0 до 100%.")
+
+        if not (
+            ZERO <= self.gift_guideline_min
+            <= self.gift_guideline_max
+            <= self.gift_warning_limit
+            <= HUNDRED
+        ):
+            errors.append(
+                "Ориентиры Подарков должны возрастать и находиться в диапазоне 0–100%."
             )
 
         if self.employment_type not in {
@@ -1806,10 +1833,284 @@ class FinancialAllocator:
     def profile_mode_total(self) -> int:
         return len(PROFILE_MODE_TITLES[self.profile_id])
 
-    def active_mode(self) -> int:
-        """Номер реальной ступени внутри маршрута конкретного профиля."""
+    @property
+    def protective_capital_balance(self) -> Decimal:
+        """Совокупный капитал защитных резервов, определяющий кубки."""
+        total = self.pillow_total_balance
+        if self.settings.needs_stabilizer:
+            total += self.state.pillow_stabilizer
+        if self.profile_id == PROFILE_CYCLIC:
+            total += self.state.intercontract_reserve
+        return money(total)
+
+    def resilience_transition_targets(self) -> List[Tuple[int, Decimal, str]]:
+        """Накопительные отметки виртуального сосуда финансовой устойчивости."""
+        s = self.settings
+        if self.profile_id == PROFILE_STABLE:
+            return [(4, s.force_majeure_limit, "Подушка")]
+        if self.profile_id == PROFILE_PIECEWORK:
+            return [
+                (4, s.force_majeure_limit, "Подушка"),
+                (5, s.force_majeure_limit + s.stabilizer_life_limit, "Стабилизатор-КМ"),
+                (6, s.force_majeure_limit + s.stabilizer_full_limit, "Стабилизатор-УЖ"),
+            ]
+        salary_critical = self.intercontract_current_life_limit
+        salary_full = self.intercontract_current_limit
+        return [
+            (4, salary_critical, "Фонд Зарплаты-КМ"),
+            (5, salary_full, "Фонд Зарплаты-УЖ"),
+            (6, salary_full + s.force_majeure_limit, "Подушка"),
+            (7, salary_full + s.force_majeure_limit + s.stabilizer_life_limit, "Стабилизатор-КМ"),
+            (8, salary_full + s.force_majeure_limit + s.stabilizer_full_limit, "Стабилизатор-УЖ"),
+        ]
+
+    @property
+    def protective_capital_target(self) -> Decimal:
+        """Полная цель защитного сосуда для текущей фазы профиля."""
+        return money(self.resilience_transition_targets()[-1][1])
+
+    def current_protection_priority(self) -> Optional[Dict[str, Decimal | str]]:
+        """Первый фактически незаполненный счёт; кубки на этот выбор не влияют."""
         s = self.settings
         st = self.state
+        active_debt = any(credit.active for credit in s.credits)
+        if active_debt and self.pillow_total_balance < s.minimum_reserve_limit:
+            target = s.minimum_reserve_limit
+            balance = self.pillow_total_balance
+            return {"name": "Минимальная подушка", "target": target, "balance": balance, "deficit": target - balance}
+        if active_debt:
+            debt = sum((credit.principal_balance for credit in s.credits if credit.active), ZERO)
+            return {"name": "Долги", "target": debt, "balance": ZERO, "deficit": debt}
+
+        priorities: List[Tuple[str, Decimal, Decimal]] = []
+        if self.profile_id == PROFILE_CYCLIC:
+            priorities.extend([
+                ("Фонд Зарплаты-КМ", self.intercontract_current_life_limit, st.intercontract_reserve),
+                ("Фонд Зарплаты-УЖ", self.intercontract_current_limit, st.intercontract_reserve),
+            ])
+        priorities.append(("Подушка", s.force_majeure_limit, self.pillow_total_balance))
+        if s.needs_stabilizer:
+            priorities.extend([
+                ("Стабилизатор-КМ", s.stabilizer_life_limit, st.pillow_stabilizer),
+                ("Стабилизатор-УЖ", s.stabilizer_full_limit, st.pillow_stabilizer),
+            ])
+        for name, target, balance in priorities:
+            if balance < target:
+                return {"name": name, "target": target, "balance": balance, "deficit": target - balance}
+        return None
+
+    def protection_reserve_accounts(self) -> List[Tuple[str, Decimal, Decimal]]:
+        """Фактические защитные счета в порядке финансового водопада."""
+        accounts: List[Tuple[str, Decimal, Decimal]] = []
+        if self.profile_id == PROFILE_CYCLIC:
+            accounts.append(("Фонд Зарплаты", self.intercontract_current_limit, self.state.intercontract_reserve))
+        accounts.append(("Подушка", self.settings.force_majeure_limit, self.pillow_total_balance))
+        if self.settings.needs_stabilizer:
+            accounts.append(("Стабилизатор дохода", self.settings.stabilizer_full_limit, self.state.pillow_stabilizer))
+        return accounts
+
+    def reserve_rebalancing_plan(self) -> Dict[str, object]:
+        """Переводит только профицит счетов; целевой остаток источника не затрагивается."""
+        if any(credit.active for credit in self.settings.credits):
+            return {
+                "accounts": [],
+                "transfers": [],
+                "free_surplus": ZERO,
+                "blocked_reason": "active_debt",
+            }
+        accounts = self.protection_reserve_accounts()
+        available = {
+            name: max(ZERO, balance - target)
+            for name, target, balance in accounts
+        }
+        deficits = {
+            name: max(ZERO, target - balance)
+            for name, target, balance in accounts
+        }
+        transfers: List[Dict[str, Decimal | str]] = []
+        for destination, _target, _balance in accounts:
+            needed = deficits[destination]
+            if needed <= ZERO:
+                continue
+            for source, _source_target, _source_balance in accounts:
+                if source == destination or available[source] <= ZERO:
+                    continue
+                amount = min(needed, available[source])
+                if amount <= ZERO:
+                    continue
+                transfers.append({"source": source, "destination": destination, "amount": money(amount)})
+                available[source] -= amount
+                needed -= amount
+                if needed <= ZERO:
+                    break
+        return {
+            "accounts": [
+                {
+                    "name": name,
+                    "target": money(target),
+                    "balance": money(balance),
+                    "surplus": money(max(ZERO, balance - target)),
+                    "deficit": money(max(ZERO, target - balance)),
+                }
+                for name, target, balance in accounts
+            ],
+            "transfers": transfers,
+            "free_surplus": money(sum(available.values(), ZERO)),
+            "blocked_reason": None,
+        }
+
+    def _move_protection_reserve(self, name: str, amount: Decimal) -> None:
+        """Меняет учётный баланс после подтверждённого банковского перевода."""
+        amount = D(amount)
+        if name == "Фонд Зарплаты":
+            self.state.intercontract_reserve += amount
+            return
+        if name == "Стабилизатор дохода":
+            self.state.pillow_stabilizer += amount
+            return
+        if name == "Подушка":
+            if amount >= ZERO:
+                self.state.pillow_force_majeure += amount
+                return
+            withdrawal = -amount
+            from_force = min(withdrawal, self.state.pillow_force_majeure)
+            self.state.pillow_force_majeure -= from_force
+            withdrawal -= from_force
+            if withdrawal > ZERO:
+                self.state.pillow_minimum = max(ZERO, self.state.pillow_minimum - withdrawal)
+            return
+        raise ValueError(f"Неизвестный защитный счёт: {name}")
+
+    def apply_reserve_rebalancing(self) -> Dict[str, object]:
+        """Записывает только переводы, которые пользователь подтвердил как выполненные."""
+        plan = self.reserve_rebalancing_plan()
+        for transfer in plan["transfers"]:
+            amount = D(transfer["amount"])
+            self._move_protection_reserve(str(transfer["source"]), -amount)
+            self._move_protection_reserve(str(transfer["destination"]), amount)
+        return plan
+
+    @property
+    def estimated_average_tax_rate(self) -> Decimal:
+        """Консервативная ставка прогноза, когда доли типов будущего дохода неизвестны."""
+        rates = list(self.settings.income_type_tax_rates.values())
+        if not rates:
+            rates = [self.settings.tax_rate]
+        return max([ZERO, *rates])
+
+    @property
+    def estimated_net_average_income(self) -> Decimal:
+        return money(
+            self.settings.average_income
+            * (ONE - self.estimated_average_tax_rate / HUNDRED)
+        )
+
+    def current_stage_c_goal_share(self) -> Decimal:
+        """Доля этапа C для Целей из параметров текущего режима и стратегии."""
+        mode = self.allocation_mode()
+        s = self.settings
+        if mode in {MODE_1, MODE_2}:
+            return ZERO
+        if mode == MODE_3:
+            filling_salary_fund = (
+                self.profile_id == PROFILE_CYCLIC
+                and self.state.intercontract_reserve < self.intercontract_current_limit
+            )
+            if filling_salary_fund or s.protective_stage_c_strategy == "protection":
+                return ZERO
+            return s.protective_stage_c_goals_share / HUNDRED
+        if mode == MODE_4:
+            if s.protective_stage_c_strategy == "protection":
+                return ZERO
+            return s.protective_stage_c_goals_share / HUNDRED
+        if mode == MODE_5:
+            if s.protective_stage_c_strategy == "protection":
+                return ZERO
+            return (
+                (ONE - s.bracket_c / HUNDRED)
+                * s.goals_share_c
+                / HUNDRED
+            )
+        return ONE - s.bracket_c / HUNDRED
+
+    def estimated_goals_capacity(self) -> Dict[str, Decimal | str | bool]:
+        """Ориентировочный месячный бюджет Целей без зашитых процентов."""
+        s = self.settings
+        income = self.estimated_net_average_income
+        share_a = s.bracket_a / HUNDRED
+        share_b = s.bracket_b / HUNDRED
+        life_share_a = ONE - share_a
+        life_share_b = ONE - share_b
+        if life_share_a <= ZERO or life_share_b <= ZERO:
+            return {
+                "net_income": income,
+                "stage_a_required": ZERO,
+                "stage_b_required": ZERO,
+                "stage_c_available": ZERO,
+                "goal_share": ZERO,
+                "capacity": ZERO,
+                "blocked_stage": "settings",
+                "tax_estimate_is_conservative": len(set(s.income_type_tax_rates.values())) > 1,
+            }
+        stage_a_required = s.critical_life / life_share_a
+        if income < stage_a_required:
+            blocked_stage = "A"
+            stage_b_required = s.household_reserve / life_share_b
+            stage_c_available = ZERO
+        else:
+            stage_b_required = s.household_reserve / life_share_b
+            remaining = income - stage_a_required
+            if remaining < stage_b_required:
+                blocked_stage = "B"
+                stage_c_available = ZERO
+            else:
+                blocked_stage = ""
+                stage_c_available = remaining - stage_b_required
+        goal_share = self.current_stage_c_goal_share()
+        capacity = money(stage_c_available * goal_share)
+        return {
+            "net_income": money(income),
+            "stage_a_required": money(stage_a_required),
+            "stage_b_required": money(stage_b_required),
+            "stage_c_available": money(stage_c_available),
+            "goal_share": goal_share,
+            "capacity": capacity,
+            "blocked_stage": blocked_stage,
+            "tax_estimate_is_conservative": len(set(s.income_type_tax_rates.values())) > 1,
+        }
+
+    def gift_goal_recommendation(self) -> Dict[str, Decimal | str | bool]:
+        """Переводит историю Подарков в рекомендацию будущей Цели."""
+        s = self.settings
+        forecast = self.estimated_goals_capacity()
+        history = money(s.historical_gifts_monthly)
+        income = D(forecast["net_income"])
+        capacity = D(forecast["capacity"])
+        income_share = money(history / income * HUNDRED) if income > ZERO else ZERO
+        goals_share = money(history / capacity * HUNDRED) if capacity > ZERO else ZERO
+        comfort_limit = money(income * s.gift_guideline_max / HUNDRED)
+        recommendation = money(min(history, comfort_limit, capacity)) if capacity > ZERO else ZERO
+        if income_share > s.gift_warning_limit:
+            status = "above_warning"
+        elif income_share > s.gift_guideline_max:
+            status = "above_guideline"
+        else:
+            status = "comfortable"
+        return {
+            **forecast,
+            "historical_monthly": history,
+            "income_share": income_share,
+            "goals_share": goals_share,
+            "recommended_monthly": recommendation,
+            "guideline_min": s.gift_guideline_min,
+            "guideline_max": s.gift_guideline_max,
+            "warning_limit": s.gift_warning_limit,
+            "status": status,
+        }
+
+    def active_mode(self) -> int:
+        """Кубки по общему защитному капиталу; долги остаются жёстким шлюзом."""
+        s = self.settings
         has_debts = any(credit.active for credit in s.credits)
 
         if has_debts and not self.minimum_pillow_is_funded():
@@ -1817,30 +2118,13 @@ class FinancialAllocator:
         if has_debts:
             return 2
 
-        if self.profile_id == PROFILE_CYCLIC:
-            if st.intercontract_reserve < self.intercontract_current_life_limit:
-                return 3
-            if st.intercontract_reserve < self.intercontract_current_limit:
-                return 4
-            if not self.force_majeure_pillow_is_funded():
-                return 5
-            if st.pillow_stabilizer < s.stabilizer_life_limit:
-                return 6
-            if st.pillow_stabilizer < s.stabilizer_full_limit:
-                return 7
-            return 8
-
-        if self.profile_id == PROFILE_STABLE:
-            if not self.force_majeure_pillow_is_funded():
-                return 3
-            return 4
-        if not self.force_majeure_pillow_is_funded():
-            return 3
-        if st.pillow_stabilizer < s.stabilizer_life_limit:
-            return 4
-        if st.pillow_stabilizer < s.stabilizer_full_limit:
-            return 5
-        return 6
+        capital = self.protective_capital_balance
+        mode = 3
+        for reached_mode, target, _name in self.resilience_transition_targets():
+            if capital < target:
+                break
+            mode = reached_mode
+        return mode
 
     def mode_title(self, mode: Optional[int] = None) -> str:
         selected = self.active_mode() if mode is None else mode
@@ -2016,7 +2300,6 @@ class FinancialAllocator:
     def remaining_to_profile_transition(self) -> Optional[Decimal]:
         """Остаток до следующей профильной ступени."""
         s = self.settings
-        st = self.state
         mode = self.active_mode()
         if mode == self.profile_mode_total:
             return None
@@ -2024,24 +2307,13 @@ class FinancialAllocator:
             return max(ZERO, s.minimum_reserve_limit - self.pillow_total_balance)
         if mode == 2:
             return sum((c.principal_balance for c in s.credits if c.active), ZERO)
-        if self.profile_id == PROFILE_CYCLIC:
-            targets = {
-                3: (self.intercontract_current_life_limit, st.intercontract_reserve),
-                4: (self.intercontract_current_limit, st.intercontract_reserve),
-                5: (s.force_majeure_limit, self.pillow_total_balance),
-                6: (s.stabilizer_life_limit, st.pillow_stabilizer),
-                7: (s.stabilizer_full_limit, st.pillow_stabilizer),
-            }
-        elif self.profile_id == PROFILE_PIECEWORK:
-            targets = {
-                3: (s.force_majeure_limit, self.pillow_total_balance),
-                4: (s.stabilizer_life_limit, st.pillow_stabilizer),
-                5: (s.stabilizer_full_limit, st.pillow_stabilizer),
-            }
-        else:
-            targets = {3: (s.force_majeure_limit, self.pillow_total_balance)}
-        target, balance = targets[mode]
-        return max(ZERO, target - balance)
+        next_target = next(
+            (target for reached_mode, target, _name in self.resilience_transition_targets() if reached_mode > mode),
+            None,
+        )
+        if next_target is None:
+            return None
+        return max(ZERO, next_target - self.protective_capital_balance)
 
     # ========================================================
     # НАПРАВЛЕНИЕ БРАКЕТА A/B
@@ -2444,7 +2716,7 @@ class FinancialAllocator:
             protection_share = (
                 ONE
                 if filling_salary_fund or s.protective_stage_c_strategy == "protection"
-                else Decimal("0.65")
+                else ONE - s.protective_stage_c_goals_share / HUNDRED
             )
             part = self.amount_until_mode_transition(
                 amount,
@@ -2466,7 +2738,7 @@ class FinancialAllocator:
             protection_share = (
                 ONE
                 if s.protective_stage_c_strategy == "protection"
-                else Decimal("0.65")
+                else ONE - s.protective_stage_c_goals_share / HUNDRED
             )
             part = self.amount_until_mode_transition(
                 amount,
@@ -3297,12 +3569,27 @@ class FinancialAllocator:
 
     def get_state_snapshot(self) -> dict:
 
+        priority = self.current_protection_priority()
+
         return {
             "mode": self.active_mode(),
             "mode_name": self.mode_display_name(),
             "mode_title": self.mode_title(),
             "mode_total": self.profile_mode_total,
             "profile_type": self.profile_id,
+
+            "financial_resilience": {
+                "capital": self.protective_capital_balance,
+                "target": self.protective_capital_target,
+                "current_priority": priority,
+                "thresholds": [
+                    {"mode": mode, "target": target, "name": name}
+                    for mode, target, name in self.resilience_transition_targets()
+                ],
+            },
+
+            "goal_forecast": self.estimated_goals_capacity(),
+            "gift_goal_recommendation": self.gift_goal_recommendation(),
 
             "critical_life":
                 self.settings.critical_life,

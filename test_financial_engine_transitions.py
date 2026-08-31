@@ -88,6 +88,210 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertEqual(cyclic.active_mode(), 5)
         self.assertEqual(cyclic.mode_display_name(), "Режим 5")
 
+    def test_piecework_cups_use_total_protective_capital_but_priority_uses_real_accounts(self):
+        allocator = FinancialAllocator(
+            UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                profile_type="piecework",
+                income_rhythm="irregular",
+                critical_life=D("90000"),
+                household_reserve=D("20000"),
+                average_income=D("180000"),
+                force_majeure_months=D("4"),
+                stabilizer_target_months=D("1"),
+            ),
+            AllocatorState(
+                pillow_force_majeure=D("340000"),
+                pillow_stabilizer=D("110000"),
+            ),
+        )
+
+        self.assertEqual(allocator.protective_capital_balance, D("450000"))
+        self.assertEqual(allocator.protective_capital_target, D("470000"))
+        self.assertEqual(allocator.active_mode(), 5)
+        self.assertEqual(allocator.remaining_to_profile_transition(), D("20000"))
+        self.assertEqual(allocator.current_protection_priority()["name"], "Подушка")
+        self.assertEqual(allocator.current_protection_priority()["deficit"], D("20000"))
+
+    def test_piecework_overfilled_pillow_can_reach_max_cups_without_hiding_real_priority(self):
+        allocator = FinancialAllocator(
+            UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                profile_type="piecework",
+                income_rhythm="irregular",
+                critical_life=D("85000"),
+                household_reserve=D("25000"),
+                average_income=D("180000"),
+                force_majeure_months=D("4"),
+                stabilizer_target_months=D("1"),
+            ),
+            AllocatorState(pillow_force_majeure=D("500000")),
+        )
+
+        self.assertEqual(allocator.protective_capital_target, D("450000"))
+        self.assertEqual(allocator.active_mode(), 6)
+        self.assertEqual(allocator.current_protection_priority()["name"], "Стабилизатор-КМ")
+
+        plan = allocator.reserve_rebalancing_plan()
+        self.assertEqual(plan["transfers"], [{
+            "source": "Подушка",
+            "destination": "Стабилизатор дохода",
+            "amount": D("110000"),
+        }])
+        self.assertEqual(plan["free_surplus"], D("50000"))
+
+        allocator.apply_reserve_rebalancing()
+        self.assertEqual(allocator.pillow_total_balance, D("390000"))
+        self.assertEqual(allocator.state.pillow_stabilizer, D("110000"))
+        self.assertEqual(allocator.active_mode(), 6)
+        self.assertIsNone(allocator.current_protection_priority())
+
+    def test_rebalancing_never_spends_a_reserve_below_its_own_target(self):
+        allocator = FinancialAllocator(
+            UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                profile_type="piecework",
+                income_rhythm="irregular",
+                critical_life=D("90000"),
+                household_reserve=D("20000"),
+                average_income=D("180000"),
+                force_majeure_months=D("4"),
+                stabilizer_target_months=D("1"),
+            ),
+            AllocatorState(
+                pillow_force_majeure=D("340000"),
+                pillow_stabilizer=D("110000"),
+            ),
+        )
+
+        plan = allocator.reserve_rebalancing_plan()
+        self.assertEqual(plan["transfers"], [])
+        self.assertEqual(plan["free_surplus"], D("0"))
+
+    def test_cyclic_cups_use_dynamic_salary_fund_target_and_total_capital(self):
+        allocator = FinancialAllocator(
+            UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                profile_type="cyclic",
+                income_rhythm="cyclic",
+                income_gap_months=D("7"),
+                critical_life=D("40000"),
+                household_reserve=D("10000"),
+                average_income=D("57000"),
+                force_majeure_months=D("6"),
+                stabilizer_target_months=D("2"),
+            ),
+            AllocatorState(
+                intercontract_break_active=True,
+                intercontract_months_remaining=D("2"),
+                intercontract_reserve=D("50000"),
+                pillow_force_majeure=D("50000"),
+            ),
+        )
+
+        # Для двух оставшихся периодов отметки Фонда Зарплаты равны 80 000 и 100 000 ₽.
+        # Неважно, в каком защитном конверте физически лежат эти 100 000 ₽: это 5 кубков.
+        self.assertEqual(allocator.protective_capital_balance, D("100000"))
+        self.assertEqual(allocator.active_mode(), 5)
+        self.assertEqual(allocator.current_protection_priority()["name"], "Фонд Зарплаты-КМ")
+
+    def test_debt_gate_uses_actual_pillow_even_when_other_reserves_are_full(self):
+        allocator = FinancialAllocator(
+            UserSettings(
+                has_debts=True,
+                employment_type="Фрилансер",
+                profile_type="piecework",
+                income_rhythm="irregular",
+                critical_life=D("100000"),
+                household_reserve=D("20000"),
+                average_income=D("180000"),
+                minimum_reserve_months=D("2"),
+                force_majeure_months=D("4"),
+                credits=[Credit("Долг", D("10000"), None, D("0"), D("1000"))],
+            ),
+            AllocatorState(pillow_stabilizer=D("500000")),
+        )
+
+        self.assertEqual(allocator.active_mode(), 1)
+        self.assertEqual(allocator.current_protection_priority()["name"], "Минимальная подушка")
+        self.assertEqual(allocator.reserve_rebalancing_plan()["blocked_reason"], "active_debt")
+
+    def test_goal_capacity_uses_configurable_brackets_and_stage_c_share(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            profile_type="piecework",
+            income_rhythm="irregular",
+            critical_life=D("90000"),
+            household_reserve=D("20000"),
+            average_income=D("200000"),
+            force_majeure_months=D("4"),
+            bracket_a=D("10"),
+            bracket_b=D("15"),
+            bracket_c=D("20"),
+            protective_stage_c_goals_share=D("20"),
+        ))
+
+        forecast = allocator.estimated_goals_capacity()
+        self.assertEqual(forecast["stage_a_required"], D("100000.00"))
+        self.assertEqual(forecast["stage_b_required"], D("23529.41"))
+        self.assertEqual(forecast["stage_c_available"], D("76470.59"))
+        self.assertEqual(forecast["goal_share"], D("0.2"))
+        self.assertEqual(forecast["capacity"], D("15294.12"))
+
+    def test_gift_recommendation_uses_history_income_capacity_and_configurable_limits(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            profile_type="piecework",
+            income_rhythm="irregular",
+            critical_life=D("90000"),
+            household_reserve=D("20000"),
+            average_income=D("180000"),
+            force_majeure_months=D("4"),
+            historical_gifts_monthly=D("5000"),
+            gift_guideline_min=D("3"),
+            gift_guideline_max=D("7"),
+            gift_warning_limit=D("10"),
+        ))
+
+        recommendation = allocator.gift_goal_recommendation()
+        self.assertEqual(recommendation["stage_a_required"], D("112500.00"))
+        self.assertEqual(recommendation["stage_b_required"], D("26666.67"))
+        self.assertEqual(recommendation["capacity"], D("14291.67"))
+        self.assertEqual(recommendation["recommended_monthly"], D("5000.00"))
+        self.assertEqual(recommendation["income_share"], D("2.78"))
+        self.assertEqual(recommendation["goals_share"], D("34.99"))
+        self.assertEqual(recommendation["status"], "comfortable")
+
+        allocator.settings.historical_gifts_monthly = D("15000")
+        high = allocator.gift_goal_recommendation()
+        self.assertEqual(high["recommended_monthly"], D("12600.00"))
+        self.assertEqual(high["status"], "above_guideline")
+
+    def test_protection_strategy_can_temporarily_make_goal_capacity_zero(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            profile_type="piecework",
+            income_rhythm="irregular",
+            critical_life=D("90000"),
+            household_reserve=D("20000"),
+            average_income=D("180000"),
+            force_majeure_months=D("4"),
+            historical_gifts_monthly=D("5000"),
+            protective_stage_c_strategy="protection",
+        ))
+
+        recommendation = allocator.gift_goal_recommendation()
+        self.assertEqual(recommendation["goal_share"], D("0"))
+        self.assertEqual(recommendation["capacity"], D("0.00"))
+        self.assertEqual(recommendation["recommended_monthly"], D("0.00"))
+
     def test_cyclic_work_obligations_are_reserved_before_modes(self):
         settings = UserSettings(
             has_debts=False,

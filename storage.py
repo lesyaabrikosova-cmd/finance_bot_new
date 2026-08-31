@@ -149,7 +149,7 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 8,
+        "version": 10,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
@@ -173,6 +173,13 @@ def serialize_income_types(settings: UserSettings) -> str:
             name: decimal_to_string(amount)
             for name, amount in settings.household_reserve_categories.items()
         },
+        "historical_gifts_monthly": decimal_to_string(settings.historical_gifts_monthly),
+        "protective_stage_c_goals_share": decimal_to_string(
+            settings.protective_stage_c_goals_share
+        ),
+        "gift_guideline_min": decimal_to_string(settings.gift_guideline_min),
+        "gift_guideline_max": decimal_to_string(settings.gift_guideline_max),
+        "gift_warning_limit": decimal_to_string(settings.gift_warning_limit),
         "phase_life_budgets": {
             phase: {
                 "critical_life": decimal_to_string(budget.critical_life),
@@ -185,6 +192,7 @@ def serialize_income_types(settings: UserSettings) -> str:
                     name: decimal_to_string(amount)
                     for name, amount in budget.household_reserve_categories.items()
                 },
+                "historical_gifts_monthly": decimal_to_string(budget.historical_gifts_monthly),
                 "currency_code": budget.currency_code,
                 "currency_symbol": budget.currency_symbol,
                 "exchange_rate_to_rub": decimal_to_string(budget.exchange_rate_to_rub),
@@ -199,7 +207,7 @@ def serialize_income_types(settings: UserSettings) -> str:
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8, 9, 10}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -211,7 +219,7 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8, 9, 10}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
@@ -232,6 +240,15 @@ def deserialize_income_rhythm(value) -> dict:
                 str(name): string_to_decimal(amount)
                 for name, amount in raw.get("household_reserve_categories", {}).items()
             },
+            "historical_gifts_monthly": max(
+                Decimal("0"), string_to_decimal(raw.get("historical_gifts_monthly", "0"))
+            ),
+            "protective_stage_c_goals_share": string_to_decimal(
+                raw.get("protective_stage_c_goals_share", "35")
+            ),
+            "gift_guideline_min": string_to_decimal(raw.get("gift_guideline_min", "3")),
+            "gift_guideline_max": string_to_decimal(raw.get("gift_guideline_max", "7")),
+            "gift_warning_limit": string_to_decimal(raw.get("gift_warning_limit", "10")),
             "phase_life_budgets": {
                 str(phase): PhaseLifeBudget(
                     critical_life=budget.get("critical_life", "0"),
@@ -240,6 +257,7 @@ def deserialize_income_rhythm(value) -> dict:
                     household_reserve_categories=budget.get(
                         "household_reserve_categories", {}
                     ),
+                    historical_gifts_monthly=budget.get("historical_gifts_monthly", "0"),
                     currency_code=budget.get("currency_code", "RUB"),
                     currency_symbol=budget.get("currency_symbol", "₽"),
                     exchange_rate_to_rub=budget.get("exchange_rate_to_rub", "1"),

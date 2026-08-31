@@ -318,6 +318,24 @@ def rub(value) -> str:
     )
 
 
+def rub_compact(value) -> str:
+    """Денежная сумма без нулевых копеек, но с сохранением реальных копеек."""
+    value = Decimal(str(value))
+    if value == value.to_integral_value():
+        return f"{value:,.0f}".replace(",", " ") + " ₽"
+    return rub(value)
+
+
+def reserve_progress_block(title: str, current: Decimal, target: Decimal) -> str:
+    """Карточка фактического и целевого размера финансового резерва."""
+    completed = " ✔️" if target > 0 and current >= target else ""
+    current_text = rub_compact(current)
+    return (
+        f"<b><u>{escape(title.upper())}</u></b>{completed}\n"
+        f"{current_text.removesuffix(' ₽')} из {rub_compact(target)}"
+    )
+
+
 # ============================================================
 # /START
 # ============================================================
@@ -704,6 +722,8 @@ def life_classification_reason(item: dict, destination: str) -> str:
     category = item.get("category")
     subtype = item.get("subcategory")
     months = Decimal(str(item.get("months", "1")))
+    if is_gift_expense(item):
+        return "история для будущей Цели «Подарки»; в КМ, БР и УЖ не входит"
     if category in {"health", "pets"}:
         return "защитная категория здоровья" if category == "health" else "ответственность за питомца"
     if category == "children":
@@ -864,7 +884,10 @@ def life_item_category_label(item: dict) -> str:
 
 def source_period_label(months: Decimal) -> str:
     months = Decimal(str(months))
-    if months == Decimal("0.25"):
+    weekly_months = Decimal("12") / Decimal("52")
+    # Новые записи используют точное среднее 52 недели / 12 месяцев.
+    # Значение 0.25 оставляем для совместимости с ранее сохранёнными расходами.
+    if abs(months - weekly_months) < Decimal("0.000001") or months == Decimal("0.25"):
         return "неделю"
     if months == Decimal("1"):
         return "мес."
@@ -1155,12 +1178,43 @@ def km_storage_item_display_name(item: dict) -> str:
     return f"{tax_label} · {name}" if tax_label else name
 
 
+def is_gift_expense(item: dict) -> bool:
+    """Подарки вводятся среди расходов Жизни, но финансируются только как Цель."""
+    category = str(item.get("source_category") or item.get("category") or "")
+    subtype = str(item.get("subcategory") or "")
+    return category == "gifts" or (category == "children" and subtype == "gifts")
+
+
+def gift_history_monthly(items: list[dict]) -> Decimal:
+    return money2(sum(
+        (Decimal(str(item.get("monthly", "0"))) for item in items if is_gift_expense(item)),
+        Decimal("0"),
+    ))
+
+
 def br_group_totals(items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in items:
+        if is_gift_expense(item):
+            continue
         label = item["category_label"]
         result[label] = money2(result.get(label, Decimal("0")) + Decimal(item["monthly"]))
     return result
+
+
+def cyclic_gift_history_monthly(phase_budgets: dict, work_months: Decimal, gap_months: Decimal) -> Decimal:
+    """Средняя за полный цикл с учётом длительности рабочей части и перерыва."""
+    weighted = Decimal("0")
+    included_months = Decimal("0")
+    for phase, months in (("work", work_months), ("break", gap_months)):
+        budget = phase_budgets.get(phase)
+        if not isinstance(budget, dict) or not budget.get("completed"):
+            continue
+        native = Decimal(str(budget.get("historical_gifts_monthly", "0")))
+        rate = Decimal(str(budget.get("exchange_rate_to_rub", "1")))
+        weighted += native * rate * months
+        included_months += months
+    return money2(weighted / included_months) if included_months > 0 else Decimal("0")
 
 
 async def remove_setup_button(callback: CallbackQuery):
@@ -1904,7 +1958,12 @@ async def start_critical_minimum(
     data = await state.get_data()
     updates = {"combined_life_onboarding": True}
     if reset_items:
-        updates.update(km_items=[], br_items=[], deferred_br_items=[])
+        updates.update(
+            km_items=[],
+            br_items=[],
+            deferred_br_items=[],
+            historical_gifts_monthly="0",
+        )
     await state.update_data(**updates)
     await state.set_state(SetupStates.km_menu)
     await show_km_menu(message, state, intro=True)
@@ -3965,6 +4024,7 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
     br_items = data.get("br_items", [])
     br_groups = br_group_totals(br_items)
     br_exact = money2(sum(br_groups.values(), Decimal("0")))
+    historical_gifts_monthly = gift_history_monthly(br_items)
     br_rounded = round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")
     native_critical = rounded
     native_reserve = br_rounded
@@ -3980,6 +4040,7 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
             "household_reserve": str(br_rounded),
             "life_categories": {name: str(value) for name, value in groups.items()},
             "household_reserve_categories": {name: str(value) for name, value in br_groups.items()},
+            "historical_gifts_monthly": str(historical_gifts_monthly),
             "currency_code": data.get("phase_currency_code", "RUB"),
             "currency_symbol": data.get("phase_currency_symbol", "₽"),
             "exchange_rate_to_rub": str(rate),
@@ -4003,6 +4064,11 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         ]
         groups = km_group_totals(items)
         br_groups = br_group_totals(br_items)
+        historical_gifts_monthly = cyclic_gift_history_monthly(
+            phase_budgets,
+            Decimal(str(data.get("income_work_months", "1"))),
+            Decimal(str(data.get("income_gap_months", "1"))),
+        )
         storage_items = build_default_km_storage(items)
 
     await state.update_data(
@@ -4012,6 +4078,7 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         household_reserve=str(br_rounded),
         household_reserve_exact=str(br_exact),
         household_reserve_categories={name: str(value) for name, value in br_groups.items()},
+        historical_gifts_monthly=str(historical_gifts_monthly),
         phase_life_budgets=phase_budgets,
         km_items=items,
         br_items=br_items,
@@ -4058,7 +4125,14 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         "Если вы достигли уровня Устойчивой жизни, вам не придётся беспокоиться о внезапных "
         "тратах.</blockquote>\n\n"
         f"КМ — {rub(rounded)}\nБР — {rub(br_rounded)}\n———\n<b>УЖ — {rub(sustainable)}</b>\n\n"
-        "Я разделил обязательные и нерегулярные расходы. Проверьте результат: "
+        + (
+            "⭐️ <b><u>БУДУЩАЯ ЦЕЛЬ «ПОДАРКИ»</u></b>\n\n"
+            f"В прошлом вы тратили на подарки в среднем <b>{rub(historical_gifts_monthly)}</b> в месяц. "
+            "Подарки не входят в Критический минимум, Бытовой резерв и Устойчивую жизнь. "
+            "Когда вам станут доступны Цели, Аллокатор предложит открыть для Подарков отдельный конверт.\n\n"
+            if historical_gifts_monthly > 0 else ""
+        )
+        + "Я разделил обязательные и нерегулярные расходы. Проверьте результат: "
         "распределение можно изменить перед продолжением."
     )
     reply_markup = keyboard([
@@ -4103,6 +4177,13 @@ async def show_life_classification(callback: CallbackQuery, state: FSMContext):
         f"• <b>{escape(item.get('name', 'Расход'))}</b> — {rub(Decimal(item['monthly']))}\n"
         f"  Причина: {escape(life_classification_reason(item, 'br'))}."
         for item in data.get("br_items", [])
+        if not is_gift_expense(item)
+    ]
+    gift_lines = [
+        f"• <b>{escape(item.get('name', 'Подарки'))}</b> — {rub(Decimal(item['monthly']))}\n"
+        f"  Причина: {escape(life_classification_reason(item, 'goal'))}."
+        for item in data.get("br_items", [])
+        if is_gift_expense(item)
     ]
     blocks = [
         "<b>ПОЧЕМУ АЛЛОКАТОР РАСПРЕДЕЛИЛ РАСХОДЫ ТАК</b>\n\n"
@@ -4111,6 +4192,8 @@ async def show_life_classification(callback: CallbackQuery, state: FSMContext):
         "<b>КРИТИЧЕСКИЙ МИНИМУМ</b>\n" + ("\n".join(km_lines) or "• Нет расходов"),
         "<b>БЫТОВОЙ РЕЗЕРВ</b>\n" + ("\n".join(br_lines) or "• Нет расходов"),
     ]
+    if gift_lines:
+        blocks.append("<b>⭐️ БУДУЩАЯ ЦЕЛЬ «ПОДАРКИ»</b>\n" + "\n".join(gift_lines))
     pages: list[str] = []
     current = ""
     for block in blocks:
@@ -4498,6 +4581,7 @@ async def save_edited_phase_life(
         household_reserve=raw["household_reserve"],
         life_categories=raw.get("life_categories", {}),
         household_reserve_categories=raw.get("household_reserve_categories", {}),
+        historical_gifts_monthly=raw.get("historical_gifts_monthly", "0"),
         currency_code=raw.get("currency_code", "RUB"),
         currency_symbol=raw.get("currency_symbol", "₽"),
         exchange_rate_to_rub=raw.get("exchange_rate_to_rub", "1"),
@@ -4506,6 +4590,19 @@ async def save_edited_phase_life(
         completed=True,
     )
     allocator.settings.phase_life_budgets[phase] = budget
+    weighted_gifts = Decimal("0")
+    weighted_months = Decimal("0")
+    for phase_name, months in (
+        ("work", allocator.settings.income_work_months),
+        ("break", allocator.settings.income_gap_months),
+    ):
+        phase_budget = allocator.settings.phase_life_budgets.get(phase_name)
+        if phase_budget and phase_budget.completed:
+            weighted_gifts += phase_budget.rub(phase_budget.historical_gifts_monthly) * months
+            weighted_months += months
+    allocator.settings.historical_gifts_monthly = (
+        money2(weighted_gifts / weighted_months) if weighted_months > 0 else Decimal("0")
+    )
     if phase == "break":
         allocator.settings.critical_life = budget.critical_life_rub
         allocator.settings.household_reserve = budget.household_reserve_rub
@@ -4947,8 +5044,9 @@ async def finish_br(callback: CallbackQuery, state: FSMContext):
     items = data.get("br_items", [])
     groups = br_group_totals(items)
     exact = money2(sum(groups.values(), Decimal("0")))
+    historical_gifts_monthly = gift_history_monthly(items)
 
-    if exact <= 0:
+    if exact <= 0 and historical_gifts_monthly <= 0:
         await callback.message.answer(
             "Добавьте хотя бы один расход Бытового резерва."
         )
@@ -4960,12 +5058,19 @@ async def finish_br(callback: CallbackQuery, state: FSMContext):
         household_reserve=str(rounded),
         household_reserve_exact=str(exact),
         household_reserve_categories={name: str(value) for name, value in groups.items()},
+        historical_gifts_monthly=str(historical_gifts_monthly),
     )
 
     data = await state.get_data()
     critical = Decimal(data["critical_life"])
     sustainable = money2(critical + rounded)
     lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
+    if not lines:
+        lines = ["• Расходов Бытового резерва пока нет"]
+    if historical_gifts_monthly > 0:
+        lines.append(
+            f"• Подарки — {rub(historical_gifts_monthly)} / мес. · будут предложены как отдельная Цель"
+        )
 
     await state.set_state(SetupStates.br_menu)
     caption = (
@@ -5164,7 +5269,7 @@ def contract_obligation_entries(data: dict) -> list[tuple[str, dict]]:
         + [
             (f"br:{index}", item)
             for index, item in enumerate(data.get("br_items", []))
-            if item.get("subcategory") not in tax_subtypes
+            if item.get("subcategory") not in tax_subtypes and not is_gift_expense(item)
         ]
     )
 
@@ -5199,7 +5304,7 @@ def recalculate_cyclic_expense_rates(data: dict) -> tuple[list[dict], list[dict]
             item = dict(raw_item)
             months = Decimal(str(item.get("months", "1")))
             is_calendar_tax = item.get("subcategory") in {"property_tax", "land_tax", "tax"}
-            if months > 1 and not is_calendar_tax:
+            if months > 1 and not is_calendar_tax and not is_gift_expense(item):
                 annualized = item_calculation_amount(item) * Decimal("12") / months
                 if f"{prefix}:{index}" in selected:
                     monthly = annualized / Decimal("12")
@@ -5308,7 +5413,9 @@ async def show_contract_obligations_confirmation(message: Message, state: FSMCon
     data = await state.get_data()
     km_items, br_items = recalculate_cyclic_expense_rates(data)
     km_exact = money2(sum((Decimal(item["monthly"]) for item in km_items), Decimal("0")))
-    br_exact = money2(sum((Decimal(item["monthly"]) for item in br_items), Decimal("0")))
+    br_groups = br_group_totals(br_items)
+    br_exact = money2(sum(br_groups.values(), Decimal("0")))
+    historical_gifts_monthly = gift_history_monthly(br_items)
     storage_items = list(data.get("km_storage_items", []))
     if len(storage_items) == len(km_items):
         storage_items = [
@@ -5329,10 +5436,17 @@ async def show_contract_obligations_confirmation(message: Message, state: FSMCon
             "critical_life": str(round_up_thousand(km_exact)),
             "household_reserve": str(round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")),
             "household_reserve_categories": {
-                name: str(value) for name, value in br_group_totals(br_items).items()
+                name: str(value) for name, value in br_groups.items()
             },
+            "historical_gifts_monthly": str(historical_gifts_monthly),
         })
         phase_budgets[phase] = phase_budget
+    if data.get("income_rhythm") == "cyclic" and phase_budgets:
+        historical_gifts_monthly = cyclic_gift_history_monthly(
+            phase_budgets,
+            Decimal(str(data.get("income_work_months", "1"))),
+            Decimal(str(data.get("income_gap_months", "1"))),
+        )
     await state.update_data(
         km_items=km_items,
         br_items=br_items,
@@ -5345,8 +5459,9 @@ async def show_contract_obligations_confirmation(message: Message, state: FSMCon
             name: str(value) for name, value in life_categories_from_storage(storage_items).items()
         },
         household_reserve_categories={
-            name: str(value) for name, value in br_group_totals(br_items).items()
+            name: str(value) for name, value in br_groups.items()
         },
+        historical_gifts_monthly=str(historical_gifts_monthly),
         phase_life_budgets=phase_budgets,
     )
     data = {**data, "km_items": km_items, "br_items": br_items}
@@ -6236,7 +6351,7 @@ async def continue_after_current_reserves(message: Message, state: FSMContext):
         calculate_interest_savings=False,
         developer_mode=False,
     )
-    await show_confirmation(message, state)
+    await maybe_start_goals_onboarding(message, state)
 
 
 async def ask_current_life_balance(message: Message, state: FSMContext):
@@ -6341,7 +6456,7 @@ async def save_current_life_balance(
             calculate_interest_savings=False,
             developer_mode=False,
         )
-        await show_confirmation(message, state)
+        await maybe_start_goals_onboarding(message, state)
 
 
 @router.message(
@@ -6386,7 +6501,7 @@ async def save_current_minimum_payments(
         calculate_interest_savings=False,
         developer_mode=False,
     )
-    await show_confirmation(message, state)
+    await maybe_start_goals_onboarding(message, state)
 
 
 # ============================================================
@@ -6528,7 +6643,7 @@ async def save_developer_mode(
         developer_mode=enabled
     )
 
-    await show_confirmation(
+    await maybe_start_goals_onboarding(
         callback.message,
         state,
     )
@@ -6621,6 +6736,7 @@ def build_settings_from_data(
             household_reserve=raw.get("household_reserve", "0"),
             life_categories=raw.get("life_categories", {}),
             household_reserve_categories=raw.get("household_reserve_categories", {}),
+            historical_gifts_monthly=raw.get("historical_gifts_monthly", "0"),
             currency_code=raw.get("currency_code", "RUB"),
             currency_symbol=raw.get("currency_symbol", "₽"),
             exchange_rate_to_rub=raw.get("exchange_rate_to_rub", "1"),
@@ -6657,6 +6773,8 @@ def build_settings_from_data(
         household_reserve_categories={
             "Дети": Decimal(str(data.get("household_reserve_categories", {}).get("Дети", "0")))
         } if Decimal(str(data.get("household_reserve_categories", {}).get("Дети", "0"))) > 0 else {},
+
+        historical_gifts_monthly=Decimal(str(data.get("historical_gifts_monthly", "0"))),
 
         average_income=Decimal(
             data["average_income"]
@@ -6851,6 +6969,275 @@ def build_state_from_data(
 # ============================================================
 
 
+GOAL_SUGGESTIONS = (
+    "Отпуск",
+    "Замена техники",
+    "Образование",
+    "Дом и ремонт",
+)
+
+
+def goals_available_in_onboarding(allocator: FinancialAllocator) -> bool:
+    """Цели открываются с режимов 3/3/5 для трёх профилей."""
+    minimum_mode = {
+        "stable": 3,
+        "piecework": 3,
+        "cyclic": 5,
+    }[allocator.profile_id]
+    return allocator.active_mode() >= minimum_mode
+
+
+def normalized_onboarding_goals(drafts: list[dict]) -> list[dict]:
+    """Переводит понятные суммы в месяц в доли целевого потока ровно на 100%."""
+    positive = [
+        {
+            "name": str(item["name"]).strip(),
+            "monthly": Decimal(str(item.get("monthly", "0"))),
+        }
+        for item in drafts
+        if str(item.get("name", "")).strip()
+        and Decimal(str(item.get("monthly", "0"))) > 0
+    ]
+    if not positive:
+        return []
+    total = sum((item["monthly"] for item in positive), Decimal("0"))
+    result: list[dict] = []
+    distributed = Decimal("0")
+    for index, item in enumerate(positive):
+        if index == len(positive) - 1:
+            percentage = Decimal("100") - distributed
+        else:
+            percentage = (
+                item["monthly"] * Decimal("100") / total
+            ).quantize(Decimal("0.0001"))
+            distributed += percentage
+        result.append({
+            "name": item["name"],
+            "percentage": str(percentage),
+        })
+    return result
+
+
+async def maybe_start_goals_onboarding(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("onboarding_goals_completed"):
+        await show_confirmation(message, state)
+        return
+    settings = build_settings_from_data(data)
+    state_object = build_state_from_data(data, settings)
+    allocator = FinancialAllocator(settings=settings, state=state_object)
+    if not goals_available_in_onboarding(allocator):
+        await state.update_data(onboarding_goals_completed=True, goals=[])
+        await show_confirmation(message, state)
+        return
+    await state.update_data(goal_drafts=[])
+    recommendation = allocator.gift_goal_recommendation()
+    if Decimal(str(recommendation.get("historical_monthly", "0"))) > 0:
+        await show_gift_goal_offer(message, state, allocator)
+        return
+    await show_goals_menu(message, state)
+
+
+async def show_gift_goal_offer(
+    message: Message,
+    state: FSMContext,
+    allocator: FinancialAllocator | None = None,
+):
+    if allocator is None:
+        data = await state.get_data()
+        settings = build_settings_from_data(data)
+        allocator = FinancialAllocator(
+            settings=settings,
+            state=build_state_from_data(data, settings),
+        )
+    recommendation = allocator.gift_goal_recommendation()
+    history = Decimal(str(recommendation.get("historical_monthly", "0")))
+    monthly = Decimal(str(recommendation.get("recommended_monthly", "0")))
+    await state.set_state(SetupStates.goals_menu)
+    await state.update_data(gift_recommended_monthly=str(monthly))
+    await message.answer(
+        "<b><u>⭐️ ЦЕЛЬ «ПОДАРКИ»</u></b>\n\n"
+        f"Раньше на подарки уходило в среднем <b>{rub(history)}</b> в месяц. "
+        "Подарки не входят в стоимость жизни: их разумнее планировать отдельной целью "
+        "после Критического Минимума и Бытового Резерва.\n\n"
+        f"С учётом вашего дохода и доступной суммы на цели рекомендую начать с "
+        f"<b>{rub(monthly)}</b> в месяц. Обычный ориентир — <b>3–7% дохода</b>; "
+        "выше 10% стоит выбирать осознанно.",
+        reply_markup=keyboard([
+            [("✔️ Добавить рекомендованную сумму", "goals:gift:accept")],
+            [("Указать другую сумму", "goals:gift:custom")],
+            [("Не добавлять", "goals:gift:skip")],
+        ]),
+    )
+
+
+async def show_goals_menu(message: Message, state: FSMContext):
+    data = await state.get_data()
+    drafts = data.get("goal_drafts", [])
+    selected = {str(item.get("name")) for item in drafts}
+    summary = ""
+    if drafts:
+        summary = "\n\n<b>УЖЕ ДОБАВЛЕНО:</b>\n" + "\n".join(
+            f"• ⭐️ <b>{escape(str(item['name']))}</b> — {rub(Decimal(str(item['monthly'])))} / мес."
+            for item in drafts
+        )
+    rows: list[list[tuple[str, str]]] = []
+    if (
+        Decimal(str(data.get("historical_gifts_monthly", "0"))) > 0
+        and "Подарки" not in selected
+    ):
+        rows.append([("⭐️ Подарки", "goals:gift:offer")])
+    for index, name in enumerate(GOAL_SUGGESTIONS):
+        if name not in selected:
+            rows.append([(f"⭐️ {name}", f"goals:suggest:{index}")])
+    for index, item in enumerate(drafts):
+        rows.append([(
+            f"✖️ Убрать: {str(item.get('name', 'цель'))}",
+            f"goals:remove:{index}",
+        )])
+    rows.extend([
+        [("+ Своя цель", "goals:custom")],
+        [("✔️ Готово", "goals:done")],
+    ])
+    await state.set_state(SetupStates.goals_menu)
+    await message.answer(
+        "<b><u>ФИНАНСОВЫЕ ЦЕЛИ</u></b>\n\n"
+        "Цели уже доступны вашему предварительному режиму. Выберите то, на что хотите "
+        "откладывать после финансирования Критического Минимума и Бытового Резерва.\n\n"
+        "Для каждой цели укажите желаемую сумму в месяц — Аллокатор сам рассчитает доли."
+        f"{summary}",
+        reply_markup=keyboard(rows),
+    )
+
+
+async def add_goal_draft(state: FSMContext, name: str, monthly: Decimal):
+    data = await state.get_data()
+    drafts = [
+        item for item in data.get("goal_drafts", [])
+        if str(item.get("name", "")).casefold() != name.casefold()
+    ]
+    drafts.append({"name": name, "monthly": str(monthly)})
+    await state.update_data(goal_drafts=drafts)
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:accept")
+async def accept_gift_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    monthly = Decimal(str(data.get("gift_recommended_monthly", "0")))
+    if monthly > 0:
+        await add_goal_draft(state, "Подарки", monthly)
+    await show_goals_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:custom")
+async def custom_gift_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(pending_goal_name="Подарки")
+    await state.set_state(SetupStates.goal_percentage)
+    await callback.message.answer(
+        "<b>СКОЛЬКО ОТКЛАДЫВАТЬ НА ПОДАРКИ?</b>\n\n"
+        "——————\n<b>→ Введите сумму в месяц.</b>"
+    )
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:skip")
+async def skip_gift_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_goals_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:offer")
+async def reopen_gift_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_gift_goal_offer(callback.message, state)
+
+
+@router.callback_query(SetupStates.goals_menu, F.data.startswith("goals:remove:"))
+async def remove_goal_draft(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    drafts = list(data.get("goal_drafts", []))
+    try:
+        index = int(callback.data.rsplit(":", 1)[1])
+        drafts.pop(index)
+    except (ValueError, IndexError):
+        await callback.message.answer("Цель уже удалена.")
+    await state.update_data(goal_drafts=drafts)
+    await show_goals_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.goals_menu, F.data.startswith("goals:suggest:"))
+async def choose_suggested_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        name = GOAL_SUGGESTIONS[int(callback.data.rsplit(":", 1)[1])]
+    except (ValueError, IndexError):
+        await callback.message.answer("Не удалось определить цель. Выберите её ещё раз.")
+        return
+    await state.update_data(pending_goal_name=name)
+    await state.set_state(SetupStates.goal_percentage)
+    await callback.message.answer(
+        f"<b>⭐️ {escape(name.upper())}</b>\n\n"
+        "Какую сумму вы хотите направлять на эту цель в среднем за месяц?\n\n"
+        "——————\n<b>→ Введите сумму.</b>"
+    )
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:custom")
+async def start_custom_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.goal_name)
+    await callback.message.answer(
+        "<b>КАК НАЗЫВАЕТСЯ ЦЕЛЬ?</b>\n\n"
+        "Например: Переезд, Обучение или Свадьба.\n\n"
+        "——————\n<b>→ Введите название.</b>"
+    )
+
+
+@router.message(SetupStates.goal_name)
+async def save_custom_goal_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if not name or len(name) > 60:
+        await message.answer("Введите название цели длиной до 60 символов.")
+        return
+    await state.update_data(pending_goal_name=name)
+    await state.set_state(SetupStates.goal_percentage)
+    await message.answer(
+        f"<b>⭐️ {escape(name.upper())}</b>\n\n"
+        "Какую сумму вы хотите направлять на эту цель в среднем за месяц?\n\n"
+        "——————\n<b>→ Введите сумму.</b>"
+    )
+
+
+@router.message(SetupStates.goal_percentage)
+async def save_goal_monthly_amount(message: Message, state: FSMContext):
+    monthly = parse_decimal(message.text)
+    if monthly is None or monthly <= 0:
+        await message.answer("Введите сумму больше 0.")
+        return
+    data = await state.get_data()
+    name = str(data.get("pending_goal_name", "")).strip()
+    if not name:
+        await show_goals_menu(message, state)
+        return
+    await add_goal_draft(state, name, monthly)
+    await state.update_data(pending_goal_name=None)
+    await show_goals_menu(message, state)
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:done")
+async def finish_goals_onboarding(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    drafts = data.get("goal_drafts", [])
+    await state.update_data(
+        goals=normalized_onboarding_goals(drafts),
+        onboarding_goals_completed=True,
+    )
+    await show_confirmation(callback.message, state)
+
+
 async def show_confirmation(
     message: Message,
     state: FSMContext,
@@ -6899,10 +7286,50 @@ async def show_confirmation(
     accounts.append(("❤️", "Зарплата"))
     accounts.append(("💚", "Бытовой резерв"))
 
+    for goal in settings.goals:
+        accounts.append(("⭐️", goal.name))
+
     accounts_text = "\n".join(
         f"{index}. {icon} <b>{escape(name)}</b>"
         for index, (icon, name) in enumerate(accounts, start=1)
     )
+
+    goal_monthly_plans = {
+        str(item.get("name", "")): Decimal(str(item.get("monthly", "0")))
+        for item in data.get("goal_drafts", [])
+    }
+    goals_text = ""
+    if settings.goals:
+        goal_lines = []
+        for goal in settings.goals:
+            monthly = goal_monthly_plans.get(goal.name)
+            monthly_text = f" — {rub(monthly)} / мес." if monthly is not None else ""
+            percentage_text = format(goal.percentage.normalize(), "f")
+            goal_lines.append(
+                f"• ⭐️ <b>{escape(goal.name)}</b>{monthly_text} · {percentage_text}% целевого потока"
+            )
+        goals_text = (
+            "<b><u>ЦЕЛИ:</u></b>\n\n"
+            + "\n".join(goal_lines)
+            + "\n\n"
+        )
+
+    if settings.goals:
+        goals_ps = (
+            "Цели настроены и будут получать деньги после финансирования "
+            "Критического Минимума и Бытового Резерва. Инвестиции появятся, "
+            "когда ваш финансовый режим будет готов направлять туда деньги."
+        )
+    elif goals_available_in_onboarding(allocator):
+        goals_ps = (
+            "Цели уже доступны. Вы сможете настроить их позднее в Главном меню. "
+            "Инвестиции появятся, когда финансовый режим будет готов направлять туда деньги."
+        )
+    else:
+        goals_ps = (
+            "Цели и инвестиции появятся тогда, когда ваш финансовый режим "
+            "действительно будет готов направлять туда деньги."
+        )
 
     deficit = settings.total_critical_life - settings.average_income
     deficit_warning = ""
@@ -6944,25 +7371,48 @@ async def show_confirmation(
         )
 
     await state.set_state(SetupStates.confirmation)
-    confirmation_text = (
-        "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
-        f"➖ <b>Профиль</b> — {rhythm_labels.get(settings.income_rhythm)}\n\n"
-        f"{cycle_text}"
-        f"➖ <b>Средний доход</b> — {rub(settings.average_income)}\n\n"
-        f"➖ <b>Критический Минимум</b> — {rub(settings.critical_life)}\n\n"
-        f"➖ <b>Бытовой Резерв</b> — {rub(settings.household_reserve)}\n\n"
-        f"➖ <b>Устойчивая Жизнь</b> — {rub(settings.household_life)}"
-        f"{deficit_warning}\n\n"
-        f"<b><u>ТИПЫ ДОХОДОВ:</u></b>\n\n{tax_types}\n\n"
-        "<b><u>КОНВЕРТЫ:</u></b>\n\n"
-        "Откройте накопительные счета на ежедневный остаток в своём банке. Переименуйте.\n\n"
-        f"{accounts_text}\n\n"
-        "<b><u>ПРЕДВАРИТЕЛЬНЫЙ РЕЖИМ:</u></b>\n\n"
-        f"{mode_progress}\n\n"
-        "<b><u>P.S.:</u></b>\n\n"
-        "Цели и инвестиции появятся тогда, когда ваш финансовый режим действительно будет "
-        "готов направлять туда деньги."
-    )
+    if settings.income_rhythm == "irregular":
+        confirmation_text = (
+            "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
+            "<b><u>ПРОФИЛЬ</u></b>\n"
+            f"{rhythm_labels.get(settings.income_rhythm)}\n\n"
+            f"{reserve_progress_block('Подушка', allocator.pillow_total_balance, settings.force_majeure_limit)}\n\n"
+            f"{reserve_progress_block('Стабилизатор', state_object.pillow_stabilizer, settings.stabilizer_full_limit)}\n\n"
+            f"{rub(settings.average_income)} — Средний доход\n"
+            f"{rub(settings.critical_life)} — Критический Минимум\n"
+            f"{rub(settings.household_reserve)} — Бытовой Резерв\n"
+            f"{rub(settings.household_life)} — Устойчивая Жизнь"
+            f"{deficit_warning}\n\n"
+            f"<b><u>ТИПЫ ДОХОДА:</u></b>\n\n{tax_types}\n\n"
+            f"{goals_text}"
+            "<b><u>КОНВЕРТЫ:</u></b>\n\n"
+            "Откройте накопительные счета на ежедневный остаток в своём банке. Переименуйте.\n\n"
+            f"{accounts_text}\n\n"
+            "<b><u>ПРЕДВАРИТЕЛЬНЫЙ РЕЖИМ:</u></b>\n\n"
+            f"{mode_progress}\n\n"
+            "<b><u>P.S.:</u></b>\n\n"
+            f"{goals_ps}"
+        )
+    else:
+        confirmation_text = (
+            "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
+            f"➖ <b>Профиль</b> — {rhythm_labels.get(settings.income_rhythm)}\n\n"
+            f"{cycle_text}"
+            f"➖ <b>Средний доход</b> — {rub(settings.average_income)}\n\n"
+            f"➖ <b>Критический Минимум</b> — {rub(settings.critical_life)}\n\n"
+            f"➖ <b>Бытовой Резерв</b> — {rub(settings.household_reserve)}\n\n"
+            f"➖ <b>Устойчивая Жизнь</b> — {rub(settings.household_life)}"
+            f"{deficit_warning}\n\n"
+            f"<b><u>ТИПЫ ДОХОДОВ:</u></b>\n\n{tax_types}\n\n"
+            f"{goals_text}"
+            "<b><u>КОНВЕРТЫ:</u></b>\n\n"
+            "Откройте накопительные счета на ежедневный остаток в своём банке. Переименуйте.\n\n"
+            f"{accounts_text}\n\n"
+            "<b><u>ПРЕДВАРИТЕЛЬНЫЙ РЕЖИМ:</u></b>\n\n"
+            f"{mode_progress}\n\n"
+            "<b><u>P.S.:</u></b>\n\n"
+            f"{goals_ps}"
+        )
     confirmation_markup = keyboard([
         [("Сохранить профиль", "confirm:save")],
         [("Начать заново", "confirm:restart")],

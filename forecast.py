@@ -179,7 +179,8 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
     for name, amount in allocations.items():
         if Decimal(amount) > 0:
             label = name.replace("КЖ:", "").replace("Цели:", "")
-            lines.append(f"• {escape(label)} — {rub(Decimal(amount))}")
+            icon = "⭐️ " if name.startswith("Цели:") else ""
+            lines.append(f"• {icon}{escape(label)} — {rub(Decimal(amount))}")
     if not any(Decimal(amount) > 0 for amount in allocations.values()):
         lines.append("• Нет свободной суммы для распределения")
     lines.extend([
