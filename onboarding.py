@@ -7516,7 +7516,7 @@ async def choose_goal_deadline(callback: CallbackQuery, state: FSMContext):
 
 @router.message(SetupStates.goal_deadline)
 async def save_goal_deadline(message: Message, state: FSMContext):
-    deadline = parse_date_input(message.text)
+    deadline = parse_tax_due_date(message.text)
     if deadline is None or deadline <= date.today():
         await message.answer("Введите будущую дату в формате ДД.ММ.ГГГГ.")
         return
