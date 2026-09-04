@@ -350,6 +350,12 @@ def rub_compact(value) -> str:
     return rub(value)
 
 
+def rub_rounded(value) -> str:
+    """Денежная сумма, округлённая до целого рубля по правилам арифметики."""
+    value = Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return f"{value:,.0f}".replace(",", " ") + " ₽"
+
+
 def reserve_progress_block(title: str, current: Decimal, target: Decimal) -> str:
     """Карточка фактического и целевого размера финансового резерва."""
     completed = " ✔️" if target > 0 and current >= target else ""
@@ -7126,6 +7132,29 @@ def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
     return "\n".join(lines)
 
 
+def goal_percentage_progress(drafts: list[dict]) -> str:
+    """Компактный список позиций с уже назначенными долями."""
+    lines = []
+    for item in drafts:
+        name = escape(goal_draft_display_name(item))
+        percentage = item.get("percentage")
+        if percentage is None:
+            lines.append(f"• {goal_icon(item)} <b>{name}</b>")
+        else:
+            lines.append(f"• {goal_icon(item)} <b>{name} — {percentage}%</b>")
+    return "\n".join(lines)
+
+
+def goal_review_name(item: dict) -> str:
+    """Короткое название позиции для итогового экрана распределения."""
+    name = str(item.get("name", "")).strip()
+    if item.get("position_type") == "chest":
+        name = name.removeprefix("Сундук ")
+        if name.casefold() == "замена техники":
+            return "Техника"
+    return name
+
+
 def onboarding_goal_allocator(
     data: dict,
     goals: list[dict] | None = None,
@@ -7700,24 +7729,36 @@ async def ask_next_goal_percentage(message: Message, state: FSMContext):
 
     minimum, maximum = goal_percentage_bounds(chosen, len(drafts) - index - 1)
     capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
-    recommendation = ""
-    if drafts[index].get("suggested_percentage"):
-        recommendation = (
-            f"\nС учётом ваших прошлых расходов ориентир для этой позиции — "
-            f"<b>{drafts[index]['suggested_percentage']}%</b>."
-        )
     await state.set_state(SetupStates.goal_percentage)
+    capacity_text = (
+        f"<b>{rub_rounded(capacity['minimum'])[:-2]}–{rub_rounded(capacity['maximum'])} в месяц</b>"
+    )
+    prompt = (
+        f"<b>→ Введите процент от {minimum} до {maximum} на "
+        f"{goal_icon(drafts[index])} {escape(goal_draft_display_name(drafts[index]))}.</b>\n"
+        "Например: 20"
+    )
+    if index == 0:
+        text = (
+            "<b>КАК РАСПРЕДЕЛИТЬ ДЕНЬГИ МЕЖДУ ЦЕЛЯМИ?</b>\n\n"
+            "Установите процент откладывания денег для каждой категории:\n\n"
+            f"{goal_draft_summary(drafts)}\n\n"
+            "При вашем среднем доходе Аллокатор сможет направлять на Цели и Сундуки примерно:\n"
+            f"{capacity_text}\n\n"
+            "Укажите, сколько процентов от этой суммы направлять на каждую категорию.\n\n"
+            f"——————\n{prompt}"
+        )
+    else:
+        text = (
+            "<b>ПРОЦЕНТЫ ЦЕЛЕЙ И СУНДУКОВ</b>\n\n"
+            f"{goal_percentage_progress(drafts)}\n\n"
+            "При вашем среднем доходе Аллокатор сможет направлять на Цели и Сундуки примерно:\n"
+            f"{capacity_text}\n\n"
+            "Укажите, сколько процентов от этой суммы направлять на каждую категорию.\n\n"
+            f"——————\n{prompt}"
+        )
     await message.answer(
-        "<b><u>КАК РАСПРЕДЕЛИТЬ ДЕНЬГИ МЕЖДУ ЦЕЛЯМИ?</u></b>\n\n"
-        "Каждый месяц Аллокатор сначала определит, сколько денег вообще можно "
-        "направить на Цели. Вы выбираете долю каждой позиции именно от этой суммы, "
-        "а не от всей зарплаты.\n\n"
-        f"{goal_draft_summary(drafts, percentages=True)}\n\n"
-        f"Сейчас настройте: {goal_icon(drafts[index])} <b>{escape(str(drafts[index]['name']))}</b>.\n"
-        f"Можно выбрать целое число от <b>{minimum}%</b> до <b>{maximum}%</b>. "
-        f"Для остальных позиций уже сохранено минимум по 1%.{recommendation}\n\n"
-        f"Общий поток на цели сейчас оценивается как <b>≈ {rub(capacity['minimum'])}–{rub(capacity['maximum'])} в месяц</b>.\n"
-        "——————\n<b>→ Введите процент.</b>",
+        text,
         reply_markup=keyboard([[("✖️ Отмена", "goals:percent:cancel")]]),
     )
 
@@ -7750,24 +7791,28 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
     minimum = Decimal(str(capacity["minimum"]))
     maximum = Decimal(str(capacity["maximum"]))
     preview_allocator = onboarding_goal_allocator(data, drafts)
+    review_items = list(zip(drafts, preview_allocator.settings.goals))
+    review_items.sort(key=lambda pair: Decimal(str(pair[0]["percentage"])), reverse=True)
     lines = []
-    for item, goal in zip(drafts, preview_allocator.settings.goals):
+    for item, goal in review_items:
         share = Decimal(str(item["percentage"])) / Decimal("100")
         line = (
-            f"• {goal_icon(item)} <b>{escape(str(item['name']))}</b> — {item['percentage']}% "
-            f"(≈ {rub(minimum * share)}–{rub(maximum * share)} / мес.)"
+            f"{goal_icon(item)} <b>{escape(goal_review_name(item))} — {item['percentage']}%</b>\n"
+            f"&#160;&#160;&#160;&#160;&#160;&#160;≈ {rub_rounded(minimum * share)[:-2]}–"
+            f"{rub_rounded(maximum * share)[:-2]} <b>₽/мес.</b>"
         )
         if goal.is_goal:
             forecast = preview_allocator.goal_forecast(goal)
             status = str(forecast["status"])
             if status == "on_track":
-                line += "\n  ✔️ При выбранной доле срок выглядит реалистично."
+                line += "\n&#160;&#160;&#160;&#160;&#160;&#160;✔️ <i>При выбранной доле срок выглядит реалистично.</i>"
             elif status == "depends_on_income":
-                line += "\n  ⚠️ Срок достижим только в более доходные месяцы."
+                line += "\n&#160;&#160;&#160;&#160;&#160;&#160;⚠️ <i>Срок достижим только в более доходные месяцы.</i>"
             elif status == "unreachable":
                 line += (
-                    f"\n  ⚠️ Нужно около <b>{rub(forecast['required_monthly'])} / мес.</b> "
-                    "Увеличьте срок, уменьшите сумму или выделите Цели большую долю."
+                    f"\n&#160;&#160;&#160;&#160;&#160;&#160;⚠️ <i>Нужно около "
+                    f"{rub_rounded(forecast['required_monthly'])} / мес. Увеличьте срок, "
+                    "уменьшите сумму или выделите Цели большую долю.</i>"
                 )
             elif status == "no_deadline":
                 fast = forecast["estimated_months_fast"]
@@ -7779,13 +7824,13 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
                         estimate = f"около {fast} мес."
                     else:
                         estimate = f"примерно {fast}–{slow} мес."
-                    line += f"\n  ℹ️ Ориентировочный срок — <b>{estimate}</b>."
+                    line += f"\n&#160;&#160;&#160;&#160;&#160;&#160;ℹ️ <i>Ориентировочный срок — {estimate}.</i>"
         lines.append(line)
     await state.set_state(SetupStates.goal_percentages_review)
     await message.answer(
-        "<b><u>РАСПРЕДЕЛЕНИЕ ЦЕЛЕЙ</u></b>\n\n"
-        + "\n".join(lines)
-        + "\n\nПоследняя позиция получила остаток автоматически. Сумма долей — <b>100%</b>.",
+        "<b>РАСПРЕДЕЛЕНИЕ ЦЕЛЕЙ</b>\n\n"
+        + "\n\n".join(lines)
+        + "\n\nПоследняя позиция получила остаток автоматически. Сумма долей — 100%.",
         reply_markup=keyboard([
             [("✔️ Сохранить", "goals:percent:save")],
             [("Редактировать проценты", "goals:percent:restart")],

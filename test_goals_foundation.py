@@ -12,7 +12,13 @@ from financial_engine import (
     goal_display_name,
 )
 from storage import Database
-from onboarding import build_settings_from_data, goal_draft_summary
+from onboarding import (
+    build_settings_from_data,
+    goal_draft_summary,
+    goal_percentage_progress,
+    goal_review_name,
+    rub_rounded,
+)
 
 
 def settings_with(goals):
@@ -161,6 +167,21 @@ class GoalFoundationTests(unittest.TestCase):
         ])
         self.assertIn("⭐️ <b>Отпуск</b>", summary)
         self.assertIn("🧳 <b>Сундук Подарков</b>", summary)
+
+    def test_goal_percentage_progress_marks_only_completed_positions(self):
+        summary = goal_percentage_progress([
+            {"name": "Отпуск", "position_type": "goal", "percentage": "20"},
+            {"name": "Подарки", "position_type": "chest"},
+        ])
+        self.assertIn("<b>Отпуск — 20%</b>", summary)
+        self.assertIn("<b>Сундук Подарков</b>", summary)
+
+    def test_goal_review_uses_short_names_and_rounded_rubles(self):
+        self.assertEqual(
+            goal_review_name({"name": "Замена техники", "position_type": "chest"}),
+            "Техника",
+        )
+        self.assertEqual(rub_rounded(Decimal("4204.67")), "4 205 ₽")
 
     def test_chest_display_names_are_consistent_and_grammatical(self):
         self.assertEqual(goal_display_name("Подарки", True), "Сундук Подарков")
