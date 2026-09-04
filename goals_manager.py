@@ -64,7 +64,7 @@ def rub(value) -> str:
 
 
 def icon(goal: Goal) -> str:
-    return "🪎" if goal.is_chest else "⭐️"
+    return "💼" if goal.is_chest else "⭐️"
 
 
 def goal_line(allocator, goal: Goal) -> str:
@@ -114,7 +114,7 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
     await message.answer(
         "<b><u>ЦЕЛИ И СУНДУКИ</u></b>\n\n"
         "⭐️ Цель — конкретная сумма, которую нужно накопить.\n"
-        "🪎 Сундук — постоянный запас, который можно пополнять и использовать снова.\n\n"
+        "💼 Сундук — постоянный запас, который можно пополнять и использовать снова.\n\n"
         f"{listing}\n\n"
         "Проценты показывают, как делятся только деньги, уже выделенные Аллокатором на Цели.",
         reply_markup=keyboard(rows),
@@ -170,9 +170,9 @@ async def choose_position_type(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "<b>ЧТО ДОБАВИТЬ?</b>\n\n"
         "⭐️ <b>Цель</b> — конкретная сумма: путёвка, автомобиль или парфюм.\n\n"
-        "🪎 <b>Сундук</b> — постоянный запас: Подарки, Хотелки или Замена техники.",
+        "💼 <b>Сундук</b> — постоянный запас: Подарки, Хотелки или Замена техники.",
         reply_markup=keyboard([
-            [("⭐️ Цель", "goalmanage:type:goal"), ("🪎 Сундук", "goalmanage:type:chest")],
+            [("⭐️ Цель", "goalmanage:type:goal"), ("💼 Сундук", "goalmanage:type:chest")],
             [("✖️ Отмена", "goals:manage")],
         ]),
     )

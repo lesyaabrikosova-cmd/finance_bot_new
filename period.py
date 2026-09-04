@@ -768,7 +768,7 @@ async def period_remainder_amount_save(message: Message, state: FSMContext):
         rows.append([("⭐️ Распределить по всем целям", "period:target:goals")])
         for index, goal in enumerate(allocator.settings.goals):
             if goal.status == "active":
-                goal_icon = "🪎" if goal.is_chest else "⭐️"
+                goal_icon = "💼" if goal.is_chest else "⭐️"
                 rows.append([(f"{goal_icon} {goal.name}", f"period:target:goal:{index}")])
 
     investment_mode = {
@@ -821,7 +821,7 @@ async def period_remainder_target(callback: CallbackQuery, state: FSMContext):
         if goal.status != "active":
             await callback.message.answer("Эта позиция сейчас на паузе. Выберите другое направление.")
             return
-        goal_icon = "🪎" if goal.is_chest else "⭐️"
+        goal_icon = "💼" if goal.is_chest else "⭐️"
         label = f"{goal_icon} «{goal.name}»"
     else:
         label = labels.get(target, "текущий финансовый приоритет")

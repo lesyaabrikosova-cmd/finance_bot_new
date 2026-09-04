@@ -177,7 +177,7 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
         ])
     lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>"])
     goal_icons = {
-        goal.name: ("🪎 " if goal.is_chest else "⭐️ ")
+        goal.name: ("💼 " if goal.is_chest else "⭐️ ")
         for goal in source.settings.goals
     }
     for name, amount in allocations.items():

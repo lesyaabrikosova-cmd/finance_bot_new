@@ -154,7 +154,7 @@ class GoalFoundationTests(unittest.TestCase):
             {"name": "Подарки", "position_type": "chest"},
         ])
         self.assertIn("⭐️ <b>Отпуск</b>", summary)
-        self.assertIn("🪎 <b>Подарки</b>", summary)
+        self.assertIn("💼 <b>Подарки</b>", summary)
 
     def test_goal_lifecycle_survives_storage_and_only_active_positions_allocate(self):
         with tempfile.TemporaryDirectory() as directory:

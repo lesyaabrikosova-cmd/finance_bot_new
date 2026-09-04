@@ -92,7 +92,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
     )
 
     goals = ", ".join(
-        f"{'🪎' if g.is_chest else '⭐️'} {g.name} {g.percentage}%"
+        f"{'💼' if g.is_chest else '⭐️'} {g.name} {g.percentage}%"
         for g in s.goals
     ) if s.goals else "без отдельных категорий"
     categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"

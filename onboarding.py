@@ -7065,7 +7065,7 @@ async def maybe_start_goals_onboarding(message: Message, state: FSMContext):
 
 
 def goal_icon(item: dict) -> str:
-    return "🪎" if item.get("position_type") == "chest" else "⭐️"
+    return "💼" if item.get("position_type") == "chest" else "⭐️"
 
 
 def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
@@ -7111,7 +7111,7 @@ async def show_goals_menu(message: Message, state: FSMContext):
         Decimal(str(data.get("historical_gifts_monthly", "0"))) > 0
         and "подарки" not in selected
     ):
-        rows.append([("🪎 Подарки", "goals:gift:offer")])
+        rows.append([("💼 Подарки", "goals:gift:offer")])
     for index, suggestion in enumerate(GOAL_SUGGESTIONS):
         if can_add and suggestion["name"].casefold() not in selected:
             rows.append([(
@@ -7175,7 +7175,7 @@ async def reopen_gift_goal(callback: CallbackQuery, state: FSMContext):
         "suggested_percentage": str(suggested),
     })
     await callback.message.answer(
-        "<b>🪎 СУНДУК ПОДАРКОВ</b>\n\n"
+        "<b>💼 СУНДУК ПОДАРКОВ</b>\n\n"
         f"Раньше на подарки уходило в среднем <b>{rub(history)}</b> в месяц. "
         "Подарки не входят в стоимость жизни: их разумнее оплачивать из отдельного "
         "Сундука, когда Критический Минимум и Бытовой Резерв уже обеспечены.\n\n"
@@ -7218,7 +7218,7 @@ async def show_goal_suggestion(message: Message, suggestion: dict, profile: str 
     name = suggestion["name"]
     if name == "Замена техники":
         text = (
-            "<b>🪎 ЗАМЕНА ТЕХНИКИ</b>\n\n"
+            "<b>💼 ЗАМЕНА ТЕХНИКИ</b>\n\n"
             "Телефон, ноутбук или стиральная машина обычно не предупреждают: "
             "<b>«Через месяц я сломаюсь, начинай копить».</b>\n\n"
             "Но мы знаем, что любая техника рано или поздно потребует замены. Поэтому "
@@ -7374,10 +7374,10 @@ async def start_custom_goal(callback: CallbackQuery, state: FSMContext):
         "<b>ЧТО ВЫ ХОТИТЕ ДОБАВИТЬ?</b>\n\n"
         "⭐️ <b>Цель</b> — накопить конкретную сумму и закончить. Например, парфюм, "
         "путёвка или автомобиль.\n\n"
-        "🪎 <b>Сундук</b> — регулярно пополнять и иногда пользоваться. Например, "
+        "💼 <b>Сундук</b> — регулярно пополнять и иногда пользоваться. Например, "
         "Хотелки, Подарки или Замена техники.",
         reply_markup=keyboard([
-            [("⭐️ Цель", "goals:type:goal"), ("🪎 Сундук", "goals:type:chest")],
+            [("⭐️ Цель", "goals:type:goal"), ("💼 Сундук", "goals:type:chest")],
             [("✖️ Отмена", "goals:cancel-add")],
         ]),
     )
@@ -7823,7 +7823,7 @@ async def show_confirmation(
     accounts.append(("💚", "Бытовой резерв"))
 
     for goal in settings.goals:
-        accounts.append(("🪎" if goal.is_chest else "⭐️", goal.name))
+        accounts.append(("💼" if goal.is_chest else "⭐️", goal.name))
 
     accounts_text = "\n".join(
         f"{index}. {icon} <b>{escape(name)}</b>"
@@ -7842,7 +7842,7 @@ async def show_confirmation(
             monthly = goal_monthly_plans.get(goal.name)
             monthly_text = f" — {rub(monthly)} / мес." if monthly is not None else ""
             percentage_text = format(goal.percentage.normalize(), "f")
-            icon = "🪎" if goal.is_chest else "⭐️"
+            icon = "💼" if goal.is_chest else "⭐️"
             target_text = ""
             if goal.target_amount is not None:
                 target_text = f" · цель {rub(goal.full_target_amount)}"
