@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_UP, getcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP, getcontext
 from math import log
 from typing import Dict, List, Optional, Tuple
 from datetime import date, datetime, timedelta
@@ -26,6 +26,17 @@ ZERO = Decimal("0")
 ONE = Decimal("1")
 HUNDRED = Decimal("100")
 CENT = Decimal("0.01")
+
+VACATION_BUDGET_ITEMS = (
+    ("tickets", "Билеты"),
+    ("accommodation", "Проживание"),
+    ("food", "Еда, кафе и рестораны"),
+    ("transport", "Местный транспорт"),
+    ("entertainment", "Экскурсии и развлечения"),
+    ("insurance", "Страховка и виза"),
+    ("communication", "Связь и интернет"),
+    ("purchases", "Покупки, сувениры и подарки"),
+)
 
 
 def D(value) -> Decimal:
@@ -58,6 +69,157 @@ def fmt_money(value: Decimal) -> str:
 
 def pct(value: Decimal) -> Decimal:
     return D(value) / HUNDRED
+
+
+def vacation_budget(
+    amounts: Dict[str, Decimal],
+    buffer_percent: Decimal = Decimal("10"),
+) -> Dict[str, Decimal]:
+    """Считает отпускной бюджет и отдельный запас, не смешивая статьи."""
+    known_keys = {key for key, _ in VACATION_BUDGET_ITEMS}
+    normalized = {
+        key: max(ZERO, D(value))
+        for key, value in amounts.items()
+        if key in known_keys
+    }
+    subtotal = sum(normalized.values(), ZERO)
+    buffer_percent = max(ZERO, D(buffer_percent))
+    reserve = money(subtotal * buffer_percent / HUNDRED)
+    return {
+        **normalized,
+        "subtotal": money(subtotal),
+        "buffer_percent": buffer_percent,
+        "buffer": reserve,
+        "total": money(subtotal + reserve),
+    }
+
+
+def goal_percentage_bounds(
+    assigned_percentages: List[Decimal],
+    remaining_positions_after: int,
+) -> Tuple[Decimal, Decimal]:
+    """Допустимый целый процент для очередной позиции.
+
+    За каждой ещё не настроенной позицией заранее сохраняется минимум 1%.
+    Поэтому для пяти позиций максимум первой равен 96%, а после выбранных
+    30% и 30% максимум третьей равен 38%.
+    """
+    assigned = sum((D(value) for value in assigned_percentages), ZERO)
+    maximum = HUNDRED - assigned - Decimal(max(0, remaining_positions_after))
+    return ONE, max(ZERO, maximum)
+
+
+def sequential_goal_percentages(
+    chosen_percentages: List[Decimal],
+    positions_count: int,
+) -> List[Decimal]:
+    """Собирает последовательную настройку; последняя доля — остаток до 100%."""
+    if positions_count < 1:
+        return []
+    if len(chosen_percentages) != positions_count - 1:
+        raise ValueError("Процент последней позиции рассчитывается автоматически.")
+
+    result: List[Decimal] = []
+    for index, raw_value in enumerate(chosen_percentages):
+        value = D(raw_value)
+        minimum, maximum = goal_percentage_bounds(
+            result,
+            positions_count - index - 1,
+        )
+        if value != value.to_integral_value() or not minimum <= value <= maximum:
+            raise ValueError(
+                f"Процент позиции должен быть целым числом от {minimum} до {maximum}."
+            )
+        result.append(value)
+
+    remainder = HUNDRED - sum(result, ZERO)
+    if remainder < ONE or remainder != remainder.to_integral_value():
+        raise ValueError("Последней позиции должно остаться не меньше 1%.")
+    return [*result, remainder]
+
+
+def normalize_active_goal_percentages(goals: List[Goal]) -> List[Goal]:
+    """Распределяет 100 целых процентов между активными позициями.
+
+    Используется после удаления или паузы. Существующие пропорции сохраняются
+    настолько точно, насколько позволяют целые проценты; последняя позиция
+    поглощает только неизбежный остаток округления.
+    """
+    active = [goal for goal in goals if goal.status == "active"]
+    for goal in goals:
+        goal.is_auto_percentage = False
+    if not active:
+        return goals
+    if len(active) == 1:
+        active[0].percentage = HUNDRED
+        active[0].is_auto_percentage = True
+        return goals
+
+    weights = [max(ZERO, D(goal.percentage)) for goal in active]
+    weight_total = sum(weights, ZERO)
+    if weight_total <= ZERO:
+        weights = [ONE] * len(active)
+        weight_total = Decimal(len(active))
+
+    distributable = HUNDRED - Decimal(len(active))
+    exact_extras = [distributable * weight / weight_total for weight in weights]
+    integer_extras = [int(value) for value in exact_extras]
+    left = int(distributable - sum(integer_extras))
+    remainder_order = sorted(
+        range(len(active)),
+        key=lambda index: (exact_extras[index] - integer_extras[index], -index),
+        reverse=True,
+    )
+    for index in remainder_order[:left]:
+        integer_extras[index] += 1
+    for goal, extra in zip(active, integer_extras):
+        goal.percentage = ONE + Decimal(extra)
+    active[-1].is_auto_percentage = True
+    return goals
+
+
+def update_goal_percentage(
+    goals: List[Goal],
+    goal_index: int,
+    new_percentage: Decimal,
+) -> List[Goal]:
+    """Меняет ручную долю, автоматически пересчитывая последнюю позицию."""
+    active = [goal for goal in goals if goal.status == "active"]
+    if not 0 <= goal_index < len(active):
+        raise IndexError("Цель не найдена.")
+    if len(active) == 1:
+        active[0].percentage = HUNDRED
+        active[0].is_auto_percentage = True
+        return goals
+
+    residual = next(
+        (goal for goal in reversed(active) if goal.is_auto_percentage),
+        active[-1],
+    )
+    edited = active[goal_index]
+    if edited is residual:
+        raise ValueError("Доля последней позиции рассчитывается автоматически.")
+    value = D(new_percentage)
+    if value != value.to_integral_value() or value < ONE:
+        raise ValueError("Процент должен быть целым числом не меньше 1.")
+
+    fixed_total = sum(
+        (
+            goal.percentage
+            for goal in active
+            if goal is not edited and goal is not residual
+        ),
+        ZERO,
+    )
+    remainder = HUNDRED - fixed_total - value
+    if remainder < ONE:
+        maximum = HUNDRED - fixed_total - ONE
+        raise ValueError(f"Для этой позиции доступно не больше {maximum}%.")
+    edited.percentage = value
+    edited.is_auto_percentage = False
+    residual.percentage = remainder
+    residual.is_auto_percentage = True
+    return goals
 
 
 # ============================================================
@@ -214,18 +376,86 @@ class Credit:
 
 
 # ============================================================
-# ЦЕЛЬ
+# ЦЕЛИ И СУНДУКИ
 # ============================================================
 
 @dataclass
 class Goal:
+    """Одна позиция в разделе накоплений на желания.
+
+    ``goal`` — конечная ⭐️ Цель с известной суммой и, возможно, сроком.
+    ``chest`` — постоянный 🪎 Сундук без конечной суммы и автозавершения.
+
+    Поле ``balance`` сохранено для обратной совместимости. Для Сундука это
+    только сумма взносов, зафиксированных Аллокатором, а не обещание точно
+    повторять баланс банковского счёта с ежедневно начисляемыми процентами.
+    """
+
     name: str
     percentage: Decimal
     balance: Decimal = ZERO
+    position_type: str = "goal"
+    order_index: int = 0
+    is_auto_percentage: bool = False
+    currency_code: str = "RUB"
+    target_amount: Optional[Decimal] = None
+    deadline: Optional[str] = None
+    buffer_enabled: bool = False
+    buffer_percent: Decimal = ZERO
+    status: str = "active"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    archived_at: Optional[str] = None
+    previous_percentage: Optional[Decimal] = None
 
     def __post_init__(self):
+        self.name = str(self.name).strip()
         self.percentage = D(self.percentage)
-        self.balance = D(self.balance)
+        self.balance = max(ZERO, D(self.balance))
+        self.position_type = str(self.position_type).strip().lower()
+        if self.position_type not in {"goal", "chest"}:
+            self.position_type = "goal"
+        self.order_index = max(0, int(self.order_index or 0))
+        self.is_auto_percentage = bool(self.is_auto_percentage)
+        self.currency_code = str(self.currency_code or "RUB").strip().upper()
+        self.target_amount = (
+            None if self.target_amount is None
+            else max(ZERO, D(self.target_amount))
+        )
+        self.deadline = str(self.deadline).strip() if self.deadline else None
+        self.buffer_enabled = bool(self.buffer_enabled)
+        self.buffer_percent = max(ZERO, D(self.buffer_percent))
+        self.status = str(self.status or "active").strip().lower()
+        if self.status not in {"active", "paused", "completed", "archived"}:
+            self.status = "active"
+        self.previous_percentage = (
+            None if self.previous_percentage is None
+            else D(self.previous_percentage)
+        )
+
+        if self.position_type == "chest":
+            # У постоянного Сундука нет финишной суммы, срока и запаса.
+            self.target_amount = None
+            self.deadline = None
+            self.buffer_enabled = False
+            self.buffer_percent = ZERO
+
+    @property
+    def is_goal(self) -> bool:
+        return self.position_type == "goal"
+
+    @property
+    def is_chest(self) -> bool:
+        return self.position_type == "chest"
+
+    @property
+    def full_target_amount(self) -> Optional[Decimal]:
+        if self.target_amount is None:
+            return None
+        if not self.buffer_enabled:
+            return self.target_amount
+        return self.target_amount * (ONE + pct(self.buffer_percent))
 
 
 @dataclass
@@ -668,9 +898,13 @@ class UserSettings:
     @property
     def total_goals_percentage(self) -> Decimal:
         return sum(
-            (goal.percentage for goal in self.goals),
+            (goal.percentage for goal in self.active_goals),
             ZERO,
         )
+
+    @property
+    def active_goals(self) -> List[Goal]:
+        return [goal for goal in self.goals if goal.status == "active"]
 
     # ========================================================
     # ВАЛИДАЦИЯ
@@ -719,7 +953,7 @@ class UserSettings:
             )
 
         if (
-            self.goals
+            self.active_goals
             and abs(self.total_goals_percentage - HUNDRED)
             > Decimal("0.0001")
         ):
@@ -1764,10 +1998,13 @@ class FinancialAllocator:
                 goal = self.settings.goals[index]
             except (ValueError, IndexError):
                 raise ValueError("Выбранная цель не найдена.")
+            if goal.status != "active":
+                raise ValueError("Выбранная позиция сейчас не активна.")
             self.state.goal_balances[goal.name] = (
                 self.state.goal_balances.get(goal.name, ZERO) + amount
             )
-            return f"Цель «{goal.name}»"
+            noun = "Сундук" if goal.is_chest else "Цель"
+            return f"{noun} «{goal.name}»"
         if target == "investments":
             self.state.investments += amount
             return "Инвестиции"
@@ -2033,10 +2270,13 @@ class FinancialAllocator:
             )
         return ONE - s.bracket_c / HUNDRED
 
-    def estimated_goals_capacity(self) -> Dict[str, Decimal | str | bool]:
-        """Ориентировочный месячный бюджет Целей без зашитых процентов."""
+    def _estimated_goals_capacity_for_income(
+        self,
+        income: Decimal,
+    ) -> Dict[str, Decimal | str | bool]:
+        """Бюджет Целей при заданном доходе после налога."""
         s = self.settings
-        income = self.estimated_net_average_income
+        income = max(ZERO, D(income))
         share_a = s.bracket_a / HUNDRED
         share_b = s.bracket_b / HUNDRED
         life_share_a = ONE - share_a
@@ -2077,6 +2317,103 @@ class FinancialAllocator:
             "capacity": capacity,
             "blocked_stage": blocked_stage,
             "tax_estimate_is_conservative": len(set(s.income_type_tax_rates.values())) > 1,
+        }
+
+    def estimated_goals_capacity(self) -> Dict[str, Decimal | str | bool]:
+        """Консервативный бюджет Целей с максимальной известной ставкой налога."""
+        return self._estimated_goals_capacity_for_income(
+            self.estimated_net_average_income
+        )
+
+    def estimated_goals_capacity_range(self) -> Dict[str, Decimal | bool]:
+        """Диапазон бюджета Целей: от полного налога до дохода без налога."""
+        conservative = self._estimated_goals_capacity_for_income(
+            self.estimated_net_average_income
+        )
+        optimistic = self._estimated_goals_capacity_for_income(
+            self.settings.average_income
+        )
+        lower = min(D(conservative["capacity"]), D(optimistic["capacity"]))
+        upper = max(D(conservative["capacity"]), D(optimistic["capacity"]))
+        return {
+            "minimum": money(lower),
+            "maximum": money(upper),
+            "tax_changes_range": lower != upper,
+        }
+
+    def goal_forecast(
+        self,
+        goal: Goal,
+        today: Optional[date] = None,
+    ) -> Dict[str, Decimal | int | str | bool | None]:
+        """Прогноз одной Цели без требования вручную вести банковский баланс."""
+        today = today or date.today()
+        capacity = self.estimated_goals_capacity_range()
+        share = max(ZERO, goal.percentage) / HUNDRED
+        monthly_minimum = money(D(capacity["minimum"]) * share)
+        monthly_maximum = money(D(capacity["maximum"]) * share)
+        current = max(
+            ZERO,
+            D(self.state.goal_balances.get(goal.name, goal.balance)),
+        )
+        target = goal.full_target_amount
+        remaining = None if target is None else max(ZERO, target - current)
+        months_left: Optional[int] = None
+        required_monthly: Optional[Decimal] = None
+        status = "no_target" if target is None else "no_deadline"
+
+        if target is not None and remaining <= ZERO:
+            status = "completed"
+        elif target is not None and goal.deadline:
+            try:
+                deadline = date.fromisoformat(goal.deadline)
+            except ValueError:
+                status = "invalid_deadline"
+            else:
+                raw_months = (
+                    (deadline.year - today.year) * 12
+                    + deadline.month - today.month
+                )
+                if deadline.day > today.day:
+                    raw_months += 1
+                months_left = max(0, raw_months)
+                if deadline < today or months_left == 0:
+                    status = "overdue"
+                else:
+                    required_monthly = money(D(remaining) / Decimal(months_left))
+                    if required_monthly <= monthly_minimum:
+                        status = "on_track"
+                    elif required_monthly <= monthly_maximum:
+                        status = "depends_on_income"
+                    else:
+                        status = "unreachable"
+
+        def estimated_months(monthly_amount: Decimal) -> Optional[int]:
+            if remaining is None or remaining <= ZERO:
+                return 0 if remaining is not None else None
+            if monthly_amount <= ZERO:
+                return None
+            return int(
+                (D(remaining) / monthly_amount).to_integral_value(
+                    rounding=ROUND_CEILING
+                )
+            )
+
+        return {
+            "name": goal.name,
+            "position_type": goal.position_type,
+            "percentage": goal.percentage,
+            "current": money(current),
+            "target": money(target) if target is not None else None,
+            "remaining": money(remaining) if remaining is not None else None,
+            "months_left": months_left,
+            "required_monthly": required_monthly,
+            "monthly_minimum": monthly_minimum,
+            "monthly_maximum": monthly_maximum,
+            "estimated_months_fast": estimated_months(monthly_maximum),
+            "estimated_months_conservative": estimated_months(monthly_minimum),
+            "status": status,
+            "tax_changes_range": bool(capacity["tax_changes_range"]),
         }
 
     def gift_goal_recommendation(self) -> Dict[str, Decimal | str | bool]:
@@ -2842,7 +3179,7 @@ class FinancialAllocator:
         if amount <= ZERO:
             return
 
-        goals = self.settings.goals
+        goals = self.settings.active_goals
 
         if not goals:
             allocations[
@@ -2856,23 +3193,10 @@ class FinancialAllocator:
             )
             return
 
-        distributed = ZERO
+        split = self.split_goal_amount(amount)
 
-        for index, goal in enumerate(goals):
-
-            if index == len(goals) - 1:
-                part = (
-                    amount
-                    - distributed
-                )
-            else:
-                part = (
-                    amount
-                    * goal.percentage
-                    / HUNDRED
-                )
-
-            distributed += part
+        for goal in goals:
+            part = split[goal.name]
 
             self.state.goal_balances[
                 goal.name
@@ -2893,6 +3217,24 @@ class FinancialAllocator:
                 )
                 + part
             )
+
+    def split_goal_amount(self, amount: Decimal) -> Dict[str, Decimal]:
+        """Делит сумму между активными позициями без потери копеек."""
+        amount = max(ZERO, D(amount))
+        goals = self.settings.active_goals
+        if not goals or amount <= ZERO:
+            return {}
+        result: Dict[str, Decimal] = {}
+        distributed = ZERO
+        for index, goal in enumerate(goals):
+            part = (
+                amount - distributed
+                if index == len(goals) - 1
+                else amount * goal.percentage / HUNDRED
+            )
+            result[goal.name] = result.get(goal.name, ZERO) + part
+            distributed += part
+        return result
 
     # ========================================================
     # ДОСРОЧНОЕ ПОГАШЕНИЕ

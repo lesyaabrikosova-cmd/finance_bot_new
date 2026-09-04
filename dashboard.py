@@ -903,8 +903,9 @@ async def send_balances(
                 Decimal("0"),
             )
 
+            goal_icon = "🪎" if goal.is_chest else "⭐️"
             lines.append(
-                f"⭐️ {escape(goal.name)}: "
+                f"{goal_icon} {escape(goal.name)}: "
                 f"<b>{rub(amount)}</b> "
                 f"({pct(amount, income)})"
             )

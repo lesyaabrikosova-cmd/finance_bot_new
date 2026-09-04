@@ -1486,12 +1486,12 @@ async def send_distribution_report(
             allocations.get(f"БР:{name}", ZERO),
         )
 
-    if settings.goals:
+    if settings.active_goals:
 
-        for goal in settings.goals:
+        for goal in settings.active_goals:
 
             add_distribution_line(
-                "⭐️",
+                "🪎" if goal.is_chest else "⭐️",
                 goal.name,
                 allocations.get(
                     f"Цели:{goal.name}",

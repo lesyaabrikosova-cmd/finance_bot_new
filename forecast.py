@@ -176,10 +176,14 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
             "При таком сценарии Аллокатору нечего направить в Фонд Зарплаты, Подушку и другие конверты.",
         ])
     lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>"])
+    goal_icons = {
+        goal.name: ("🪎 " if goal.is_chest else "⭐️ ")
+        for goal in source.settings.goals
+    }
     for name, amount in allocations.items():
         if Decimal(amount) > 0:
             label = name.replace("КЖ:", "").replace("Цели:", "")
-            icon = "⭐️ " if name.startswith("Цели:") else ""
+            icon = goal_icons.get(label, "⭐️ ") if name.startswith("Цели:") else ""
             lines.append(f"• {icon}{escape(label)} — {rub(Decimal(amount))}")
     if not any(Decimal(amount) > 0 for amount in allocations.values()):
         lines.append("• Нет свободной суммы для распределения")

@@ -410,6 +410,20 @@ class Database:
                 name TEXT NOT NULL,
                 percentage TEXT NOT NULL,
                 balance TEXT NOT NULL,
+                position_type TEXT NOT NULL DEFAULT 'goal',
+                order_index INTEGER NOT NULL DEFAULT 0,
+                is_auto_percentage INTEGER NOT NULL DEFAULT 0,
+                currency_code TEXT NOT NULL DEFAULT 'RUB',
+                target_amount TEXT,
+                deadline TEXT,
+                buffer_enabled INTEGER NOT NULL DEFAULT 0,
+                buffer_percent TEXT NOT NULL DEFAULT '0',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
+                updated_at TEXT,
+                completed_at TEXT,
+                archived_at TEXT,
+                previous_percentage TEXT,
 
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
@@ -689,6 +703,35 @@ class Database:
                 "ALTER TABLE settings ADD COLUMN use_contract_obligations_fund "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+
+        goal_columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(goals)").fetchall()
+        }
+        goal_migrations = {
+            # До разделения сущностей все старые позиции были бессрочными:
+            # у них не было конечной суммы и даты, то есть по новой модели
+            # они являются Сундуками.
+            "position_type": "TEXT NOT NULL DEFAULT 'chest'",
+            "order_index": "INTEGER NOT NULL DEFAULT 0",
+            "is_auto_percentage": "INTEGER NOT NULL DEFAULT 0",
+            "currency_code": "TEXT NOT NULL DEFAULT 'RUB'",
+            "target_amount": "TEXT",
+            "deadline": "TEXT",
+            "buffer_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "buffer_percent": "TEXT NOT NULL DEFAULT '0'",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+            "completed_at": "TEXT",
+            "archived_at": "TEXT",
+            "previous_percentage": "TEXT",
+        }
+        for column_name, column_sql in goal_migrations.items():
+            if column_name not in goal_columns:
+                cursor.execute(
+                    f"ALTER TABLE goals ADD COLUMN {column_name} {column_sql}"
+                )
 
         # ----------------------------------------------------
         # Индексы
@@ -1025,7 +1068,7 @@ class Database:
             (telegram_id,),
         )
 
-        for goal in settings.goals:
+        for order_index, goal in enumerate(settings.goals):
 
             cursor.execute(
                 """
@@ -1033,10 +1076,24 @@ class Database:
                     telegram_id,
                     name,
                     percentage,
-                    balance
+                    balance,
+                    position_type,
+                    order_index,
+                    is_auto_percentage,
+                    currency_code,
+                    target_amount,
+                    deadline,
+                    buffer_enabled,
+                    buffer_percent,
+                    status,
+                    created_at,
+                    updated_at,
+                    completed_at,
+                    archived_at,
+                    previous_percentage
                 )
 
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     telegram_id,
@@ -1049,6 +1106,26 @@ class Database:
 
                     decimal_to_string(
                         goal.balance
+                    ),
+                    goal.position_type,
+                    order_index,
+                    int(goal.is_auto_percentage),
+                    goal.currency_code,
+                    (
+                        decimal_to_string(goal.target_amount)
+                        if goal.target_amount is not None else None
+                    ),
+                    goal.deadline,
+                    int(goal.buffer_enabled),
+                    decimal_to_string(goal.buffer_percent),
+                    goal.status,
+                    goal.created_at,
+                    goal.updated_at,
+                    goal.completed_at,
+                    goal.archived_at,
+                    (
+                        decimal_to_string(goal.previous_percentage)
+                        if goal.previous_percentage is not None else None
                     ),
                 ),
             )
@@ -1164,7 +1241,7 @@ class Database:
             SELECT *
             FROM goals
             WHERE telegram_id = ?
-            ORDER BY id
+            ORDER BY order_index, id
             """,
             (telegram_id,),
         ).fetchall()
@@ -1186,6 +1263,26 @@ class Database:
                         string_to_decimal(
                             goal_row["balance"]
                         ),
+                    position_type=goal_row["position_type"],
+                    order_index=goal_row["order_index"],
+                    is_auto_percentage=bool(goal_row["is_auto_percentage"]),
+                    currency_code=goal_row["currency_code"],
+                    target_amount=(
+                        string_to_decimal(goal_row["target_amount"])
+                        if goal_row["target_amount"] is not None else None
+                    ),
+                    deadline=goal_row["deadline"],
+                    buffer_enabled=bool(goal_row["buffer_enabled"]),
+                    buffer_percent=string_to_decimal(goal_row["buffer_percent"]),
+                    status=goal_row["status"],
+                    created_at=goal_row["created_at"],
+                    updated_at=goal_row["updated_at"],
+                    completed_at=goal_row["completed_at"],
+                    archived_at=goal_row["archived_at"],
+                    previous_percentage=(
+                        string_to_decimal(goal_row["previous_percentage"])
+                        if goal_row["previous_percentage"] is not None else None
+                    ),
                 )
             )
 

@@ -69,6 +69,7 @@ from dashboard import (
 
 from taxes import router as taxes_router
 from debts import router as debts_router
+from goals_manager import router as goals_manager_router
 from health_server import start_health_server
 
 from ui import (
@@ -832,6 +833,7 @@ async def main():
 
     dp.include_router(taxes_router)
     dp.include_router(debts_router)
+    dp.include_router(goals_manager_router)
 
     # Новый расчётный период
     dp.include_router(

@@ -43,12 +43,14 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         return keyboard([
             [("Начать первый период сейчас", "periodsetup:today")],
             [("Выбрать дату начала", "periodsetup:date")],
+            [("Цели и Сундуки", "goals:manage")],
             [("Режим", "menu:state"), ("Настройки", "settings:open")],
         ])
 
     rows = [
         [("Новый доход", "menu:income")],
         [("Балансы", "menu:analytics"), ("Анализ доходов", "menu:income_analysis")],
+        [("Цели и Сундуки", "goals:manage")],
         [("Режим", "menu:state"), ("Настройки", "settings:open")],
         [("Налоги", "menu:taxes")],
     ]

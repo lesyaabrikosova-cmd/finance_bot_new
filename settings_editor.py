@@ -91,7 +91,10 @@ async def show_settings_menu(message: Message, telegram_id: int):
         else "🛠 Включить режим разработчика"
     )
 
-    goals = ", ".join(f"{g.name} {g.percentage}%" for g in s.goals) if s.goals else "без отдельных категорий"
+    goals = ", ".join(
+        f"{'🪎' if g.is_chest else '⭐️'} {g.name} {g.percentage}%"
+        for g in s.goals
+    ) if s.goals else "без отдельных категорий"
     categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"
     rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Цикличный (контрактный)"}
 
@@ -125,7 +128,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         +
         f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"
-        f"⭐️ Цели: {escape(goals)}\n\n"
+        f"Цели и Сундуки: {escape(goals)}\n\n"
         f"Распределение этапа C: ⭐️ цели {s.goals_share_c}% / 🛡️ подушка {s.pillow_share_c}%",
         reply_markup=keyboard([
             [("🛡️ Изменить Подушку", "settings:pillow")],
@@ -146,7 +149,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("Типы доходов", "settings:income_types")],
             [("Плановые платежи", "settings:planned")],
             [("❤️ Категории КЖ", "settings:life_categories")],
-            [("⭐️ Проценты целей", "settings:goals")],
+            [("Цели и Сундуки", "goals:manage")],
             [(dev_button, "settings:developer")],
             [("🗑 Полный сброс учёта", "settings:full_reset")],
             [("🔄 Пройти настройку заново", "setup:restart")],

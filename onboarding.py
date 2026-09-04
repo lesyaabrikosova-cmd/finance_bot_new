@@ -26,6 +26,10 @@ from financial_engine import (
     Goal,
     PhaseLifeBudget,
     UserSettings,
+    VACATION_BUDGET_ITEMS,
+    goal_percentage_bounds,
+    sequential_goal_percentages,
+    vacation_budget,
 )
 from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
 
@@ -152,6 +156,13 @@ class SetupStates(StatesGroup):
     goals_menu = State()
     goal_name = State()
     goal_percentage = State()
+    goal_target_amount = State()
+    goal_current_amount = State()
+    goal_deadline = State()
+    goal_buffer_percent = State()
+    goal_percentages_review = State()
+    goal_vacation_item = State()
+    goal_vacation_review = State()
 
     # Кредиты
     debt_strategy = State()
@@ -6664,11 +6675,23 @@ def build_settings_from_data(
             percentage=Decimal(
                 item["percentage"]
             ),
+            position_type=item.get("position_type", "goal"),
+            order_index=index,
+            is_auto_percentage=bool(item.get("is_auto_percentage", False)),
+            currency_code=item.get("currency_code", "RUB"),
+            target_amount=(
+                Decimal(str(item["target_amount"]))
+                if item.get("target_amount") not in {None, ""} else None
+            ),
+            balance=Decimal(str(item.get("balance", "0"))),
+            deadline=item.get("deadline"),
+            buffer_enabled=bool(item.get("buffer_enabled", False)),
+            buffer_percent=Decimal(str(item.get("buffer_percent", "0"))),
         )
-        for item in data.get(
+        for index, item in enumerate(data.get(
             "goals",
             []
-        )
+        ))
     ]
 
     credits = []
@@ -6970,10 +6993,11 @@ def build_state_from_data(
 
 
 GOAL_SUGGESTIONS = (
-    "Отпуск",
-    "Замена техники",
-    "Образование",
-    "Дом и ремонт",
+    {"name": "Отпуск", "position_type": "goal"},
+    {"name": "Замена техники", "position_type": "chest"},
+    {"name": "Хотелки", "position_type": "chest"},
+    {"name": "Образование", "position_type": "goal"},
+    {"name": "Дом и ремонт", "position_type": "goal"},
 )
 
 
@@ -6988,7 +7012,9 @@ def goals_available_in_onboarding(allocator: FinancialAllocator) -> bool:
 
 
 def normalized_onboarding_goals(drafts: list[dict]) -> list[dict]:
-    """Переводит понятные суммы в месяц в доли целевого потока ровно на 100%."""
+    """Совместимость со старым мастером, который собирал суммы в месяц."""
+    if drafts and all("percentage" in item for item in drafts):
+        return [dict(item) for item in drafts]
     positive = [
         {
             "name": str(item["name"]).strip(),
@@ -7030,127 +7056,136 @@ async def maybe_start_goals_onboarding(message: Message, state: FSMContext):
         await state.update_data(onboarding_goals_completed=True, goals=[])
         await show_confirmation(message, state)
         return
-    await state.update_data(goal_drafts=[])
-    recommendation = allocator.gift_goal_recommendation()
-    if Decimal(str(recommendation.get("historical_monthly", "0"))) > 0:
-        await show_gift_goal_offer(message, state, allocator)
-        return
+    await state.update_data(
+        goal_drafts=[],
+        goal_percentages=[],
+        pending_goal=None,
+    )
     await show_goals_menu(message, state)
 
 
-async def show_gift_goal_offer(
-    message: Message,
-    state: FSMContext,
-    allocator: FinancialAllocator | None = None,
-):
-    if allocator is None:
-        data = await state.get_data()
-        settings = build_settings_from_data(data)
-        allocator = FinancialAllocator(
-            settings=settings,
-            state=build_state_from_data(data, settings),
+def goal_icon(item: dict) -> str:
+    return "🪎" if item.get("position_type") == "chest" else "⭐️"
+
+
+def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
+    if not drafts:
+        return "<b>Пока список пуст.</b>"
+    lines = []
+    for item in drafts:
+        suffix = ""
+        if percentages and item.get("percentage") is not None:
+            suffix = f" — <b>{item['percentage']}%</b>"
+        lines.append(
+            f"• {goal_icon(item)} <b>{escape(str(item['name']))}</b>{suffix}"
         )
-    recommendation = allocator.gift_goal_recommendation()
-    history = Decimal(str(recommendation.get("historical_monthly", "0")))
-    monthly = Decimal(str(recommendation.get("recommended_monthly", "0")))
-    await state.set_state(SetupStates.goals_menu)
-    await state.update_data(gift_recommended_monthly=str(monthly))
-    await message.answer(
-        "<b><u>⭐️ ЦЕЛЬ «ПОДАРКИ»</u></b>\n\n"
-        f"Раньше на подарки уходило в среднем <b>{rub(history)}</b> в месяц. "
-        "Подарки не входят в стоимость жизни: их разумнее планировать отдельной целью "
-        "после Критического Минимума и Бытового Резерва.\n\n"
-        f"С учётом вашего дохода и доступной суммы на цели рекомендую начать с "
-        f"<b>{rub(monthly)}</b> в месяц. Обычный ориентир — <b>3–7% дохода</b>; "
-        "выше 10% стоит выбирать осознанно.",
-        reply_markup=keyboard([
-            [("✔️ Добавить рекомендованную сумму", "goals:gift:accept")],
-            [("Указать другую сумму", "goals:gift:custom")],
-            [("Не добавлять", "goals:gift:skip")],
-        ]),
-    )
+    return "\n".join(lines)
+
+
+def onboarding_goal_allocator(
+    data: dict,
+    goals: list[dict] | None = None,
+) -> FinancialAllocator:
+    settings = build_settings_from_data({**data, "goals": goals or []})
+    return FinancialAllocator(settings, build_state_from_data(data, settings))
+
+
+def goals_capacity_text(data: dict) -> str:
+    capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
+    minimum = Decimal(str(capacity["minimum"]))
+    maximum = Decimal(str(capacity["maximum"]))
+    if minimum == maximum:
+        return f"<b>≈ {rub(maximum)} в месяц</b>"
+    return f"<b>≈ {rub(minimum)}–{rub(maximum)} в месяц</b>"
 
 
 async def show_goals_menu(message: Message, state: FSMContext):
     data = await state.get_data()
     drafts = data.get("goal_drafts", [])
-    selected = {str(item.get("name")) for item in drafts}
-    summary = ""
-    if drafts:
-        summary = "\n\n<b>УЖЕ ДОБАВЛЕНО:</b>\n" + "\n".join(
-            f"• ⭐️ <b>{escape(str(item['name']))}</b> — {rub(Decimal(str(item['monthly'])))} / мес."
-            for item in drafts
-        )
+    selected = {str(item.get("name", "")).casefold() for item in drafts}
     rows: list[list[tuple[str, str]]] = []
+    can_add = len(drafts) < 10
     if (
+        can_add
+        and
         Decimal(str(data.get("historical_gifts_monthly", "0"))) > 0
-        and "Подарки" not in selected
+        and "подарки" not in selected
     ):
-        rows.append([("⭐️ Подарки", "goals:gift:offer")])
-    for index, name in enumerate(GOAL_SUGGESTIONS):
-        if name not in selected:
-            rows.append([(f"⭐️ {name}", f"goals:suggest:{index}")])
+        rows.append([("🪎 Подарки", "goals:gift:offer")])
+    for index, suggestion in enumerate(GOAL_SUGGESTIONS):
+        if can_add and suggestion["name"].casefold() not in selected:
+            rows.append([(
+                f"{goal_icon(suggestion)} {suggestion['name']}",
+                f"goals:suggest:{index}",
+            )])
     for index, item in enumerate(drafts):
         rows.append([(
-            f"✖️ Убрать: {str(item.get('name', 'цель'))}",
+            f"✖️ Убрать: {str(item.get('name', 'позицию'))}",
             f"goals:remove:{index}",
         )])
-    rows.extend([
-        [("+ Своя цель", "goals:custom")],
-        [("✔️ Готово", "goals:done")],
-    ])
+    if can_add:
+        rows.append([("+ Добавить свою", "goals:custom")])
+    rows.append([("✔️ Готово", "goals:done")])
+    if not drafts:
+        rows.append([("Мне пока не нужны цели", "goals:none:info")])
     await state.set_state(SetupStates.goals_menu)
     await message.answer(
         "<b><u>ФИНАНСОВЫЕ ЦЕЛИ</u></b>\n\n"
-        "Цели уже доступны вашему предварительному режиму. Выберите то, на что хотите "
-        "откладывать после финансирования Критического Минимума и Бытового Резерва.\n\n"
-        "Для каждой цели укажите желаемую сумму в месяц — Аллокатор сам рассчитает доли."
-        f"{summary}",
+        "Теперь о приятном — <b>на что вы хотите накопить?</b>\n\n"
+        "Сначала Аллокатор обеспечивает Критический Минимум, Бытовой Резерв и "
+        "финансовую защиту. И только потом направляет деньги на желания и большие планы.\n\n"
+        "С вашим средним доходом на цели может уходить примерно:\n\n"
+        f"{goals_capacity_text(data)}\n\n"
+        "Получили <b>Сверхдоход</b> — на цели может поступить больше. А если сейчас "
+        "важнее укрепить финансовые резервы, сумма временно уменьшится.\n\n"
+        "Так отпуск, новая машина или дорогой парфюм не конкурируют с квартплатой, "
+        "здоровьем и финансовой безопасностью.\n\n"
+        f"{goal_draft_summary(drafts)}\n\n"
+        "Нажмите на вариант ниже — сначала расскажу, что к нему относится. "
+        "Ничего не добавится без вашего подтверждения.",
         reply_markup=keyboard(rows),
     )
 
 
-async def add_goal_draft(state: FSMContext, name: str, monthly: Decimal):
+async def add_goal_draft(state: FSMContext, item: dict):
     data = await state.get_data()
-    drafts = [
-        item for item in data.get("goal_drafts", [])
-        if str(item.get("name", "")).casefold() != name.casefold()
-    ]
-    drafts.append({"name": name, "monthly": str(monthly)})
+    drafts = list(data.get("goal_drafts", []))
+    if any(
+        str(draft.get("name", "")).casefold() == str(item["name"]).casefold()
+        for draft in drafts
+    ):
+        raise ValueError("Позиция с таким названием уже есть в списке.")
+    if len(drafts) >= 10:
+        raise ValueError("Одновременно можно настроить не больше 10 Целей и Сундуков.")
+    drafts.append(item)
     await state.update_data(goal_drafts=drafts)
-
-
-@router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:accept")
-async def accept_gift_goal(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = await state.get_data()
-    monthly = Decimal(str(data.get("gift_recommended_monthly", "0")))
-    if monthly > 0:
-        await add_goal_draft(state, "Подарки", monthly)
-    await show_goals_menu(callback.message, state)
-
-
-@router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:custom")
-async def custom_gift_goal(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.update_data(pending_goal_name="Подарки")
-    await state.set_state(SetupStates.goal_percentage)
-    await callback.message.answer(
-        "<b>СКОЛЬКО ОТКЛАДЫВАТЬ НА ПОДАРКИ?</b>\n\n"
-        "——————\n<b>→ Введите сумму в месяц.</b>"
-    )
-
-
-@router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:skip")
-async def skip_gift_goal(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await show_goals_menu(callback.message, state)
 
 
 @router.callback_query(SetupStates.goals_menu, F.data == "goals:gift:offer")
 async def reopen_gift_goal(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await show_gift_goal_offer(callback.message, state)
+    data = await state.get_data()
+    history = Decimal(str(data.get("historical_gifts_monthly", "0")))
+    recommendation = onboarding_goal_allocator(data).gift_goal_recommendation()
+    goals_share = Decimal(str(recommendation.get("goals_share", "0")))
+    suggested = max(Decimal("1"), min(Decimal("10"), goals_share.quantize(Decimal("1"))))
+    await state.update_data(pending_goal={
+        "name": "Подарки",
+        "position_type": "chest",
+        "suggested_percentage": str(suggested),
+    })
+    await callback.message.answer(
+        "<b>🪎 СУНДУК ПОДАРКОВ</b>\n\n"
+        f"Раньше на подарки уходило в среднем <b>{rub(history)}</b> в месяц. "
+        "Подарки не входят в стоимость жизни: их разумнее оплачивать из отдельного "
+        "Сундука, когда Критический Минимум и Бытовой Резерв уже обеспечены.\n\n"
+        "Обычный ориентир — <b>3–7% денег, выделенных на цели</b>. До 10% можно "
+        "выбрать, если подарки для вас особенно важны.",
+        reply_markup=keyboard([
+            [("+ Добавить Сундук", "goals:add:pending")],
+            [("← Назад", "goals:cancel-add"), ("✖️ Отмена", "goals:cancel-add")],
+        ]),
+    )
 
 
 @router.callback_query(SetupStates.goals_menu, F.data.startswith("goals:remove:"))
@@ -7171,27 +7206,194 @@ async def remove_goal_draft(callback: CallbackQuery, state: FSMContext):
 async def choose_suggested_goal(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        name = GOAL_SUGGESTIONS[int(callback.data.rsplit(":", 1)[1])]
+        suggestion = dict(GOAL_SUGGESTIONS[int(callback.data.rsplit(":", 1)[1])])
     except (ValueError, IndexError):
         await callback.message.answer("Не удалось определить цель. Выберите её ещё раз.")
         return
-    await state.update_data(pending_goal_name=name)
-    await state.set_state(SetupStates.goal_percentage)
+    await state.update_data(pending_goal=suggestion)
+    await show_goal_suggestion(callback.message, suggestion, (await state.get_data()).get("income_rhythm"))
+
+
+async def show_goal_suggestion(message: Message, suggestion: dict, profile: str | None):
+    name = suggestion["name"]
+    if name == "Замена техники":
+        text = (
+            "<b>🪎 ЗАМЕНА ТЕХНИКИ</b>\n\n"
+            "Телефон, ноутбук или стиральная машина обычно не предупреждают: "
+            "<b>«Через месяц я сломаюсь, начинай копить».</b>\n\n"
+            "Но мы знаем, что любая техника рано или поздно потребует замены. Поэтому "
+            "лучше готовиться заранее, а не искать деньги в день поломки.\n\n"
+            "Компании называют это <b>амортизацией</b> — постепенно откладывают деньги "
+            "на будущую замену оборудования. В личных финансах работает тот же принцип.\n\n"
+            "<b>Так очередная поломка останется просто поломкой, а не поводом брать кредит.</b>"
+        )
+    elif name == "Отпуск":
+        if profile == "irregular":
+            profile_note = (
+                "При сдельной работе отпуск означает и паузу в заработке. Обычную жизнь "
+                "в это время защищает Стабилизатор дохода, а сам отдых оплачивает отдельная Цель."
+            )
+        elif profile == "cyclic":
+            profile_note = (
+                "Фонд Зарплаты оплачивает обычную жизнь в плановом перерыве между рабочими частями. "
+                "Но поездка, билеты и развлечения в него не входят — на сам отдых нужна отдельная Цель."
+            )
+        else:
+            profile_note = (
+                "Отпускные не являются дополнительными деньгами на поездку: обычно они заменяют "
+                "зарплату за дни отдыха. Поэтому сам отпуск лучше оплатить заранее из отдельной Цели."
+            )
+        text = (
+            "<b>⭐️ ОТПУСК</b>\n\n"
+            f"{profile_note}\n\n"
+            "В бюджет обычно входят билеты, проживание, еда, транспорт, развлечения, "
+            "страховка, связь и покупки. К общей сумме разумно добавить <b>10% запаса</b>.\n\n"
+            "После добавления Аллокатор попросит указать сумму и срок и проверит, "
+            "реалистичен ли ваш план."
+        )
+    else:
+        icon = goal_icon(suggestion)
+        text = (
+            f"<b>{icon} {escape(name.upper())}</b>\n\n"
+            + (
+                "Это постоянный запас, который можно регулярно пополнять и периодически использовать. У него нет конечной суммы и даты завершения."
+                if suggestion["position_type"] == "chest"
+                else "Это конечная Цель: вы зададите нужную сумму и при желании срок. Аллокатор проверит темп накопления."
+            )
+        )
+    noun = "Сундук" if suggestion["position_type"] == "chest" else "Цель"
+    action_rows = []
+    if name == "Отпуск":
+        action_rows.append([("Рассчитать отпуск", "goals:vacation:start")])
+        action_rows.append([("Ввести общую сумму", "goals:add:pending")])
+    else:
+        action_rows.append([(f"+ Добавить {noun}", "goals:add:pending")])
+    action_rows.append([("← Назад", "goals:cancel-add"), ("✖️ Отмена", "goals:cancel-add")])
+    await message.answer(
+        text,
+        reply_markup=keyboard(action_rows),
+    )
+
+
+@router.callback_query(F.data == "goals:vacation:start")
+async def start_onboarding_vacation(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.goal_vacation_item)
+    await state.update_data(vacation_index=0, vacation_amounts={})
     await callback.message.answer(
-        f"<b>⭐️ {escape(name.upper())}</b>\n\n"
-        "Какую сумму вы хотите направлять на эту цель в среднем за месяц?\n\n"
-        "——————\n<b>→ Введите сумму.</b>"
+        "<b>⭐️ КАЛЬКУЛЯТОР ОТПУСКА</b>\n\n"
+        "Посчитаем поездку по частям. Если статья не нужна или уже оплачена — отправьте <b>0</b>."
+    )
+    await ask_onboarding_vacation_item(callback.message, state)
+
+
+async def ask_onboarding_vacation_item(message: Message, state: FSMContext):
+    data = await state.get_data()
+    index = int(data.get("vacation_index", 0))
+    if index >= len(VACATION_BUDGET_ITEMS):
+        await show_onboarding_vacation_review(message, state)
+        return
+    _, label = VACATION_BUDGET_ITEMS[index]
+    await state.set_state(SetupStates.goal_vacation_item)
+    await message.answer(
+        f"<b>{escape(label.upper())}</b>\n\n"
+        "——————\n<b>→ Введите предполагаемую сумму.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
+    )
+
+
+@router.message(SetupStates.goal_vacation_item)
+async def save_onboarding_vacation_item(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 0:
+        await message.answer("Введите сумму от 0 и выше.")
+        return
+    data = await state.get_data()
+    index = int(data.get("vacation_index", 0))
+    amounts = dict(data.get("vacation_amounts", {}))
+    key, _ = VACATION_BUDGET_ITEMS[index]
+    amounts[key] = str(value)
+    await state.update_data(vacation_index=index + 1, vacation_amounts=amounts)
+    await ask_onboarding_vacation_item(message, state)
+
+
+async def show_onboarding_vacation_review(message: Message, state: FSMContext):
+    data = await state.get_data()
+    amounts = {key: Decimal(value) for key, value in data.get("vacation_amounts", {}).items()}
+    result = vacation_budget(amounts)
+    if result["subtotal"] <= 0:
+        await message.answer("Бюджет получился нулевым. Начнём расчёт ещё раз.")
+        await state.update_data(vacation_index=0, vacation_amounts={})
+        await ask_onboarding_vacation_item(message, state)
+        return
+    lines = [
+        f"• {label} — <b>{rub(result.get(key, 0))}</b>"
+        for key, label in VACATION_BUDGET_ITEMS
+        if result.get(key, Decimal("0")) > 0
+    ]
+    await state.set_state(SetupStates.goal_vacation_review)
+    await message.answer(
+        "<b>⭐️ БЮДЖЕТ ОТПУСКА</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\nРасходы — <b>{rub(result['subtotal'])}</b>"
+        + f"\nЗапас 10% — <b>{rub(result['buffer'])}</b>"
+        + f"\nВаша Цель — <b>{rub(result['total'])}</b>",
+        reply_markup=keyboard([
+            [("✔️ Использовать расчёт", "goals:vacation:confirm")],
+            [("Посчитать заново", "goals:vacation:start")],
+            [("✖️ Отмена", "goals:cancel-add")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.goal_vacation_review, F.data == "goals:vacation:confirm")
+async def confirm_onboarding_vacation(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    amounts = {key: Decimal(value) for key, value in data.get("vacation_amounts", {}).items()}
+    result = vacation_budget(amounts)
+    pending = dict(data.get("pending_goal") or {"name": "Отпуск", "position_type": "goal"})
+    pending["target_amount"] = str(result["subtotal"])
+    pending["currency_code"] = "RUB"
+    pending["buffer_enabled"] = True
+    pending["buffer_percent"] = "10"
+    await state.update_data(pending_goal=pending)
+    await state.set_state(SetupStates.goal_current_amount)
+    await callback.message.answer(
+        "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО НА ОТПУСК?</b>\n\n"
+        "Если пока ничего нет — отправьте <b>0</b>.\n"
+        "——————\n<b>→ Введите сумму.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
     )
 
 
 @router.callback_query(SetupStates.goals_menu, F.data == "goals:custom")
 async def start_custom_goal(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await state.set_state(SetupStates.goal_name)
     await callback.message.answer(
-        "<b>КАК НАЗЫВАЕТСЯ ЦЕЛЬ?</b>\n\n"
-        "Например: Переезд, Обучение или Свадьба.\n\n"
-        "——————\n<b>→ Введите название.</b>"
+        "<b>ЧТО ВЫ ХОТИТЕ ДОБАВИТЬ?</b>\n\n"
+        "⭐️ <b>Цель</b> — накопить конкретную сумму и закончить. Например, парфюм, "
+        "путёвка или автомобиль.\n\n"
+        "🪎 <b>Сундук</b> — регулярно пополнять и иногда пользоваться. Например, "
+        "Хотелки, Подарки или Замена техники.",
+        reply_markup=keyboard([
+            [("⭐️ Цель", "goals:type:goal"), ("🪎 Сундук", "goals:type:chest")],
+            [("✖️ Отмена", "goals:cancel-add")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.goals_menu, F.data.startswith("goals:type:"))
+async def choose_custom_goal_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    position_type = callback.data.rsplit(":", 1)[1]
+    await state.update_data(pending_goal={"position_type": position_type})
+    await state.set_state(SetupStates.goal_name)
+    noun = "ЦЕЛЬ" if position_type == "goal" else "СУНДУК"
+    await callback.message.answer(
+        f"<b>КАК НАЗЫВАЕТСЯ {noun}?</b>\n\n"
+        "——————\n<b>→ Введите название.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
     )
 
 
@@ -7201,38 +7403,372 @@ async def save_custom_goal_name(message: Message, state: FSMContext):
     if not name or len(name) > 60:
         await message.answer("Введите название цели длиной до 60 символов.")
         return
-    await state.update_data(pending_goal_name=name)
-    await state.set_state(SetupStates.goal_percentage)
+    data = await state.get_data()
+    pending = dict(data.get("pending_goal") or {})
+    pending["name"] = name
+    if any(
+        str(item.get("name", "")).casefold() == name.casefold()
+        for item in data.get("goal_drafts", [])
+    ):
+        await message.answer("Позиция с таким названием уже есть. Введите другое название.")
+        return
+    await state.update_data(pending_goal=pending)
+    if pending.get("position_type") == "chest":
+        try:
+            await add_goal_draft(state, pending)
+        except ValueError as error:
+            await message.answer(str(error))
+            return
+        await state.update_data(pending_goal=None)
+        await show_goals_menu(message, state)
+        return
+    await ask_goal_target(message, state, pending)
+
+
+@router.callback_query(F.data == "goals:add:pending")
+async def confirm_pending_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    pending = dict(data.get("pending_goal") or {})
+    if not pending.get("name"):
+        await show_goals_menu(callback.message, state)
+        return
+    if pending.get("position_type") == "chest":
+        try:
+            await add_goal_draft(state, pending)
+        except ValueError as error:
+            await callback.message.answer(str(error))
+        await state.update_data(pending_goal=None)
+        await show_goals_menu(callback.message, state)
+        return
+    await ask_goal_target(callback.message, state, pending)
+
+
+async def ask_goal_target(message: Message, state: FSMContext, pending: dict):
+    await state.set_state(SetupStates.goal_target_amount)
     await message.answer(
-        f"<b>⭐️ {escape(name.upper())}</b>\n\n"
-        "Какую сумму вы хотите направлять на эту цель в среднем за месяц?\n\n"
-        "——————\n<b>→ Введите сумму.</b>"
+        f"<b>⭐️ {escape(str(pending['name']).upper())}</b>\n\n"
+        "Сколько нужно накопить?\n\n"
+        "——————\n<b>→ Введите конечную сумму.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
     )
 
 
-@router.message(SetupStates.goal_percentage)
-async def save_goal_monthly_amount(message: Message, state: FSMContext):
-    monthly = parse_decimal(message.text)
-    if monthly is None or monthly <= 0:
+@router.message(SetupStates.goal_target_amount)
+async def save_goal_target_amount(message: Message, state: FSMContext):
+    target = parse_decimal(message.text)
+    if target is None or target <= 0:
         await message.answer("Введите сумму больше 0.")
         return
     data = await state.get_data()
-    name = str(data.get("pending_goal_name", "")).strip()
-    if not name:
+    pending = dict(data.get("pending_goal") or {})
+    if not pending.get("name"):
         await show_goals_menu(message, state)
         return
-    await add_goal_draft(state, name, monthly)
-    await state.update_data(pending_goal_name=None)
+    pending["target_amount"] = str(target)
+    pending["currency_code"] = "RUB"
+    await state.update_data(pending_goal=pending)
+    await state.set_state(SetupStates.goal_current_amount)
+    await message.answer(
+        "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО НА ЭТУ ЦЕЛЬ?</b>\n\n"
+        "Укажите только стартовую сумму. Дальше Аллокатор будет учитывать свои "
+        "распределения автоматически — постоянно сверять банковские проценты не нужно.\n\n"
+        "Если пока ничего нет — отправьте <b>0</b>.\n"
+        "——————\n<b>→ Введите сумму.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
+    )
+
+
+@router.message(SetupStates.goal_current_amount)
+async def save_goal_current_amount(message: Message, state: FSMContext):
+    current = parse_decimal(message.text)
+    if current is None or current < 0:
+        await message.answer("Введите сумму от 0 и выше.")
+        return
+    data = await state.get_data()
+    pending = dict(data.get("pending_goal") or {})
+    pending["balance"] = str(current)
+    await state.update_data(pending_goal=pending)
+    await state.set_state(SetupStates.goal_deadline)
+    await message.answer(
+        "<b>ЕСТЬ ЛИ СРОК?</b>\n\n"
+        "Дата необязательна. Если она есть, Аллокатор проверит, успеваете ли вы "
+        "накопить нужную сумму.",
+        reply_markup=keyboard([
+            [("Указать дату", "goals:deadline:yes"), ("Без срока", "goals:deadline:no")],
+            [("✖️ Отмена", "goals:cancel-add")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.goal_deadline, F.data.startswith("goals:deadline:"))
+async def choose_goal_deadline(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if callback.data.endswith(":yes"):
+        await callback.message.answer(
+            "<b>К КАКОЙ ДАТЕ НУЖНЫ ДЕНЬГИ?</b>\n\n"
+            "——————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
+            reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
+        )
+        return
+    await ask_goal_buffer(callback.message, state)
+
+
+@router.message(SetupStates.goal_deadline)
+async def save_goal_deadline(message: Message, state: FSMContext):
+    deadline = parse_date_input(message.text)
+    if deadline is None or deadline <= date.today():
+        await message.answer("Введите будущую дату в формате ДД.ММ.ГГГГ.")
+        return
+    data = await state.get_data()
+    pending = dict(data.get("pending_goal") or {})
+    pending["deadline"] = deadline.isoformat()
+    await state.update_data(pending_goal=pending)
+    await ask_goal_buffer(message, state)
+
+
+async def ask_goal_buffer(message: Message, state: FSMContext):
+    await state.set_state(SetupStates.goal_buffer_percent)
+    await message.answer(
+        "<b>ДОБАВИТЬ ФИНАНСОВЫЙ ЗАПАС?</b>\n\n"
+        "Для цен, билетов и других непредвиденных расходов разумно добавить 10%.",
+        reply_markup=keyboard([
+            [("✔️ 10%", "goals:buffer:10"), ("Без запаса", "goals:buffer:0")],
+            [("Свой процент", "goals:buffer:custom")],
+            [("✖️ Отмена", "goals:cancel-add")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.goal_buffer_percent, F.data.startswith("goals:buffer:"))
+async def choose_goal_buffer(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.rsplit(":", 1)[1]
+    if value == "custom":
+        await callback.message.answer(
+            "——————\n<b>→ Введите запас от 1 до 50%.</b>",
+            reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
+        )
+        return
+    await finish_pending_goal(callback.message, state, Decimal(value))
+
+
+@router.message(SetupStates.goal_buffer_percent)
+async def save_custom_goal_buffer(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value != value.to_integral_value() or not 1 <= value <= 50:
+        await message.answer("Введите целое число от 1 до 50.")
+        return
+    await finish_pending_goal(message, state, value)
+
+
+async def finish_pending_goal(message: Message, state: FSMContext, buffer: Decimal):
+    data = await state.get_data()
+    pending = dict(data.get("pending_goal") or {})
+    pending["buffer_enabled"] = buffer > 0
+    pending["buffer_percent"] = str(buffer)
+    try:
+        await add_goal_draft(state, pending)
+    except ValueError as error:
+        await message.answer(str(error))
+    await state.update_data(pending_goal=None)
     await show_goals_menu(message, state)
+
+
+@router.callback_query(F.data == "goals:cancel-add")
+async def cancel_pending_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(pending_goal=None)
+    await show_goals_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:none:info")
+async def explain_why_goals_matter(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer(
+        "<b>ЗАЧЕМ НУЖНЫ ЦЕЛИ И СУНДУКИ</b>\n\n"
+        "Финансовая цель — это не обязательно квартира или дорогая машина. "
+        "Отпуск, подарки и будущая замена телефона тоже требуют денег.\n\n"
+        "Если не готовиться заранее, такие расходы конкурируют с обычной жизнью или "
+        "превращаются в долг. Даже небольшая постоянная доля делает бюджет спокойнее.\n\n"
+        "Вы можете продолжить без целей и настроить их позже в Главном меню или Настройках.",
+        reply_markup=keyboard([
+            [("← Вернуться к списку", "goals:cancel-add")],
+            [("Продолжить без целей", "goals:none:confirm")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:none:confirm")
+async def finish_without_goals(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(goals=[], onboarding_goals_completed=True)
+    await show_confirmation(callback.message, state)
 
 
 @router.callback_query(SetupStates.goals_menu, F.data == "goals:done")
 async def finish_goals_onboarding(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    drafts = list(data.get("goal_drafts", []))
+    if not drafts:
+        await explain_why_goals_matter(callback, state)
+        return
+    await callback.answer()
+    for item in drafts:
+        item.pop("percentage", None)
+        item.pop("is_auto_percentage", None)
+    await state.update_data(goal_percentages=[])
+    await state.update_data(goal_drafts=drafts)
+    await ask_next_goal_percentage(callback.message, state)
+
+
+async def ask_next_goal_percentage(message: Message, state: FSMContext):
+    data = await state.get_data()
+    drafts = list(data.get("goal_drafts", []))
+    chosen = [Decimal(str(value)) for value in data.get("goal_percentages", [])]
+    index = len(chosen)
+    if index >= len(drafts) - 1:
+        percentages = sequential_goal_percentages(chosen, len(drafts))
+        for position, percentage in zip(drafts, percentages):
+            position["percentage"] = str(percentage)
+            position["is_auto_percentage"] = False
+        drafts[-1]["is_auto_percentage"] = True
+        await state.update_data(goal_drafts=drafts, goals=drafts)
+        await show_goal_percentages_review(message, state)
+        return
+
+    minimum, maximum = goal_percentage_bounds(chosen, len(drafts) - index - 1)
+    capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
+    recommendation = ""
+    if drafts[index].get("suggested_percentage"):
+        recommendation = (
+            f"\nС учётом ваших прошлых расходов ориентир для этой позиции — "
+            f"<b>{drafts[index]['suggested_percentage']}%</b>."
+        )
+    await state.set_state(SetupStates.goal_percentage)
+    await message.answer(
+        "<b><u>КАК РАСПРЕДЕЛИТЬ ДЕНЬГИ МЕЖДУ ЦЕЛЯМИ?</u></b>\n\n"
+        "Каждый месяц Аллокатор сначала определит, сколько денег вообще можно "
+        "направить на Цели. Вы выбираете долю каждой позиции именно от этой суммы, "
+        "а не от всей зарплаты.\n\n"
+        f"{goal_draft_summary(drafts, percentages=True)}\n\n"
+        f"Сейчас настройте: {goal_icon(drafts[index])} <b>{escape(str(drafts[index]['name']))}</b>.\n"
+        f"Можно выбрать целое число от <b>{minimum}%</b> до <b>{maximum}%</b>. "
+        f"Для остальных позиций уже сохранено минимум по 1%.{recommendation}\n\n"
+        f"Общий поток на цели сейчас оценивается как <b>≈ {rub(capacity['minimum'])}–{rub(capacity['maximum'])} в месяц</b>.\n"
+        "——————\n<b>→ Введите процент.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "goals:percent:cancel")]]),
+    )
+
+
+@router.message(SetupStates.goal_percentage)
+async def save_goal_percentage(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    data = await state.get_data()
+    chosen = [Decimal(str(item)) for item in data.get("goal_percentages", [])]
+    drafts = list(data.get("goal_drafts", []))
+    index = len(chosen)
+    minimum, maximum = goal_percentage_bounds(chosen, len(drafts) - index - 1)
+    if (
+        value is None
+        or value != value.to_integral_value()
+        or not minimum <= value <= maximum
+    ):
+        await message.answer(f"Введите целое число от {minimum} до {maximum}.")
+        return
+    chosen.append(value)
+    drafts[index]["percentage"] = str(value)
+    await state.update_data(goal_percentages=[str(item) for item in chosen], goal_drafts=drafts)
+    await ask_next_goal_percentage(message, state)
+
+
+async def show_goal_percentages_review(message: Message, state: FSMContext):
+    data = await state.get_data()
+    drafts = list(data.get("goal_drafts", []))
+    capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
+    minimum = Decimal(str(capacity["minimum"]))
+    maximum = Decimal(str(capacity["maximum"]))
+    preview_allocator = onboarding_goal_allocator(data, drafts)
+    lines = []
+    for item, goal in zip(drafts, preview_allocator.settings.goals):
+        share = Decimal(str(item["percentage"])) / Decimal("100")
+        line = (
+            f"• {goal_icon(item)} <b>{escape(str(item['name']))}</b> — {item['percentage']}% "
+            f"(≈ {rub(minimum * share)}–{rub(maximum * share)} / мес.)"
+        )
+        if goal.is_goal:
+            forecast = preview_allocator.goal_forecast(goal)
+            status = str(forecast["status"])
+            if status == "on_track":
+                line += "\n  ✔️ При выбранной доле срок выглядит реалистично."
+            elif status == "depends_on_income":
+                line += "\n  ⚠️ Срок достижим только в более доходные месяцы."
+            elif status == "unreachable":
+                line += (
+                    f"\n  ⚠️ Нужно около <b>{rub(forecast['required_monthly'])} / мес.</b> "
+                    "Увеличьте срок, уменьшите сумму или выделите Цели большую долю."
+                )
+            elif status == "no_deadline":
+                fast = forecast["estimated_months_fast"]
+                slow = forecast["estimated_months_conservative"]
+                if fast is not None or slow is not None:
+                    if slow is None:
+                        estimate = f"от {fast} мес."
+                    elif fast == slow:
+                        estimate = f"около {fast} мес."
+                    else:
+                        estimate = f"примерно {fast}–{slow} мес."
+                    line += f"\n  ℹ️ Ориентировочный срок — <b>{estimate}</b>."
+        lines.append(line)
+    await state.set_state(SetupStates.goal_percentages_review)
+    await message.answer(
+        "<b><u>РАСПРЕДЕЛЕНИЕ ЦЕЛЕЙ</u></b>\n\n"
+        + "\n".join(lines)
+        + "\n\nПоследняя позиция получила остаток автоматически. Сумма долей — <b>100%</b>.",
+        reply_markup=keyboard([
+            [("✔️ Сохранить", "goals:percent:save")],
+            [("Редактировать проценты", "goals:percent:restart")],
+            [("Изменить список", "goals:percent:list")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "goals:percent:cancel")
+async def cancel_goal_percentages(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    drafts = data.get("goal_drafts", [])
+    drafts = list(data.get("goal_drafts", []))
+    for item in drafts:
+        item.pop("percentage", None)
+        item.pop("is_auto_percentage", None)
+    await state.update_data(goal_percentages=[], goal_drafts=drafts)
+    await show_goals_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.goal_percentages_review, F.data == "goals:percent:restart")
+async def restart_goal_percentages(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    drafts = list(data.get("goal_drafts", []))
+    for item in drafts:
+        item.pop("percentage", None)
+        item.pop("is_auto_percentage", None)
+    await state.update_data(goal_drafts=drafts, goal_percentages=[])
+    await ask_next_goal_percentage(callback.message, state)
+
+
+@router.callback_query(SetupStates.goal_percentages_review, F.data == "goals:percent:list")
+async def return_to_goal_list(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_goals_menu(callback.message, state)
+
+
+@router.callback_query(SetupStates.goal_percentages_review, F.data == "goals:percent:save")
+async def save_goal_percentages_review(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
     await state.update_data(
-        goals=normalized_onboarding_goals(drafts),
+        goals=list(data.get("goal_drafts", [])),
         onboarding_goals_completed=True,
     )
     await show_confirmation(callback.message, state)
@@ -7287,7 +7823,7 @@ async def show_confirmation(
     accounts.append(("💚", "Бытовой резерв"))
 
     for goal in settings.goals:
-        accounts.append(("⭐️", goal.name))
+        accounts.append(("🪎" if goal.is_chest else "⭐️", goal.name))
 
     accounts_text = "\n".join(
         f"{index}. {icon} <b>{escape(name)}</b>"
@@ -7297,6 +7833,7 @@ async def show_confirmation(
     goal_monthly_plans = {
         str(item.get("name", "")): Decimal(str(item.get("monthly", "0")))
         for item in data.get("goal_drafts", [])
+        if item.get("monthly") not in {None, ""}
     }
     goals_text = ""
     if settings.goals:
@@ -7305,11 +7842,16 @@ async def show_confirmation(
             monthly = goal_monthly_plans.get(goal.name)
             monthly_text = f" — {rub(monthly)} / мес." if monthly is not None else ""
             percentage_text = format(goal.percentage.normalize(), "f")
+            icon = "🪎" if goal.is_chest else "⭐️"
+            target_text = ""
+            if goal.target_amount is not None:
+                target_text = f" · цель {rub(goal.full_target_amount)}"
             goal_lines.append(
-                f"• ⭐️ <b>{escape(goal.name)}</b>{monthly_text} · {percentage_text}% целевого потока"
+                f"• {icon} <b>{escape(goal.name)}</b>{monthly_text} · "
+                f"{percentage_text}% целевого потока{target_text}"
             )
         goals_text = (
-            "<b><u>ЦЕЛИ:</u></b>\n\n"
+            "<b><u>ЦЕЛИ И СУНДУКИ:</u></b>\n\n"
             + "\n".join(goal_lines)
             + "\n\n"
         )
