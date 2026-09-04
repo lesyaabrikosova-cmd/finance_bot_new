@@ -232,6 +232,17 @@ def keyboard(
     )
 
 
+def life_result_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки проверки стоимости жизни до окончательного подтверждения."""
+    return keyboard([
+        [("Продолжить →", "kmfinal:continue")],
+        [("↔️ Перераспределить КМ и БР", "lifeclassification:show")],
+        [("✎ Редактировать расходы", "lifeedit:list")],
+        [("✎ Изменить сумму КМ", "kmfinal:override")],
+        [("✎ Изменить сумму БР", "lifeoverride:br")],
+    ])
+
+
 def yes_no_keyboard(
     prefix: str
 ) -> InlineKeyboardMarkup:
@@ -4146,13 +4157,7 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         + "Я разделил обязательные и нерегулярные расходы. Проверьте результат: "
         "распределение можно изменить перед продолжением."
     )
-    reply_markup = keyboard([
-        [('Продолжить →', 'kmfinal:continue')],
-        [('Почему так распределено?', 'lifeclassification:show')],
-        [('✎ Редактировать расходы', 'lifeedit:list')],
-        [('✎ Изменить сумму КМ', 'kmfinal:override')],
-        [('✎ Изменить сумму БР', 'lifeoverride:br')],
-    ])
+    reply_markup = life_result_keyboard()
     if data.get("combined_life_onboarding"):
         await callback.message.answer(caption, reply_markup=reply_markup)
         return
@@ -4197,9 +4202,10 @@ async def show_life_classification(callback: CallbackQuery, state: FSMContext):
         if is_gift_expense(item)
     ]
     blocks = [
-        "<b>ПОЧЕМУ АЛЛОКАТОР РАСПРЕДЕЛИЛ РАСХОДЫ ТАК</b>\n\n"
+        "<b>ПРОВЕРЬТЕ РАСПРЕДЕЛЕНИЕ МЕЖДУ КМ И БР</b>\n\n"
         "Причины основаны только на выбранной категории и указанном периоде оплаты. "
-        "Аллокатор не предполагает за вас, можно ли отказаться от конкретного расхода.",
+        "Аллокатор не предполагает за вас, можно ли отказаться от конкретного расхода. "
+        "Если расход оказался не в той части жизни, выберите его и перенесите.",
         "<b>КРИТИЧЕСКИЙ МИНИМУМ</b>\n" + ("\n".join(km_lines) or "• Нет расходов"),
         "<b>БЫТОВОЙ РЕЗЕРВ</b>\n" + ("\n".join(br_lines) or "• Нет расходов"),
     ]
@@ -4219,7 +4225,10 @@ async def show_life_classification(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(page)
     await callback.message.answer(
         pages[-1],
-        reply_markup=keyboard([[("← Назад", "km:finish"), ("✎ Редактировать", "lifeedit:list")]]),
+        reply_markup=keyboard([
+            [("↔️ Выбрать расход", "lifeedit:list")],
+            [("← К стоимости жизни", "km:finish")],
+        ]),
     )
 
 
@@ -4509,10 +4518,7 @@ async def km_override_save(message: Message, state: FSMContext):
             f"Критический минимум — <b>{rub(value)}</b>.\n"
             f"Бытовой резерв — <b>{rub(household)}</b>.\n"
             f"Устойчивая жизнь — <b>{rub(value + household)}</b>.",
-            reply_markup=keyboard([
-                [("Продолжить", "kmfinal:continue")],
-                [("Редактировать расходы", "lifeedit:list")],
-            ]),
+            reply_markup=life_result_keyboard(),
         )
         return
     await message.answer(f"Критический минимум установлен: <b>{rub(value)}</b>.", reply_markup=keyboard([[('Продолжить','kmfinal:continue')],[('Редактировать расходы','kmedit:list')]]))
@@ -5607,10 +5613,7 @@ async def br_override_save(message: Message, state: FSMContext):
             f"Критический минимум — <b>{rub(critical)}</b>.\n"
             f"Бытовой резерв — <b>{rub(value)}</b>.\n"
             f"Устойчивая жизнь — <b>{rub(critical + value)}</b>.",
-            reply_markup=keyboard([
-                [("Продолжить", "kmfinal:continue")],
-                [("Редактировать расходы", "lifeedit:list")],
-            ]),
+            reply_markup=life_result_keyboard(),
         )
         return
     await state.set_state(SetupStates.br_menu)
