@@ -28,6 +28,7 @@ from financial_engine import (
     UserSettings,
     VACATION_BUDGET_ITEMS,
     goal_percentage_bounds,
+    goal_display_name,
     sequential_goal_percentages,
     vacation_budget,
 )
@@ -48,6 +49,7 @@ INTRO_IMAGE_1 = INTRO_IMAGES_DIR / "intro_1.png"
 INTRO_IMAGE_3 = INTRO_IMAGES_DIR / "intro_3.png"
 INTRO_IMAGE_4 = INTRO_IMAGES_DIR / "intro_4.png"
 FINANCIAL_PROFILE_IMAGE = INTRO_IMAGES_DIR / "financial_profile.png"
+GOALS_AND_CHESTS_IMAGE = INTRO_IMAGES_DIR / "goals_and_chests.png"
 CRITICAL_MINIMUM_IMAGE = INTRO_IMAGES_DIR / "critical_minimum.png"
 HOUSEHOLD_RESERVE_IMAGE = INTRO_IMAGES_DIR / "household_reserve.png"
 CRITICAL_MINIMUM_CALCULATED_IMAGE = (
@@ -6998,9 +7000,6 @@ def build_state_from_data(
 GOAL_SUGGESTIONS = (
     {"name": "Отпуск", "position_type": "goal"},
     {"name": "Замена техники", "position_type": "chest"},
-    {"name": "Хотелки", "position_type": "chest"},
-    {"name": "Образование", "position_type": "goal"},
-    {"name": "Дом и ремонт", "position_type": "goal"},
 )
 
 
@@ -7064,11 +7063,53 @@ async def maybe_start_goals_onboarding(message: Message, state: FSMContext):
         goal_percentages=[],
         pending_goal=None,
     )
-    await show_goals_menu(message, state)
+    await show_goals_intro(message, state)
+
+
+async def show_goals_intro(message: Message, state: FSMContext):
+    await state.set_state(SetupStates.goals_menu)
+    caption = (
+        "<b>ЦЕЛИ И СУНДУКИ</b>\n\n"
+        "Теперь о приятном — <b>на что вы хотите накопить?</b>\n\n"
+        "⭐️ <b>Цель</b> — это конкретный план с конечной суммой. Например: отпуск, "
+        "автомобиль или парфюм. Можно указать дату, а когда нужная сумма накопится — "
+        "Цель будет выполнена.\n\n"
+        "🧳 <b>Сундук</b> — это постоянный запас без финишной суммы. Мы регулярно его "
+        "пополняем и время от времени используем — например, на подарки, хотелки или "
+        "замену техники."
+    )
+    reply_markup = keyboard([[("Понятно →", "goals:intro:continue")]])
+    try:
+        await message.answer_photo(
+            photo=FSInputFile(GOALS_AND_CHESTS_IMAGE),
+            caption=caption,
+            reply_markup=reply_markup,
+            message_effect_id=(FIRE_EFFECT_ID if message.chat.type == "private" else None),
+        )
+    except TelegramBadRequest:
+        await message.answer_photo(
+            photo=FSInputFile(GOALS_AND_CHESTS_IMAGE),
+            caption=caption,
+            reply_markup=reply_markup,
+        )
+
+
+@router.callback_query(SetupStates.goals_menu, F.data == "goals:intro:continue")
+async def continue_from_goals_intro(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await remove_setup_button(callback)
+    await show_goals_menu(callback.message, state)
 
 
 def goal_icon(item: dict) -> str:
-    return "💼" if item.get("position_type") == "chest" else "⭐️"
+    return "🧳" if item.get("position_type") == "chest" else "⭐️"
+
+
+def goal_draft_display_name(item: dict) -> str:
+    return goal_display_name(
+        str(item.get("name", "")),
+        item.get("position_type") == "chest",
+    )
 
 
 def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
@@ -7080,7 +7121,7 @@ def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
         if percentages and item.get("percentage") is not None:
             suffix = f" — <b>{item['percentage']}%</b>"
         lines.append(
-            f"• {goal_icon(item)} <b>{escape(str(item['name']))}</b>{suffix}"
+            f"• {goal_icon(item)} <b>{escape(goal_draft_display_name(item))}</b>{suffix}"
         )
     return "\n".join(lines)
 
@@ -7093,13 +7134,35 @@ def onboarding_goal_allocator(
     return FinancialAllocator(settings, build_state_from_data(data, settings))
 
 
-def goals_capacity_text(data: dict) -> str:
+def goals_capacity_amount(data: dict) -> str:
     capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
     minimum = Decimal(str(capacity["minimum"]))
     maximum = Decimal(str(capacity["maximum"]))
     if minimum == maximum:
-        return f"<b>≈ {rub(maximum)} в месяц</b>"
-    return f"<b>≈ {rub(minimum)}–{rub(maximum)} в месяц</b>"
+        return f"<b>≈ {rub(maximum)}</b>"
+    return f"<b>≈ {rub(minimum)}–{rub(maximum)}</b>"
+
+
+def goals_capacity_profile_text(data: dict) -> str:
+    amount = goals_capacity_amount(data)
+    rhythm = data.get("income_rhythm")
+    if rhythm == "monthly":
+        return (
+            "С вашим обычным месячным доходом на Цели и Сундуки может уходить примерно:\n\n"
+            f"{amount} в месяц"
+        )
+    if rhythm == "cyclic":
+        return (
+            "В среднем на один месяц полного финансового цикла на Цели и Сундуки "
+            "может приходиться примерно:\n\n"
+            f"{amount}\n\n"
+            "Фактически деньги будут направляться сюда во время рабочей части, когда поступает доход."
+        )
+    return (
+        "При вашем среднем доходе на Цели и Сундуки может уходить примерно:\n\n"
+        f"{amount} в месяц\n\n"
+        "В удачные месяцы сумма может быть больше, а при снижении дохода — меньше."
+    )
 
 
 async def show_goals_menu(message: Message, state: FSMContext):
@@ -7108,17 +7171,12 @@ async def show_goals_menu(message: Message, state: FSMContext):
     selected = {str(item.get("name", "")).casefold() for item in drafts}
     rows: list[list[tuple[str, str]]] = []
     can_add = len(drafts) < 10
-    if (
-        can_add
-        and
-        Decimal(str(data.get("historical_gifts_monthly", "0"))) > 0
-        and "подарки" not in selected
-    ):
-        rows.append([("💼 Подарки", "goals:gift:offer")])
+    if can_add and "подарки" not in selected:
+        rows.append([("🧳 Сундук Подарков", "goals:gift:offer")])
     for index, suggestion in enumerate(GOAL_SUGGESTIONS):
         if can_add and suggestion["name"].casefold() not in selected:
             rows.append([(
-                f"{goal_icon(suggestion)} {suggestion['name']}",
+                f"{goal_icon(suggestion)} {goal_draft_display_name(suggestion)}",
                 f"goals:suggest:{index}",
             )])
     for index, item in enumerate(drafts):
@@ -7127,25 +7185,20 @@ async def show_goals_menu(message: Message, state: FSMContext):
             f"goals:remove:{index}",
         )])
     if can_add:
-        rows.append([("+ Добавить свою", "goals:custom")])
+        rows.append([("+ Своя Цель или Сундук", "goals:custom")])
     rows.append([("✔️ Готово", "goals:done")])
     if not drafts:
-        rows.append([("Мне пока не нужны цели", "goals:none:info")])
+        rows.append([("Мне пока не нужны", "goals:none:info")])
     await state.set_state(SetupStates.goals_menu)
     await message.answer(
-        "<b><u>ФИНАНСОВЫЕ ЦЕЛИ</u></b>\n\n"
-        "Теперь о приятном — <b>на что вы хотите накопить?</b>\n\n"
+        "<b>НА ЧТО БУДЕМ КОПИТЬ?</b>\n\n"
         "Сначала Аллокатор обеспечивает Критический Минимум, Бытовой Резерв и "
-        "финансовую защиту. И только потом направляет деньги на желания и большие планы.\n\n"
-        "С вашим средним доходом на цели может уходить примерно:\n\n"
-        f"{goals_capacity_text(data)}\n\n"
-        "Получили <b>Сверхдоход</b> — на цели может поступить больше. А если сейчас "
-        "важнее укрепить финансовые резервы, сумма временно уменьшится.\n\n"
-        "Так отпуск, новая машина или дорогой парфюм не конкурируют с квартплатой, "
-        "здоровьем и финансовой безопасностью.\n\n"
+        "текущую финансовую защиту. Оставшиеся деньги можно направлять на Цели и в Сундуки.\n\n"
+        f"{goals_capacity_profile_text(data)}\n\n"
         f"{goal_draft_summary(drafts)}\n\n"
-        "Нажмите на вариант ниже — сначала расскажу, что к нему относится. "
-        "Ничего не добавится без вашего подтверждения.",
+        "Рекомендую познакомиться с вариантами, которые многие недооценивают. "
+        "Нажмите на любой — я коротко расскажу, зачем он нужен. "
+        "<b>Без вашего подтверждения ничего не добавится.</b>",
         reply_markup=keyboard(rows),
     )
 
@@ -7177,9 +7230,14 @@ async def reopen_gift_goal(callback: CallbackQuery, state: FSMContext):
         "position_type": "chest",
         "suggested_percentage": str(suggested),
     })
-    await callback.message.answer(
-        "<b>💼 СУНДУК ПОДАРКОВ</b>\n\n"
+    history_text = (
         f"Раньше на подарки уходило в среднем <b>{rub(history)}</b> в месяц. "
+        if history > 0
+        else "Подарки легко оплатить из денег на повседневную жизнь и незаметно потратить лишнее. "
+    )
+    await callback.message.answer(
+        "<b>🧳 СУНДУК ПОДАРКОВ</b>\n\n"
+        f"{history_text}"
         "Подарки не входят в стоимость жизни: их разумнее оплачивать из отдельного "
         "Сундука, когда Критический Минимум и Бытовой Резерв уже обеспечены.\n\n"
         "Обычный ориентир — <b>3–7% денег, выделенных на цели</b>. До 10% можно "
@@ -7221,7 +7279,7 @@ async def show_goal_suggestion(message: Message, suggestion: dict, profile: str 
     name = suggestion["name"]
     if name == "Замена техники":
         text = (
-            "<b>💼 ЗАМЕНА ТЕХНИКИ</b>\n\n"
+            "<b>🧳 СУНДУК ТЕХНИКИ</b>\n\n"
             "Телефон, ноутбук или стиральная машина обычно не предупреждают: "
             "<b>«Через месяц я сломаюсь, начинай копить».</b>\n\n"
             "Но мы знаем, что любая техника рано или поздно потребует замены. Поэтому "
@@ -7377,10 +7435,10 @@ async def start_custom_goal(callback: CallbackQuery, state: FSMContext):
         "<b>ЧТО ВЫ ХОТИТЕ ДОБАВИТЬ?</b>\n\n"
         "⭐️ <b>Цель</b> — накопить конкретную сумму и закончить. Например, парфюм, "
         "путёвка или автомобиль.\n\n"
-        "💼 <b>Сундук</b> — регулярно пополнять и иногда пользоваться. Например, "
+        "🧳 <b>Сундук</b> — регулярно пополнять и иногда пользоваться. Например, "
         "Хотелки, Подарки или Замена техники.",
         reply_markup=keyboard([
-            [("⭐️ Цель", "goals:type:goal"), ("💼 Сундук", "goals:type:chest")],
+            [("⭐️ Цель", "goals:type:goal"), ("🧳 Сундук", "goals:type:chest")],
             [("✖️ Отмена", "goals:cancel-add")],
         ]),
     )
@@ -7826,7 +7884,10 @@ async def show_confirmation(
     accounts.append(("💚", "Бытовой резерв"))
 
     for goal in settings.goals:
-        accounts.append(("💼" if goal.is_chest else "⭐️", goal.name))
+        accounts.append((
+            "🧳" if goal.is_chest else "⭐️",
+            goal_display_name(goal.name, goal.is_chest),
+        ))
 
     accounts_text = "\n".join(
         f"{index}. {icon} <b>{escape(name)}</b>"
@@ -7845,12 +7906,13 @@ async def show_confirmation(
             monthly = goal_monthly_plans.get(goal.name)
             monthly_text = f" — {rub(monthly)} / мес." if monthly is not None else ""
             percentage_text = format(goal.percentage.normalize(), "f")
-            icon = "💼" if goal.is_chest else "⭐️"
+            icon = "🧳" if goal.is_chest else "⭐️"
+            display_name = goal_display_name(goal.name, goal.is_chest)
             target_text = ""
             if goal.target_amount is not None:
                 target_text = f" · цель {rub(goal.full_target_amount)}"
             goal_lines.append(
-                f"• {icon} <b>{escape(goal.name)}</b>{monthly_text} · "
+                f"• {icon} <b>{escape(display_name)}</b>{monthly_text} · "
                 f"{percentage_text}% целевого потока{target_text}"
             )
         goals_text = (

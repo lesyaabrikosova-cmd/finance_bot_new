@@ -4,7 +4,13 @@ import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
-from financial_engine import AllocatorState, FinancialAllocator, Goal, UserSettings
+from financial_engine import (
+    AllocatorState,
+    FinancialAllocator,
+    Goal,
+    UserSettings,
+    goal_display_name,
+)
 from storage import Database
 from onboarding import build_settings_from_data, goal_draft_summary
 
@@ -154,7 +160,14 @@ class GoalFoundationTests(unittest.TestCase):
             {"name": "Подарки", "position_type": "chest"},
         ])
         self.assertIn("⭐️ <b>Отпуск</b>", summary)
-        self.assertIn("💼 <b>Подарки</b>", summary)
+        self.assertIn("🧳 <b>Сундук Подарков</b>", summary)
+
+    def test_chest_display_names_are_consistent_and_grammatical(self):
+        self.assertEqual(goal_display_name("Подарки", True), "Сундук Подарков")
+        self.assertEqual(goal_display_name("Замена техники", True), "Сундук Техники")
+        self.assertEqual(goal_display_name("Мечты", True), "Сундук Мечты")
+        self.assertEqual(goal_display_name("Сундук Подарков", True), "Сундук Подарков")
+        self.assertEqual(goal_display_name("Отпуск", False), "Отпуск")
 
     def test_goal_lifecycle_survives_storage_and_only_active_positions_allocate(self):
         with tempfile.TemporaryDirectory() as directory:

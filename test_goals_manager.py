@@ -12,7 +12,7 @@ class GoalsManagerTests(unittest.TestCase):
 
     def test_icons_follow_entity_type(self):
         self.assertEqual(icon(Goal("Отпуск", 50)), "⭐️")
-        self.assertEqual(icon(Goal("Подарки", 50, position_type="chest")), "💼")
+        self.assertEqual(icon(Goal("Подарки", 50, position_type="chest")), "🧳")
 
     def test_pausing_position_preserves_it_and_rebalances_active_ones(self):
         goals = [Goal("A", 30), Goal("B", 30), Goal("C", 40)]

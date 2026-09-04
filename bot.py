@@ -43,6 +43,7 @@ from financial_engine import (
     MODE_TITLES,
     FinancialAllocator,
     fmt_money,
+    goal_display_name,
 )
 
 from onboarding import (
@@ -561,7 +562,7 @@ async def menu_goals(
         return
 
     lines = [
-        "⭐️ <b>ФИНАНСОВЫЕ ЦЕЛИ</b>",
+        "<b>ЦЕЛИ И СУНДУКИ</b>",
         "",
     ]
 
@@ -574,8 +575,9 @@ async def menu_goals(
             )
         )
 
+        goal_icon = "🧳" if goal.is_chest else "⭐️"
         lines.append(
-            f"⭐️ <b>{goal.name}</b>\n"
+            f"{goal_icon} <b>{goal_display_name(goal.name, goal.is_chest)}</b>\n"
             f"Доля: {goal.percentage}%\n"
             f"Накоплено: {fmt_money(balance)} ₽\n"
         )

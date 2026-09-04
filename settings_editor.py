@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
+from financial_engine import goal_display_name
 from storage import db
 from ui import keyboard, main_menu_keyboard
 
@@ -92,7 +93,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
     )
 
     goals = ", ".join(
-        f"{'💼' if g.is_chest else '⭐️'} {g.name} {g.percentage}%"
+        f"{'🧳' if g.is_chest else '⭐️'} {'Сундук ' if g.is_chest else ''}{g.name} {g.percentage}%"
         for g in s.goals
     ) if s.goals else "без отдельных категорий"
     categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"
@@ -1115,7 +1116,9 @@ async def edit_goal_percentages(callback: CallbackQuery, state: FSMContext):
         return
 
     current = "\n".join(
-        f"• ⭐️ {escape(goal.name)} = {format(goal.percentage.normalize(), 'f')}%"
+        f"• {'🧳' if goal.is_chest else '⭐️'} "
+        f"{escape(goal_display_name(goal.name, goal.is_chest))} = "
+        f"{format(goal.percentage.normalize(), 'f')}%"
         for goal in allocator.settings.goals
     )
     await state.set_state(EditSettingsStates.goal_percentages)

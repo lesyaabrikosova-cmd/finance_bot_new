@@ -38,6 +38,23 @@ VACATION_BUDGET_ITEMS = (
     ("purchases", "Покупки, сувениры и подарки"),
 )
 
+CHEST_DISPLAY_NAMES = {
+    "подарки": "Сундук Подарков",
+    "замена техники": "Сундук Техники",
+    "техника": "Сундук Техники",
+    "хотелки": "Сундук Хотелок",
+}
+
+
+def goal_display_name(name: str, is_chest: bool = False) -> str:
+    """Возвращает единообразное пользовательское название Цели или Сундука."""
+    clean_name = str(name).strip()
+    if not is_chest:
+        return clean_name
+    if clean_name.casefold().startswith("сундук "):
+        return clean_name
+    return CHEST_DISPLAY_NAMES.get(clean_name.casefold(), f"Сундук {clean_name}")
+
 
 def D(value) -> Decimal:
     """
@@ -384,7 +401,7 @@ class Goal:
     """Одна позиция в разделе накоплений на желания.
 
     ``goal`` — конечная ⭐️ Цель с известной суммой и, возможно, сроком.
-    ``chest`` — постоянный 💼 Сундук без конечной суммы и автозавершения.
+    ``chest`` — постоянный 🧳 Сундук без конечной суммы и автозавершения.
 
     Поле ``balance`` сохранено для обратной совместимости. Для Сундука это
     только сумма взносов, зафиксированных Аллокатором, а не обещание точно
@@ -2004,7 +2021,10 @@ class FinancialAllocator:
                 self.state.goal_balances.get(goal.name, ZERO) + amount
             )
             noun = "Сундук" if goal.is_chest else "Цель"
-            return f"{noun} «{goal.name}»"
+            name = goal_display_name(goal.name, goal.is_chest)
+            if goal.is_chest:
+                return f"«{name}»"
+            return f"{noun} «{name}»"
         if target == "investments":
             self.state.investments += amount
             return "Инвестиции"

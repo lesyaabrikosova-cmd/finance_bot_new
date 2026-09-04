@@ -10,6 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
+from financial_engine import goal_display_name
 from storage import db
 from ui import keyboard, main_menu_keyboard
 
@@ -768,8 +769,9 @@ async def period_remainder_amount_save(message: Message, state: FSMContext):
         rows.append([("⭐️ Распределить по всем целям", "period:target:goals")])
         for index, goal in enumerate(allocator.settings.goals):
             if goal.status == "active":
-                goal_icon = "💼" if goal.is_chest else "⭐️"
-                rows.append([(f"{goal_icon} {goal.name}", f"period:target:goal:{index}")])
+                goal_icon = "🧳" if goal.is_chest else "⭐️"
+                display_name = goal_display_name(goal.name, goal.is_chest)
+                rows.append([(f"{goal_icon} {display_name}", f"period:target:goal:{index}")])
 
     investment_mode = {
         "stable": 4,
@@ -821,8 +823,9 @@ async def period_remainder_target(callback: CallbackQuery, state: FSMContext):
         if goal.status != "active":
             await callback.message.answer("Эта позиция сейчас на паузе. Выберите другое направление.")
             return
-        goal_icon = "💼" if goal.is_chest else "⭐️"
-        label = f"{goal_icon} «{goal.name}»"
+        goal_icon = "🧳" if goal.is_chest else "⭐️"
+        display_name = goal_display_name(goal.name, goal.is_chest)
+        label = f"{goal_icon} «{display_name}»"
     else:
         label = labels.get(target, "текущий финансовый приоритет")
     data = await state.get_data()

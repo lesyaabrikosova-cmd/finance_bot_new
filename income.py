@@ -24,6 +24,7 @@ from financial_engine import (
     MODE_TITLES,
     FinancialAllocator,
     fmt_money,
+    goal_display_name,
 )
 
 from storage import db
@@ -1491,8 +1492,8 @@ async def send_distribution_report(
         for goal in settings.active_goals:
 
             add_distribution_line(
-                "💼" if goal.is_chest else "⭐️",
-                goal.name,
+                "🧳" if goal.is_chest else "⭐️",
+                goal_display_name(goal.name, goal.is_chest),
                 allocations.get(
                     f"Цели:{goal.name}",
                     ZERO,

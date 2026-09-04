@@ -14,6 +14,7 @@ from financial_engine import (
     MODE_NAMES,
     MODE_TITLES,
     fmt_money,
+    goal_display_name,
 )
 from storage import db
 from ui import keyboard, main_menu_keyboard
@@ -903,9 +904,10 @@ async def send_balances(
                 Decimal("0"),
             )
 
-            goal_icon = "💼" if goal.is_chest else "⭐️"
+            goal_icon = "🧳" if goal.is_chest else "⭐️"
+            display_name = goal_display_name(goal.name, goal.is_chest)
             lines.append(
-                f"{goal_icon} {escape(goal.name)}: "
+                f"{goal_icon} {escape(display_name)}: "
                 f"<b>{rub(amount)}</b> "
                 f"({pct(amount, income)})"
             )

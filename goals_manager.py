@@ -16,6 +16,7 @@ from financial_engine import (
     normalize_active_goal_percentages,
     sequential_goal_percentages,
     vacation_budget,
+    goal_display_name,
 )
 from storage import db
 from ui import keyboard, main_menu_keyboard
@@ -64,7 +65,11 @@ def rub(value) -> str:
 
 
 def icon(goal: Goal) -> str:
-    return "💼" if goal.is_chest else "⭐️"
+    return "🧳" if goal.is_chest else "⭐️"
+
+
+def display_name(goal: Goal) -> str:
+    return goal_display_name(goal.name, goal.is_chest)
 
 
 def goal_line(allocator, goal: Goal) -> str:
@@ -79,7 +84,7 @@ def goal_line(allocator, goal: Goal) -> str:
         current = allocator.state.goal_balances.get(goal.name, goal.balance)
         target = f"\n  {rub(current)} из {rub(goal.full_target_amount)}"
     return (
-        f"{icon(goal)} <b>{escape(goal.name)}</b> — {goal.percentage}%{state_label}"
+        f"{icon(goal)} <b>{escape(display_name(goal))}</b> — {goal.percentage}%{state_label}"
         f"{target}"
     )
 
@@ -101,7 +106,7 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
     else:
         listing = "<b>Пока список пуст.</b>"
     rows = [
-        [(f"{icon(goal)} {goal.name}", f"goalmanage:view:{index}")]
+        [(f"{icon(goal)} {display_name(goal)}", f"goalmanage:view:{index}")]
         for index, goal in visible
     ]
     rows.extend([
@@ -114,7 +119,7 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
     await message.answer(
         "<b><u>ЦЕЛИ И СУНДУКИ</u></b>\n\n"
         "⭐️ Цель — конкретная сумма, которую нужно накопить.\n"
-        "💼 Сундук — постоянный запас, который можно пополнять и использовать снова.\n\n"
+        "🧳 Сундук — постоянный запас, который можно пополнять и использовать снова.\n\n"
         f"{listing}\n\n"
         "Проценты показывают, как делятся только деньги, уже выделенные Аллокатором на Цели.",
         reply_markup=keyboard(rows),
@@ -134,11 +139,11 @@ async def show_goals_archive(callback: CallbackQuery):
         await show_goals_manager(callback.message, callback.from_user.id)
         return
     lines = "\n".join(
-        f"• {icon(goal)} <b>{escape(goal.name)}</b>"
+        f"• {icon(goal)} <b>{escape(display_name(goal))}</b>"
         for _, goal in archived
     )
     rows = [
-        [(f"Вернуть · {goal.name}", f"goalmanage:restore:{index}")]
+        [(f"Вернуть · {display_name(goal)}", f"goalmanage:restore:{index}")]
         for index, goal in archived
     ]
     rows.append([("← Назад", "goals:manage")])
@@ -170,9 +175,9 @@ async def choose_position_type(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "<b>ЧТО ДОБАВИТЬ?</b>\n\n"
         "⭐️ <b>Цель</b> — конкретная сумма: путёвка, автомобиль или парфюм.\n\n"
-        "💼 <b>Сундук</b> — постоянный запас: Подарки, Хотелки или Замена техники.",
+        "🧳 <b>Сундук</b> — постоянный запас: Подарки, Хотелки или Замена техники.",
         reply_markup=keyboard([
-            [("⭐️ Цель", "goalmanage:type:goal"), ("💼 Сундук", "goalmanage:type:chest")],
+            [("⭐️ Цель", "goalmanage:type:goal"), ("🧳 Сундук", "goalmanage:type:chest")],
             [("✖️ Отмена", "goals:manage")],
         ]),
     )
@@ -492,13 +497,13 @@ async def ask_percentage(message: Message, telegram_id: int, state: FSMContext):
         return
     minimum, maximum = goal_percentage_bounds(chosen, len(active) - index - 1)
     current = "\n".join(
-        f"• {icon(goal)} {escape(goal.name)}" + (f" — <b>{chosen[i]}%</b>" if i < len(chosen) else "")
+        f"• {icon(goal)} {escape(display_name(goal))}" + (f" — <b>{chosen[i]}%</b>" if i < len(chosen) else "")
         for i, goal in enumerate(active)
     )
     await message.answer(
         "<b>РАСПРЕДЕЛЕНИЕ МЕЖДУ ЦЕЛЯМИ</b>\n\n"
         f"{current}\n\n"
-        f"Введите долю для {icon(active[index])} <b>{escape(active[index].name)}</b>: "
+        f"Введите долю для {icon(active[index])} <b>{escape(display_name(active[index]))}</b>: "
         f"целое число от <b>{minimum}</b> до <b>{maximum}</b>.\n\n"
         "Это процент от денег на Цели, а не от всей зарплаты.\n"
         "——————\n<b>→ Введите процент.</b>",
@@ -785,7 +790,7 @@ async def ask_delete_position(callback: CallbackQuery):
     allocator = db.load_allocator(callback.from_user.id)
     goal = allocator.settings.goals[index]
     await callback.message.answer(
-        f"Удалить {icon(goal)} <b>{escape(goal.name)}</b>? Это действие нельзя отменить.",
+        f"Удалить {icon(goal)} <b>{escape(display_name(goal))}</b>? Это действие нельзя отменить.",
         reply_markup=keyboard([
             [("Удалить", f"goalmanage:delete:yes:{index}")],
             [("✖️ Отмена", "goals:manage")],
