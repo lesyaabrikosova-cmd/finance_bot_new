@@ -319,21 +319,8 @@ async def income_amount(
         )
     ])
 
-    tax_note = ""
-
-    taxable = [
-        f"{escape(name)} — {rate}%"
-        for name, rate in settings.income_type_tax_rates.items()
-        if rate > 0
-    ]
-    if taxable:
-        tax_note = "\n\n<b>Налог:</b>\n" + "\n".join(f"• {item}" for item in taxable)
-
     await message.answer(
-        "<b>ВЫБЕРИТЕ ТИП ДОХОДА</b>\n\n"
-
-        "Выберите сохранённый тип или добавьте новый."
-        + tax_note,
+        "<b>ВЫБЕРИТЕ ТИП ДОХОДА</b>",
         reply_markup=keyboard(
             rows
         ),
@@ -695,22 +682,15 @@ async def show_income_confirmation(
         reply_markup=keyboard([
             [
                 (
-                    "✅ Распределить",
-                    "income:confirm",
-                )
-            ],
-            [
-                (
-                    "🏛️ Редактировать налог",
-                    "income:edit_tax",
-                )
-            ],
-            [
-                (
                     "✖️ Отмена",
                     "income:cancel",
-                )
+                ),
+                (
+                    "✔️ Распределить",
+                    "income:confirm",
+                ),
             ],
+            [("✎ Редактировать налог", "income:edit_tax")],
         ]),
     )
 
@@ -1089,7 +1069,8 @@ async def cancel_income(
 
     await callback.message.answer(
         "Операция отменена.\n\n"
-        "Деньги не распределялись."
+        "Деньги не распределялись.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
