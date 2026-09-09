@@ -844,7 +844,6 @@ async def send_balances(
     lines = [
         "<b>БАЛАНСЫ ЗА ПЕРИОД</b>", "",
         f"💲 <b>Доход</b> — {rub(income)}",
-        f"🔄 <b>Баланс жизни</b> — {rub(state.life_balance)}",
         f"🏛️ <b>Налог</b> — {rub(tax)} ({pct(tax, income)})",
     ]
     if investment_period > 0:
@@ -990,19 +989,26 @@ async def send_balances(
         allocator.next_mode_info()
     )
 
+    # Выделяем все периодические поступления в конверты одной цитатой.
+    threshold_index = lines.index("<b>ПОРОГИ</b>") if "<b>ПОРОГИ</b>" in lines else len(lines)
+    tax_index = next((i for i, line in enumerate(lines) if line.startswith("🏛️ <b>Налог</b>")), None)
+    if tax_index is not None and tax_index < threshold_index:
+        quoted = "\n".join(lines[tax_index:threshold_index]).strip()
+        lines[tax_index:threshold_index] = ["<blockquote>" + quoted + "</blockquote>"]
+
     lines.extend([
         "",
-        "<b>ПОРОГИ</b>",
-        f"→ До КЖ осталось: "
-        f"<b>{rub(until_kzh)}</b>",
-        f"→ До УЖ осталось: "
-        f"<b>{rub(until_uzh)}</b>",
+        "—————————",
+        f"↺ <b>Баланс жизни</b> — {rub(state.life_balance)}",
+        f"➤ До <b>Критич. минимума</b> — {rub(until_kzh)}",
+        f"➤ До <b>Устойч. жизни</b> — {rub(until_uzh)}",
+        "",
     ])
 
     if next_info:
 
         lines.append(
-            f"→ До следующего уровня "
+            f"➤ До следующего уровня — "
             f"{next_info['next_name']}: "
             f"<b>{rub(next_info['remaining'])}</b>"
         )
@@ -1010,7 +1016,7 @@ async def send_balances(
     else:
 
         lines.append(
-            "→ До следующего уровня: "
+            "➤ До следующего уровня — "
             "<b>максимальный уровень достигнут</b>"
         )
 
