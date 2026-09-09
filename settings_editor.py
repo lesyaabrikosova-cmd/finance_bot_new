@@ -57,6 +57,10 @@ def rub(value: Decimal) -> str:
     formatted = f"{Decimal(value):,.2f}"
     return formatted.replace(",", " ").replace(".", ",") + " ₽"
 
+def fmt_money(value: Decimal) -> str:
+    formatted = f"{Decimal(value):,.2f}"
+    return formatted.replace(",", " ").replace(".", ",")
+
 def distribute_existing_pillow(allocator, total: Decimal) -> None:
     s = allocator.settings
     st = allocator.state
@@ -94,45 +98,49 @@ async def show_settings_menu(message: Message, telegram_id: int):
         else "🛠 Включить уровень разработчика"
     )
 
-    goals = ", ".join(
-        f"{'🧳' if g.is_chest else '⭐️'} {'Сундук ' if g.is_chest else ''}{g.name} {g.percentage}%"
-        for g in s.goals
-    ) if s.goals else "без отдельных категорий"
-    categories = ", ".join(f"{name} {rub(amount)}" for name, amount in s.life_categories.items()) if s.life_categories else "нет отдельных категорий"
     rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Цикличный (контрактный)"}
 
+    active_debts = [credit for credit in s.credits if credit.active]
+    debt_text = "Долгов нет." if not active_debts else f"Активных долгов: <b>{len(active_debts)}</b>."
+    lines = [
+        "<b>НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ</b>", "",
+        debt_text,
+        f"Ритм дохода: {rhythm_labels.get(s.income_rhythm, s.income_rhythm)}", "",
+        f"<b>Средний доход</b> — {fmt_money(s.average_income)}",
+        "————————————",
+        f"➤ <b>Критический минимум</b> — {fmt_money(s.critical_life)}",
+        f"➤ <b>Устойчивая жизнь</b> — {fmt_money(s.household_life)}",
+        "————————————",
+        f"🛡️ <b>Подушка</b> • {s.force_majeure_months} мес •",
+        f"{fmt_money(st.pillow_balance)} / {fmt_money(s.force_majeure_limit)}",
+    ]
+    if s.needs_stabilizer:
+        lines.extend([
+            "",
+            f"🛟 <b>Стабилизатор</b> • {s.stabilizer_target_months} мес •",
+            f"{fmt_money(st.stabilizer_balance)} / {fmt_money(s.stabilizer_full_limit)}",
+        ])
+    if s.income_rhythm == "cyclic":
+        lines.extend(["", f"🏦 <b>Фонд Зарплаты</b> — {fmt_money(st.intercontract_reserve)} / {fmt_money(allocator.intercontract_current_limit)}"])
+    lines.extend(["————————————", "<b>КАТЕГОРИИ ЖИЗНИ</b>"])
+    for name, amount in s.life_categories.items():
+        lines.append(f"❤️ <b>{escape(name)}</b> — {fmt_money(amount)}")
+    lines.extend(["", f"💚 <b>Бытовой резерв</b> — {fmt_money(s.household_reserve)}"])
+    if s.goals:
+        lines.extend(["", "<b>ЦЕЛИ И СУНДУКИ</b>"])
+        for goal in s.goals:
+            icon = "🧳" if goal.is_chest else "⭐️"
+            name = goal_display_name(goal.name, goal.is_chest)
+            lines.append(f"{icon} <b>{escape(name)}</b> — {goal.percentage}%")
+    lines.extend([
+        "————————————",
+        f"<b>Бракеты</b>: {s.bracket_a}% / {s.bracket_b}% / {s.bracket_c}% / {s.bracket_d}%",
+        "",
+        f"<b>🛠 Уровень разработчика:</b> {dev_status}",
+    ])
+
     await message.answer(
-        "⚙️ <b>РЕДАКТИРОВАНИЕ НАСТРОЕК</b>\n\n"
-        f"🔴 Обязательная жизнь: <b>{rub(s.critical_life)}</b>\n"
-        f"💚 Бытовой резерв: <b>{rub(s.household_reserve)}</b>\n"
-        f"💰 Средний доход: <b>{rub(s.average_income)}</b>\n"
-        f"Ритм дохода: <b>{rhythm_labels.get(s.income_rhythm, s.income_rhythm)}</b>\n"
-        + (f"Финансовый цикл: <b>{s.income_work_months} / {s.income_gap_months}</b>\n" if s.income_rhythm == "cyclic" else "")
-        + (
-            "Текущая фаза: <b>"
-            + (
-                f"Перерыв · осталось {st.intercontract_months_remaining} мес."
-                if st.intercontract_break_active
-                else "Рабочая часть"
-            )
-            + "</b>\n"
-            if s.income_rhythm == "cyclic"
-            else ""
-        )
-        + (f"Доход текущего цикла: <b>{rub(st.cycle_income)}</b> / {rub(s.cycle_regular_income_limit)}\n" if s.income_rhythm == "cyclic" else "")
-        + (f"Стабилизатор: <b>{s.stabilizer_target_months} мес.</b>\n" if s.needs_stabilizer else "")
-        + (f"Обязательства на время контракта: <b>{rub(s.contract_obligations_total)}</b>\n" if s.income_rhythm == "cyclic" else "")
-        + (f"Уже зарезервировано на рабочую часть: <b>{rub(st.contract_obligations_reserve)}</b>\n" if s.income_rhythm == "cyclic" else "")
-        +
-        f"Типов доходов: <b>{len(s.income_type_tax_rates)}</b>\n"
-        f"🛡️ Подушка сейчас: <b>{rub(st.pillow_balance)}</b>\n"
-        + (f"🛟 Стабилизатор дохода: <b>{rub(st.stabilizer_balance)}</b> / {rub(s.stabilizer_full_limit)}\n" if s.needs_stabilizer else "")
-        + (f"Фонд Зарплаты: <b>{rub(st.intercontract_reserve)}</b> / {rub(allocator.intercontract_current_limit)}\n" if s.income_rhythm == "cyclic" else "")
-        +
-        f"🛠 Уровень разработчика: <b>{dev_status}</b>\n\n"
-        f"❤️ Категории КЖ: {escape(categories)}\n"
-        f"Цели и Сундуки: {escape(goals)}\n\n"
-        f"Бракеты: {s.bracket_a}% / {s.bracket_b}% / {s.bracket_c}% / {s.bracket_d}%",
+        "\n".join(lines),
         reply_markup=keyboard([
             [(f"Профиль: { {'stable': 'Стабильный', 'piecework': 'Сдельный', 'cyclic': 'Циклический'}.get(allocator.profile_id, allocator.profile_id)}", "settings:rhythm")],
             [("Средний доход", "settings:income"), ("Типы доходов", "settings:income_types")],
