@@ -36,6 +36,7 @@ class EditSettingsStates(StatesGroup):
     income_type_confirm = State()
     life_categories = State()
     life_category_rename = State()
+    life_category_amount = State()
     goal_percentages = State()
     c_split = State()
 
@@ -1056,22 +1057,37 @@ async def save_tax(message: Message, state: FSMContext):
 async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    await state.set_state(EditSettingsStates.life_categories)
+    await state.clear()
     current = "\n".join(
         f"• {escape(name)} = {rub(amount)}"
         for name, amount in allocator.settings.life_categories.items()
     ) or "Отдельных категорий сейчас нет."
-    rows = [[(f"Переименовать: {name}", f"settings:life_rename:{name}")] for name in allocator.settings.life_categories]
+    rows = [[(name, f"settings:life_open:{name}")] for name in allocator.settings.life_categories]
     await callback.message.answer(
         "<b>ОТДЕЛЬНЫЕ КОНВЕРТЫ КРИТИЧЕСКОГО МИНИМУМА</b>\n\n"
         f"{current}\n\n"
-        "Отправьте весь новый список одним сообщением в формате:\n"
-        "<code>Квартира=43000, Транспорт=5000, Питомец=4000</code>\n\n"
-        "Всё, что не вынесено в отдельный конверт, бот автоматически оставит в «Зарплате».\n"
-        "Чтобы переименовать категорию без потери баланса, отправьте: "
-        "<code>переименовать: Старое название = Новое название</code>\n"
-        "Чтобы удалить все отдельные категории, отправьте: <code>нет</code>"
-        , reply_markup=keyboard(rows)
+        "Выберите категорию, чтобы изменить её название или сумму.\n\n"
+        "Не распределённая между категориями часть Критического минимума остаётся в конверте «Зарплата».",
+        reply_markup=keyboard(rows + [[("Назад", "settings:open")]])
+    )
+
+@router.callback_query(F.data.startswith("settings:life_open:"))
+async def open_life_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    name = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    amount = allocator.settings.life_categories.get(name)
+    if amount is None:
+        await callback.message.answer("Эта категория уже изменена. Откройте список заново.")
+        return
+    await state.update_data(life_category_old=name)
+    await callback.message.answer(
+        f"<b>{escape(name)}</b>\n\nСумма в Критическом минимуме — <b>{rub(amount)}</b>.",
+        reply_markup=keyboard([
+            [("Переименовать", f"settings:life_rename:{name}"), ("Изменить сумму", f"settings:life_amount:{name}")],
+            [("Удалить категорию", f"settings:life_delete:{name}")],
+            [("Назад к категориям", "settings:life_categories")],
+        ]),
     )
 
 @router.callback_query(F.data.startswith("settings:life_rename:"))
@@ -1082,12 +1098,51 @@ async def rename_life_category(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditSettingsStates.life_category_rename)
     await callback.message.answer(f"Введите новое название для категории «{escape(old)}».")
 
-@router.message(EditSettingsStates.life_categories, EditSettingsStates.life_category_rename)
+@router.callback_query(F.data.startswith("settings:life_amount:"))
+async def change_life_category_amount(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    name = callback.data.split(":", 2)[2]
+    await state.update_data(life_category_old=name)
+    await state.set_state(EditSettingsStates.life_category_amount)
+    await callback.message.answer(f"Введите новую месячную сумму для категории «{escape(name)}».")
+
+@router.callback_query(F.data.startswith("settings:life_delete:"))
+async def delete_life_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    name = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    if name in allocator.settings.life_categories:
+        allocator.settings.life_categories.pop(name)
+        allocator.state.period_life_topups.pop(name, None)
+        db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await callback.message.answer(f"Категория «{escape(name)}» удалена. Её сумма вернулась в конверт «Зарплата».", reply_markup=main_menu_keyboard(callback.from_user.id))
+
+@router.message(EditSettingsStates.life_categories)
+@router.message(EditSettingsStates.life_category_rename)
+@router.message(EditSettingsStates.life_category_amount)
 async def save_life_categories(message: Message, state: FSMContext):
     text = message.text.strip()
     allocator = db.load_allocator(message.from_user.id)
 
-    if await state.get_state() == EditSettingsStates.life_category_rename.state:
+    current_state = await state.get_state()
+    if current_state == EditSettingsStates.life_category_amount.state:
+        data = await state.get_data()
+        old, value = data.get("life_category_old", ""), parse_decimal(text)
+        if old not in allocator.settings.life_categories or value is None or value <= 0:
+            await message.answer("Введите сумму больше нуля.")
+            return
+        other_total = sum((amount for name, amount in allocator.settings.life_categories.items() if name != old), Decimal("0"))
+        if other_total + value > allocator.settings.critical_life:
+            await message.answer("Сумма категорий не может быть больше Критического минимума.")
+            return
+        allocator.settings.life_categories[old] = value
+        db.save_allocator(message.from_user.id, allocator)
+        await state.clear()
+        await message.answer(f"Сумма категории «{escape(old)}» обновлена: <b>{rub(value)}</b>.", reply_markup=main_menu_keyboard(message.from_user.id))
+        return
+
+    if current_state == EditSettingsStates.life_category_rename.state:
         data = await state.get_data()
         old, new = data.get("life_category_old", ""), text.strip()
         if not new or new in allocator.settings.life_categories or new in {"Подушка", "Стабилизатор", "Фонд Зарплаты", "Бытовой резерв", "Инвестиции", "Налог"}:
