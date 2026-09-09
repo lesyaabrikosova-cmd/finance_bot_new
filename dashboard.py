@@ -706,6 +706,45 @@ async def confirm_reserve_rebalancing(callback: CallbackQuery):
 # БАЛАНСЫ
 # ============================================================
 
+def period_balance_chart(allocator, allocations):
+    """Disjoint period flows: no opening balances or aggregate/detail duplication."""
+    from hashlib import sha256
+    import colorsys
+    values, colors = {}, {}
+    def add(label, value, color):
+        value = D(value)
+        if value > 0:
+            values[label] = values.get(label, Decimal(0)) + value
+            colors[label] = color
+    def shade(name, brown=False):
+        seed = int.from_bytes(sha256(name.encode()).digest()[:4], 'big')
+        hue = (20 + seed % 16) / 360 if brown else (350 + seed % 24) % 360 / 360
+        light = (28 + (seed // 31) % 39) / 100
+        rgb = colorsys.hls_to_rgb(hue, light, .55 if brown else .7)
+        return '#' + ''.join(f'{round(v * 255):02x}' for v in rgb)
+    add('Налог', allocator.state.period_tax, '#7656D8')
+    life = dict(allocator.state.period_life_topups)
+    for key, value in allocations.items():
+        if key.startswith('КЖ:') and key[3:] not in life:
+            life[key[3:]] = value
+    for name, value in life.items():
+        add(f'КМ · {name}', value, shade(name))
+    add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#A7DFA0')
+    add('Подушка', allocations.get('Подушка', 0), '#EF963C')
+    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), '#3569BC')
+    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), '#65C7EA')
+    add('Инвестиции', allocations.get('Инвестиции', 0), '#267344')
+    for key, value in allocations.items():
+        if key.startswith('Цели:'):
+            name = key[5:]
+            add(f'Цели и Сундуки · {name}', value, shade(name, True))
+        elif key.startswith('Рабочие обязательства:'):
+            add(key.replace(':', ' · '), value, '#B36C75')
+    add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), '#9C7BAB')
+    add('Досрочное погашение', allocations.get('Досрочное', 0), '#74608C')
+    return values, colors
+
+
 async def send_balances(
     message: Message,
     telegram_id: int,
@@ -1035,21 +1074,11 @@ async def send_balances(
             f"{rub(settings.stabilizer_full_limit)}",
         ])
 
-    balances = {
-        "Текущая жизнь (КМ и БР)": state.life_balance,
-        "Подушка": state.pillow_balance,
-        "На обязательные платежи": state.accumulated_minimum_payments,
-        "Инвестиции — направлено всего": state.investments,
-        "Цели и Сундуки": sum(state.goal_balances.values(), Decimal(0)),
-    }
-    if settings.needs_stabilizer:
-        balances["Стабилизатор"] = state.stabilizer_balance
-    if settings.income_rhythm == "cyclic":
-        balances["Фонд Зарплаты"] = state.intercontract_reserve
-        balances["Обязательства во время работы"] = state.contract_obligations_reserve
+    balances, colors = period_balance_chart(allocator, allocations)
     await send_chart_report(
         message, balances, "БАЛАНСЫ", "\n".join(lines),
-        subtitle="Учтённые суммы в боте · инвестиции без переоценки",
+        subtitle=f"Пополнения конвертов · {period_label}",
+        colors=colors, preserve_order=True, center_amount=income,
         reply_markup=main_menu_keyboard(telegram_id),
     )
 

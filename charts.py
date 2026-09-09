@@ -8,17 +8,19 @@ from aiogram.types import BufferedInputFile
 PALETTE = ('#9675E5', '#55B5DB', '#E5B65B', '#69BE98', '#E68091', '#98A8EF', '#CE91D1', '#B6BA65')
 
 
-def chart_items(values):
+def chart_items(values, preserve_order=False):
     items = [(str(k), Decimal(str(v))) for k, v in values.items() if Decimal(str(v)) > 0]
+    if preserve_order:
+        return items
     items.sort(key=lambda item: item[1], reverse=True)
     if len(items) > 8:
         items = items[:7] + [('Остальное', sum((v for _, v in items[7:]), Decimal(0)))]
     return items
 
 
-def make_chart(values, title, subtitle='', colors=None, percentages_only=False):
+def make_chart(values, title, subtitle='', colors=None, percentages_only=False, *, preserve_order=False, center_amount=None):
     from PIL import Image, ImageDraw, ImageFont
-    items = chart_items(values)
+    items = chart_items(values, preserve_order)
     if not items:
         return None
     total = sum((v for _, v in items), Decimal(0))
@@ -32,13 +34,22 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False):
     start = -90
     used = []
     for i, (label, value) in enumerate(items):
-        color = (colors or {}).get(label, PALETTE[i])
+        color = (colors or {}).get(label, PALETTE[i % len(PALETTE)])
         used.append(color)
         end = start + float(value / total * 360)
         draw.pieslice((240, 190, 840, 790), start, end, fill=color)
         start = end
     draw.ellipse((395, 345, 685, 635), fill='#191321')
-    draw.text((540, 465), '100%', anchor='mm', font=font(58, True), fill='#F9F4ED')
+    if center_amount is None:
+        draw.text((540, 465), '100%', anchor='mm', font=font(58, True), fill='#F9F4ED')
+    else:
+        center = f'{center_amount:,.2f}'.replace(',', ' ').replace('.', ',')
+        size = 44
+        while draw.textlength(center, font=font(size, True)) > 258 and size > 14:
+            size -= 1
+        draw.text((540, 435), 'Доход за период', anchor='mm', font=font(27), fill='#D0C2D8')
+        draw.text((540, 485), center, anchor='mm', font=font(size, True), fill='#F9F4ED')
+        draw.text((540, 530), '₽ до налогов', anchor='mm', font=font(27), fill='#D0C2D8')
     for i, (label, value) in enumerate(items):
         y = 830 + i * 105
         draw.rounded_rectangle((48, y+8, 78, y+38), 6, fill=used[i])
@@ -46,7 +57,7 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False):
         while draw.textlength(label, font=label_font) > 930 and len(label) > 1:
             label = label[:-2] + '…'
         draw.text((100, y), label, font=label_font, fill='#F9F4ED')
-        percent = value / total * 100
+        percent = value / (center_amount if center_amount is not None and center_amount > 0 else total) * 100
         percent_text = '<0,1' if percent < Decimal('0.1') else f'{percent:.1f}'.replace('.', ',')
         amount = f'{value:,.2f}'.replace(',', ' ').replace('.', ',')
         draw.text((100, y+45), f'{percent_text}%' if percentages_only else f'{amount} ₽  ·  {percent_text}%', font=font(34, True), fill='#F1CD83')
@@ -55,9 +66,9 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False):
     return out.getvalue()
 
 
-async def send_chart_report(message, values, title, text, reply_markup=None, subtitle='', colors=None, percentages_only=False):
+async def send_chart_report(message, values, title, text, reply_markup=None, subtitle='', colors=None, percentages_only=False, **chart_options):
     try:
-        data = await asyncio.to_thread(make_chart, values, title, subtitle, colors, percentages_only)
+        data = await asyncio.to_thread(make_chart, values, title, subtitle, colors, percentages_only, **chart_options)
     except (ImportError, OSError):
         data = None
     if data:
