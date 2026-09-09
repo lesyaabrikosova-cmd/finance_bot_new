@@ -659,7 +659,7 @@ async def show_income_confirmation(
         tax_rule = (
             "по настройкам профиля"
         )
-        tax_percent = allocator.settings.income_type_tax_rates.get(income_type, ZERO)
+        tax_percent = allocator.settings.income_type_tax_rates.get(income_type, Decimal("0"))
 
     else:
 
@@ -747,7 +747,7 @@ async def edit_income_tax(
     shown_tax = Decimal(str(data["tax_override"])) if data.get("tax_override") is not None else automatic_tax
     shown_percent = data.get("tax_override_percent")
     if shown_percent is None and data.get("tax_override") is None:
-        shown_percent = allocator.settings.income_type_tax_rates.get(income_type, ZERO)
+        shown_percent = allocator.settings.income_type_tax_rates.get(income_type, Decimal("0"))
 
     await state.set_state(
         IncomeStates.tax_edit
