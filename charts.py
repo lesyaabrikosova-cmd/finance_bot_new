@@ -24,7 +24,8 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False, 
     if not items:
         return None
     total = sum((v for _, v in items), Decimal(0))
-    im = Image.new('RGB', (1080, 830 + 105 * len(items)), '#191321')
+    legend_rows = (len(items) + 1) // 2
+    im = Image.new('RGB', (1080, 830 + 105 * legend_rows), '#191321')
     draw = ImageDraw.Draw(im)
     font_dir = Path(__file__).resolve().parent / 'assets/fonts'
     def font(size, bold=False):
@@ -51,16 +52,18 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False, 
         draw.text((540, 485), center, anchor='mm', font=font(size, True), fill='#F9F4ED')
         draw.text((540, 530), '₽ до налогов', anchor='mm', font=font(27), fill='#D0C2D8')
     for i, (label, value) in enumerate(items):
-        y = 830 + i * 105
-        draw.rounded_rectangle((48, y+8, 78, y+38), 6, fill=used[i])
+        col, row = divmod(i, legend_rows)
+        x = 48 + col * 520
+        y = 830 + row * 105
+        draw.rounded_rectangle((x, y+8, x+30, y+38), 6, fill=used[i])
         label_font = font(36)
-        while draw.textlength(label, font=label_font) > 930 and len(label) > 1:
+        while draw.textlength(label, font=label_font) > 450 and len(label) > 1:
             label = label[:-2] + '…'
-        draw.text((100, y), label, font=label_font, fill='#F9F4ED')
+        draw.text((x+52, y), label, font=label_font, fill='#F9F4ED')
         percent = value / (center_amount if center_amount is not None and center_amount > 0 else total) * 100
         percent_text = '<0,1' if percent < Decimal('0.1') else f'{percent:.1f}'.replace('.', ',')
         amount = f'{value:,.2f}'.replace(',', ' ').replace('.', ',')
-        draw.text((100, y+45), f'{percent_text}%' if percentages_only else f'{amount} ₽  ·  {percent_text}%', font=font(34, True), fill='#F1CD83')
+        draw.text((x+52, y+45), f'{percent_text}%' if percentages_only else f'{amount} ₽  ·  {percent_text}%', font=font(34, True), fill='#F1CD83')
     out = BytesIO()
     im.save(out, 'PNG', optimize=True)
     return out.getvalue()
