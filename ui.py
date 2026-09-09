@@ -5,6 +5,9 @@ from storage import db
 
 def button_text(text: str) -> str:
     import re
+    # Эти значки являются частью явно заданных действий подтверждения.
+    if text in {"✖️ Отмена", "✔️ Распределить", "✎ Редактировать налог"}:
+        return text
     return re.sub(r'[\U0001F000-\U0001FAFF\u2300-\u27FF\u2B00-\u2BFF\uFE0F\u200D\u20E3]', '', text).strip() or 'Открыть'
 
 

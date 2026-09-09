@@ -738,44 +738,16 @@ async def edit_income_tax(
 
     await callback.message.answer(
         "🏛️ <b>НАЛОГ ЭТОГО ПОСТУПЛЕНИЯ</b>\n\n"
-        f"Сумма поступления: <b>{rub(amount)}</b>\n"
-        f"Тип: <b>{escape(income_type)}</b>\n\n"
-        f"По настройкам профиля сейчас: "
-        f"<b>{rub(automatic_tax)}</b>\n\n"
+        f"{escape(income_type)} — {rub(amount)}\n"
+        "————————————\n"
+        f"🏛️ Налог — {fmt_money(automatic_tax)}\n"
+        "————————————\n"
         "Изменение ниже действует <b>только на это "
         "поступление</b> и не меняет налоговые "
         "настройки профиля.",
         reply_markup=keyboard([
-            [
-                (
-                    "По настройкам профиля",
-                    "taxedit:auto",
-                ),
-            ],
-            [
-                (
-                    "НДФЛ платит работодатель",
-                    "taxedit:none",
-                ),
-            ],
-            [
-                (
-                    "Самозанятость от физлиц — 4%",
-                    "taxedit:pct:4",
-                ),
-            ],
-            [
-                (
-                    "Самозанятость от юрлиц и ИП — 6%",
-                    "taxedit:pct:6",
-                ),
-            ],
-            [
-                (
-                    "13%",
-                    "taxedit:pct:13",
-                ),
-            ],
+            [("3%", "taxedit:pct:3"), ("4%", "taxedit:pct:4")],
+            [("6%", "taxedit:pct:6"), ("15%", "taxedit:pct:15")],
             [
                 (
                     "Ввести свой %",
@@ -790,7 +762,7 @@ async def edit_income_tax(
             ],
             [
                 (
-                    "⬅️ Назад",
+                    "← Назад",
                     "taxedit:back",
                 )
             ],
