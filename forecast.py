@@ -40,6 +40,9 @@ def parse_decimal(text: str | None) -> Decimal | None:
 def rub(value: Decimal) -> str:
     return f"{fmt_money(value)} ₽"
 
+def rub_plain(value: Decimal) -> str:
+    return fmt_money(value)
+
 
 @router.callback_query(F.data == "menu:forecast")
 async def start_forecast(callback: CallbackQuery, state: FSMContext):
@@ -150,7 +153,7 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
             source, available, Decimal("0")
         )
     lines = ["<b>ПРОГНОЗ РАСПРЕДЕЛЕНИЯ</b>", "",
-             f"Ожидаемая сумма — <b>{rub(available)}</b>"]
+             f"Ожидаемая сумма — <b>{rub_plain(available)}</b>"]
     if source.profile_id == "cyclic":
         lines.extend([f"Обязательства на время контракта — <b>{rub(obligations)}</b>",
                       f"К распределению после возвращения — <b>{rub(distributable)}</b>",
@@ -159,18 +162,18 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
                   "<blockquote>" + forecast_allocation_text(source, result.allocations if result else {}, plain=True) + "</blockquote>"])
     critical = max(Decimal("0"), simulated.settings.critical_life - simulated.state.life_balance)
     sustainable = max(Decimal("0"), simulated.settings.household_life - simulated.state.life_balance)
-    lines.extend(["", "<b>ОЖИДАЕМЫЙ УРОВЕНЬ</b>",
+    lines.extend(["", "<b>ОЖИДАЕМЫЙ УРОВЕНЬ</b>", "",
                   f"{'🏆' * simulated.active_mode()}", "",
                   "—————————",
                   "",
-                  f"↺ <b>Баланс жизни</b> — {rub(simulated.state.life_balance)}",
-                  f"➤ До <b>Критич. минимума</b> — {rub(critical)}",
-                  f"➤ До <b>Устойч. жизни</b> — {rub(sustainable)}", "",
-                  f"🛡️ Подушка — <b>{rub(simulated.state.pillow_balance)}</b>"])
+                  f"↺ <b>Баланс жизни</b> — {rub_plain(simulated.state.life_balance)}",
+                  f"➤ До <b>Критич. минимума</b> — {rub_plain(critical)}",
+                  f"➤ До <b>Устойч. жизни</b> — {rub_plain(sustainable)}", "",
+                  f"🛡️ Подушка — <b>{rub_plain(simulated.state.pillow_balance)}</b>"])
     if simulated.settings.needs_stabilizer:
-        lines.append(f"🛟 Стабилизатор — <b>{rub(simulated.state.stabilizer_balance)}</b>")
+        lines.append(f"🛟 Стабилизатор — <b>{rub_plain(simulated.state.stabilizer_balance)}</b>")
     if simulated.profile_id == "cyclic":
-        lines.append(f"🏦 Фонд Зарплаты — <b>{rub(simulated.state.intercontract_reserve)}</b>")
+        lines.append(f"🏦 Фонд Зарплаты — <b>{rub_plain(simulated.state.intercontract_reserve)}</b>")
     await state.clear()
     await message.answer(
         "\n".join(lines),

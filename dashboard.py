@@ -846,7 +846,7 @@ async def send_balances(
 
     lines = [
         "<b>БАЛАНСЫ ЗА ПЕРИОД</b>", "",
-        f"💲 <b>Доход</b> — {rub(income)}",
+        f"💲 <b>Доход</b> — {rub(income)}", "",
         f"🏛️ <b>Налог</b> — {rub_plain(tax)} • {pct(tax, income)}", "",
     ]
     if investment_period > 0:
@@ -858,7 +858,8 @@ async def send_balances(
         lines.append(f"🛟 <b>Стабилизатор</b> — {rub_plain(stabilizer_period)} • {pct(stabilizer_period, income)}")
     if settings.income_rhythm == "cyclic" and fund_salary_period > 0:
         lines.append(f"🏦 <b>Фонд Зарплаты</b> — {rub_plain(fund_salary_period)} • {pct(fund_salary_period, income)}")
-    lines.append("")
+    if investment_period <= 0:
+        lines.append("")
 
     # --------------------------------------------------------
     # Каждая категория КЖ
@@ -1006,7 +1007,6 @@ async def send_balances(
         f"↺ <b>Баланс жизни</b> — {rub_plain(state.life_balance)}",
         f"➤ До <b>Критич. минимума</b> — {rub_plain(until_kzh)}",
         f"➤ До <b>Устойч. жизни</b> — {rub_plain(until_uzh)}",
-        "",
     ])
 
     if next_info:
