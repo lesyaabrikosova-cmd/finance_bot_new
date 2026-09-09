@@ -1338,19 +1338,19 @@ async def send_distribution_report(
         f"{escape(income_type)} — "
         f"{money_plain(result.income)}",
         "",
-        "",
     ]
 
     # ========================================================
     # РАСПРЕДЕЛЕНИЕ
     # ========================================================
 
-    distribution_lines = []
+    distribution_groups = [[], [], [], [], [], []]
 
     def add_distribution_line(
         emoji: str,
         name: str,
         amount: Decimal,
+        group: int,
     ):
 
         amount = Decimal(
@@ -1361,7 +1361,7 @@ async def send_distribution_report(
         # Разработчик — все строки.
         if developer_mode or amount > ZERO:
 
-            distribution_lines.append(
+            distribution_groups[group].append(
                 f"{emoji} <b>{escape(name)}</b> — "
                 f"{money_plain(amount)}"
             )
@@ -1369,24 +1369,18 @@ async def send_distribution_report(
     add_distribution_line(
         "🏛️",
         "Налог",
-        result.tax,
-    )
-
-    add_distribution_line(
-        "🛡️",
-        "Подушка",
-        allocations.get(
-            "Подушка",
-            ZERO,
-        ),
+        result.tax, 0,
     )
 
     if allocator.profile_id == "cyclic":
-        add_distribution_line("🔁", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", ZERO))
+        add_distribution_line("🏦", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", ZERO), 1)
+    add_distribution_line("🛡️", "Подушка", allocations.get("Подушка", ZERO), 1)
     if settings.needs_stabilizer:
-        add_distribution_line("🛟", "Стабилизатор дохода", allocations.get("Стабилизатор дохода", ZERO))
-    add_distribution_line("📈", "Инвестиции", allocations.get("Инвестиции", ZERO))
+        add_distribution_line("🛟", "Стабилизатор", allocations.get("Стабилизатор дохода", ZERO), 1)
+    add_distribution_line("📈", "Инвестиции", allocations.get("Инвестиции", ZERO), 1)
 
+    add_distribution_line("💳", "Минимальные платежи", allocations.get("Мин. платеж", ZERO), 2)
+    add_distribution_line("💳", "Досрочное погашение", allocations.get("Досрочное", ZERO), 2)
     for key, value in allocations.items():
         if key.startswith("Рабочие обязательства:"):
             parts = key.split(":", 2)
@@ -1395,9 +1389,9 @@ async def send_distribution_report(
                 label = f"{expense} → {envelope}"
             else:
                 label = key.split(":", 1)[1]
-            add_distribution_line("📌", label, value)
+            add_distribution_line("💳", label, value, 2)
 
-    for name in settings.life_categories.keys():
+    for name in sorted(settings.life_categories, key=lambda name: Decimal(str(allocations.get(f"КЖ:{name}", ZERO))), reverse=True):
 
         add_distribution_line(
             "❤️",
@@ -1405,7 +1399,7 @@ async def send_distribution_report(
             allocations.get(
                 f"КЖ:{name}",
                 ZERO,
-            ),
+            ), 3,
         )
 
     if (
@@ -1419,26 +1413,8 @@ async def send_distribution_report(
             allocations.get(
                 "КЖ:Зарплата",
                 ZERO,
-            ),
+            ), 3,
         )
-
-    add_distribution_line(
-        "💳",
-        "Минимальные платежи",
-        allocations.get(
-            "Мин. платеж",
-            ZERO,
-        ),
-    )
-
-    add_distribution_line(
-        "💳",
-        "Досрочное погашение",
-        allocations.get(
-            "Досрочное",
-            ZERO,
-        ),
-    )
 
     add_distribution_line(
         "💚",
@@ -1446,19 +1422,12 @@ async def send_distribution_report(
         allocations.get(
             "Бытовой резерв",
             ZERO,
-        ),
+        ), 4,
     )
-
-    for name in settings.household_reserve_categories:
-        add_distribution_line(
-            "❤️" if name == "Дети" else "💚",
-            name,
-            allocations.get(f"БР:{name}", ZERO),
-        )
 
     if settings.active_goals:
 
-        for goal in settings.active_goals:
+        for goal in sorted(settings.active_goals, key=lambda goal: Decimal(str(allocations.get(f"Цели:{goal.name}", ZERO))), reverse=True):
 
             add_distribution_line(
                 "🧳" if goal.is_chest else "⭐️",
@@ -1466,7 +1435,7 @@ async def send_distribution_report(
                 allocations.get(
                     f"Цели:{goal.name}",
                     ZERO,
-                ),
+                ), 5,
             )
 
     else:
@@ -1477,25 +1446,20 @@ async def send_distribution_report(
             allocations.get(
                 "Цели:ЦЕЛИ (всего)",
                 ZERO,
-            ),
+            ), 5,
         )
 
 
     # В Telegram блок цитаты.
     lines.append("<b>РАСПРЕДЕЛЕНИЕ</b>")
 
-    lines.append("")
-
     lines.append(
         "<blockquote>"
-        + "\n".join(
-            distribution_lines
-        )
+        + "\n\n".join("\n".join(group) for group in distribution_groups if group)
         + "</blockquote>"
     )
 
     lines.extend([
-        "",
         "",
     ])
 
@@ -1503,82 +1467,9 @@ async def send_distribution_report(
 
     reward = "🏆" * mode + "➖" * (allocator.profile_mode_total - mode)
 
-    next_info = allocator.next_mode_info()
-
     lines.append(reward)
 
-    if next_info:
-
-        remaining = money_plain(
-            next_info["remaining"]
-        )
-
-        if settings.profile_type == "cyclic":
-            reward_text = {
-                1: f"Отложи на Подушку ещё {remaining} ₽ и защити себя от новых долгов!",
-                2: f"Погаси ещё {remaining} ₽ долгов и начни платить будущему себе!",
-                3: f"Отложи в Фонд Зарплаты ещё {remaining} ₽ и обеспечь обязательную жизнь на время перерыва!",
-                4: f"Отложи в Фонд Зарплаты ещё {remaining} ₽ и обеспечь Устойчивую жизнь на весь перерыв!",
-                5: f"Отложи на Подушку ещё {remaining} ₽ и подготовься к форс-мажорам!",
-                6: f"Отложи в Стабилизатор дохода ещё {remaining} ₽ и защити Критический минимум от задержки контракта!",
-                7: f"Отложи в Стабилизатор дохода ещё {remaining} ₽ и копи на цели ещё быстрее!",
-            }
-        elif settings.profile_type == "piecework":
-            reward_text = {
-                1: (
-                    "Отложи на Подушку ещё "
-                    f"{remaining} ₽ и защити себя от новых долгов!"
-                ),
-                2: (
-                    "Погаси еще "
-                    f"{remaining} ₽ долгов и начни формировать надежную "
-                    "форс-мажорную Подушку!"
-                ),
-                3: (
-                    "Отложи на Подушку ещё "
-                    f"{remaining} ₽ и открой Стабилизатор дохода!"
-                ),
-                4: (
-                    "Отложи в Стабилизатор дохода ещё "
-                    f"{remaining} ₽ — и откроются инвестиции и цели!"
-                ),
-                5: (
-                    "Отложи в Стабилизатор дохода ещё "
-                    f"{remaining} ₽ и копи на цели еще быстрее!"
-                ),
-            }
-        else:
-            reward_text = {
-                1: (
-                    "Отложи на Подушку еще "
-                    f"{remaining} ₽ и защити себя от новых долгов!"
-                ),
-                2: (
-                    "Погаси еще "
-                    f"{remaining} ₽ долгов и начни формировать надежную "
-                    "форс-мажорную Подушку!"
-                ),
-                3: (
-                    "Отложи на Подушку еще "
-                    f"{remaining} ₽ и копи на цели еще быстрее!"
-                ),
-            }
-
-        lines.append(
-            reward_text.get(
-                mode,
-                f"До следующего уровня осталось {remaining} ₽."
-            )
-        )
-
-    else:
-
-        lines.append(
-            "Философский камень найден."
-        )
-
     lines.extend([
-        "",
         "",
     ])
 
@@ -1599,37 +1490,17 @@ async def send_distribution_report(
     )
 
     lines.extend([
-        "<b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>",
+        "————————————",
+        f"↺ <b>Баланс жизни</b> — {money_plain(state.life_balance)}",
+        f"➤ До <b>Критич. минимума</b> — {money_plain(life_remaining)}",
+        f"➤ До <b>Устойчив. жизни</b> — {money_plain(sustainable_remaining)}",
         "",
-        f"↺ <b>Баланс жизни</b> — "
-        f"{money_plain(state.life_balance)}",
-        f"🛡️ <b>Подушка</b> — "
-        f"{money_plain(state.pillow_balance)}",
-        *(
-            [f"🏦 <b>Фонд Зарплаты</b> — {money_plain(state.intercontract_reserve)}"]
-            if settings.income_rhythm == "cyclic"
-            else []
-        ),
-        *(
-            [f"🛟 <b>Стабилизатор дохода</b> — {money_plain(state.stabilizer_balance)}"]
-            if settings.needs_stabilizer
-            else []
-        ),
-        f"➤ <b>До Критич. минимума</b> — "
-        f"{money_plain(life_remaining)}",
-        f"➤ <b>До Устойчив. жизни</b> — "
-        f"{money_plain(sustainable_remaining)}",
+        f"🛡️ <b>Подушка</b> — {money_plain(state.pillow_balance)}",
+        *([f"🛟 <b>Стабилизатор</b> — {money_plain(state.stabilizer_balance)}"] if settings.needs_stabilizer else []),
+        *([f"🏦 <b>Фонд Зарплаты</b> — {money_plain(state.intercontract_reserve)}"] if settings.income_rhythm == "cyclic" else []),
     ])
 
-    balance_index = lines.index(
-        "<b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>"
-    )
-    main_sections = [
-        "\n".join(lines[:4]).strip(),
-        "\n".join(lines[4:9]).strip(),
-        "\n".join(lines[9:balance_index]).strip(),
-        "\n".join(lines[balance_index:]).strip(),
-    ]
+    main_sections = ["\n".join(lines).strip()]
     main_sections = [
         section
         for section in main_sections
