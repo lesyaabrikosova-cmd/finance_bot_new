@@ -73,7 +73,8 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False, 
     return out.getvalue()
 
 
-async def send_chart_report(message, values, title, text, reply_markup=None, subtitle='', colors=None, percentages_only=False, **chart_options):
+async def send_chart_report(message, values, title, text, reply_markup=None, subtitle='', colors=None,
+                            percentages_only=False, fallback_text=None, **chart_options):
     try:
         data = await asyncio.to_thread(make_chart, values, title, subtitle, colors, percentages_only, **chart_options)
     except (ImportError, OSError):
@@ -82,5 +83,7 @@ async def send_chart_report(message, values, title, text, reply_markup=None, sub
         await message.answer_photo(photo=BufferedInputFile(data, filename='report.png'),
                                    caption=text if len(text) <= 1024 else title,
                                    reply_markup=reply_markup if len(text) <= 1024 else None)
-    if not data or len(text) > 1024:
+    if not data:
+        await message.answer(fallback_text or text, reply_markup=reply_markup)
+    elif len(text) > 1024:
         await message.answer(text, reply_markup=reply_markup)

@@ -1036,10 +1036,24 @@ async def send_balances(
         ])
 
     balances, colors = period_balance_chart(allocator, allocations)
+    summary_lines = [
+        "<b>БАЛАНСЫ ЗА ПЕРИОД</b>", "",
+        f"↺ <b>Баланс жизни</b> — {rub_plain(state.life_balance)}",
+        f"➤ До <b>Критич. минимума</b> — {rub_plain(until_kzh)}",
+        f"➤ До <b>Устойч. жизни</b> — {rub_plain(until_uzh)}",
+    ]
+    if next_info:
+        summary_lines.append(
+            f"➤ До следующего уровня — {next_info['next_name']}: "
+            f"<b>{rub_plain(next_info['remaining'])}</b>"
+        )
+    else:
+        summary_lines.append("➤ До следующего уровня — <b>максимальный уровень достигнут</b>")
     await send_chart_report(
-        message, balances, "БАЛАНСЫ", "\n".join(lines),
+        message, balances, "БАЛАНСЫ", "\n".join(summary_lines),
         subtitle=f"Пополнения конвертов · {period_label}",
         colors=colors, preserve_order=True, center_amount=income,
+        fallback_text="\n".join(lines),
         reply_markup=main_menu_keyboard(telegram_id),
     )
 
