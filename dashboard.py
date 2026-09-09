@@ -712,24 +712,43 @@ async def confirm_reserve_rebalancing(callback: CallbackQuery):
 def period_balance_chart(allocator, allocations):
     """Disjoint period flows: no opening balances or aggregate/detail duplication."""
     from hashlib import sha256
-    import colorsys
     values, colors = {}, {}
+
+    life_colors = (
+        '#B83F4A', '#D45A66', '#E77A82', '#9D2635',
+        '#F09AA0', '#C94B5B', '#A83345', '#D96B73',
+    )
+    goal_colors = (
+        '#E7B52E', '#F2C94C', '#D99A1A', '#F6D365',
+        '#C98A13', '#FFD86B', '#E9AD35', '#F4C54F',
+    )
+    chest_colors = (
+        '#7A4B2B', '#9C6338', '#B87943', '#6B3E25',
+        '#C68A50', '#8A5732', '#A96D3D', '#704126',
+    )
+
     def add(label, value, color):
         value = D(value)
         if value > 0:
             values[label] = values.get(label, Decimal(0)) + value
             colors[label] = color
-    def shade(name, brown=False):
+
+    def shade(name, palette, used):
+        """Choose distinct shades within a color family for the current chart."""
         seed = int.from_bytes(sha256(name.encode()).digest()[:4], 'big')
-        hue = (20 + seed % 16) / 360 if brown else (350 + seed % 24) % 360 / 360
-        light = (28 + (seed // 31) % 39) / 100
-        rgb = colorsys.hls_to_rgb(hue, light, .55 if brown else .7)
-        return '#' + ''.join(f'{round(v * 255):02x}' for v in rgb)
+        start = seed % len(palette)
+        for offset in range(len(palette)):
+            color = palette[(start + offset) % len(palette)]
+            if color not in used:
+                used.add(color)
+                return color
+        return palette[start]
+
     add('Налог', allocator.state.period_tax, '#7656D8')
-    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), '#65C7EA')
-    add('Подушка', allocations.get('Подушка', 0), '#EF963C')
-    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), '#3569BC')
-    add('Инвестиции', allocations.get('Инвестиции', 0), '#267344')
+    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), '#00B7E8')
+    add('Подушка', allocations.get('Подушка', 0), '#173F8A')
+    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), '#7EC8F5')
+    add('Инвестиции', allocations.get('Инвестиции', 0), '#32A9E0')
     add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), '#9C7BAB')
     add('Досрочное погашение', allocations.get('Досрочное', 0), '#74608C')
     for key, value in allocations.items():
@@ -740,15 +759,19 @@ def period_balance_chart(allocator, allocations):
     for key, value in allocations.items():
         if key.startswith('КЖ:') and not allocator.state.period_life_topups:
             life[key[3:]] = value
+    used_life_colors = set()
     for name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
-        add(f'КМ · {name}', value, shade(name))
+        add(f'КМ · {name}', value, shade(name, life_colors, used_life_colors))
     add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#A7DFA0')
     goal_map = {goal.name: goal for goal in getattr(getattr(allocator, 'settings', None), 'goals', [])}
     goal_items = [(key[5:], value) for key, value in allocations.items() if key.startswith('Цели:')]
+    used_goal_colors, used_chest_colors = set(), set()
     for name, value in sorted(goal_items, key=lambda item: D(item[1]), reverse=True):
         goal = goal_map.get(name)
         display = goal_display_name(name, bool(goal and goal.is_chest))
-        add(f'Цели и Сундуки · {display}', value, shade(name, True))
+        palette = chest_colors if goal and goal.is_chest else goal_colors
+        used = used_chest_colors if goal and goal.is_chest else used_goal_colors
+        add(f'Цели и Сундуки · {display}', value, shade(name, palette, used))
     return values, colors
 
 
