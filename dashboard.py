@@ -1251,7 +1251,7 @@ async def send_income_analysis(
     )
 
     lines = [
-        f"👛 Доход итого: "
+        f"💲 Доход итого: "
         f"<b>{rub(total_income)}</b>",
         "",
     ]
@@ -1267,6 +1267,7 @@ async def send_income_analysis(
     await send_chart_report(
         message, totals, "АНАЛИЗ ДОХОДОВ", "\n".join(lines),
         subtitle="Источники дохода · текущий расчётный период",
+        center_amount=total_income,
         reply_markup=main_menu_keyboard(telegram_id),
     )
 

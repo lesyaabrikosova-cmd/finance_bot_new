@@ -1411,6 +1411,7 @@ async def send_distribution_report(
         add_distribution_line("🔁", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", ZERO))
     if settings.needs_stabilizer:
         add_distribution_line("🛟", "Стабилизатор дохода", allocations.get("Стабилизатор дохода", ZERO))
+    add_distribution_line("📈", "Инвестиции", allocations.get("Инвестиции", ZERO))
 
     for key, value in allocations.items():
         if key.startswith("Рабочие обязательства:"):
@@ -1505,19 +1506,9 @@ async def send_distribution_report(
             ),
         )
 
-    add_distribution_line(
-        "📈",
-        "Инвестиции",
-        allocations.get(
-            "Инвестиции",
-            ZERO,
-        ),
-    )
 
     # В Telegram блок цитаты.
-    lines.append(
-        "<b>РАСПРЕДЕЛЕНИЕ</b>"
-    )
+    lines.append("<b>РАСПРЕДЕЛЕНИЕ</b>")
 
     lines.append("")
 

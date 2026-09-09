@@ -275,6 +275,8 @@ def report_text(
 
     for name in TAX_GROUPS:
         amount = groups[name]["total"]
+        if amount <= ZERO and annual_total > ZERO:
+            continue
         percent = ZERO if annual_total <= ZERO else amount * Decimal("100") / annual_total
         lines.append(f"<b>{name} — {money(amount)} ({percent.quantize(Decimal('0.1'))}%)</b>")
         details = groups[name]["details"]
@@ -316,11 +318,16 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         rows.append([("Учитывать оплаты", "taxes:tracking:on")])
     rows.append([("Назад", "taxes:back")])
 
-    text += "\n\nДиаграмма показывает отложенные за год деньги. Добавленный налог появится в ней после пополнения при распределении дохода."
+    text += ("\n\n——————\n\n"
+             "<b>P.S.</b> Налог на <b>доход</b> платите по графику своего налогового режима. "
+             "Налоги на <b>квартиру, машину и землю</b> за "
+             f"{year} год нужно будет заплатить <b>до 1 декабря {year + 1} года</b>.")
+    tax_values = {name: data["total"] for name, data in groups.items() if data["total"] > ZERO}
     await send_chart_report(
-        message, {name: data["total"] for name, data in groups.items()},
+        message, tax_values,
         "НАЛОГИ", text, reply_markup=keyboard(rows),
         subtitle=f"Фактически отложено ботом за {year} год", colors=TAX_COLORS,
+        center_amount=annual_total,
     )
 
 
