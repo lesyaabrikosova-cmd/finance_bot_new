@@ -38,7 +38,7 @@ def parse_decimal(text: str | None) -> Decimal | None:
 
 
 def rub(value: Decimal) -> str:
-    return f"{fmt_money(value)} ₽"
+    return fmt_money(value)
 
 
 @router.callback_query(F.data == "menu:forecast")
@@ -159,9 +159,10 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
                   "<blockquote>" + forecast_allocation_text(source, result.allocations if result else {}) + "</blockquote>"])
     critical = max(Decimal("0"), simulated.settings.critical_life - simulated.state.life_balance)
     sustainable = max(Decimal("0"), simulated.settings.household_life - simulated.state.life_balance)
-    lines.extend(["", "<b>БУДУЩИЙ УРОВЕНЬ</b>",
+    lines.extend(["", "<b>ОЖИДАЕМЫЙ УРОВЕНЬ</b>",
                   f"{'🏆' * simulated.active_mode()}", "",
-                  "<b>БУДУЩИЕ БАЛАНСЫ</b>", "",
+                  "—————————",
+                  "",
                   f"↺ <b>Баланс жизни</b> — {rub(simulated.state.life_balance)}",
                   f"➤ До <b>Критич. минимума</b> — {rub(critical)}",
                   f"➤ До <b>Устойч. жизни</b> — {rub(sustainable)}", "",
