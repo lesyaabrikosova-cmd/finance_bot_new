@@ -35,6 +35,7 @@ class EditSettingsStates(StatesGroup):
     income_type_edit_rate = State()
     income_type_confirm = State()
     life_categories = State()
+    life_category_rename = State()
     goal_percentages = State()
     c_split = State()
 
@@ -1060,6 +1061,7 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         f"• {escape(name)} = {rub(amount)}"
         for name, amount in allocator.settings.life_categories.items()
     ) or "Отдельных категорий сейчас нет."
+    rows = [[(f"Переименовать: {name}", f"settings:life_rename:{name}")] for name in allocator.settings.life_categories]
     await callback.message.answer(
         "<b>ОТДЕЛЬНЫЕ КОНВЕРТЫ КРИТИЧЕСКОГО МИНИМУМА</b>\n\n"
         f"{current}\n\n"
@@ -1069,12 +1071,35 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         "Чтобы переименовать категорию без потери баланса, отправьте: "
         "<code>переименовать: Старое название = Новое название</code>\n"
         "Чтобы удалить все отдельные категории, отправьте: <code>нет</code>"
+        , reply_markup=keyboard(rows)
     )
 
-@router.message(EditSettingsStates.life_categories)
+@router.callback_query(F.data.startswith("settings:life_rename:"))
+async def rename_life_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    old = callback.data.split(":", 2)[2]
+    await state.update_data(life_category_old=old)
+    await state.set_state(EditSettingsStates.life_category_rename)
+    await callback.message.answer(f"Введите новое название для категории «{escape(old)}».")
+
+@router.message(EditSettingsStates.life_categories, EditSettingsStates.life_category_rename)
 async def save_life_categories(message: Message, state: FSMContext):
     text = message.text.strip()
     allocator = db.load_allocator(message.from_user.id)
+
+    if await state.get_state() == EditSettingsStates.life_category_rename.state:
+        data = await state.get_data()
+        old, new = data.get("life_category_old", ""), text.strip()
+        if not new or new in allocator.settings.life_categories or new in {"Подушка", "Стабилизатор", "Фонд Зарплаты", "Бытовой резерв", "Инвестиции", "Налог"}:
+            await message.answer("Такое название недоступно. Введите другое название.")
+            return
+        allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
+        if old in allocator.state.period_life_topups:
+            allocator.state.period_life_topups[new] = allocator.state.period_life_topups.pop(old)
+        db.save_allocator(message.from_user.id, allocator)
+        await state.clear()
+        await message.answer(f"Категория переименована: <b>{escape(new)}</b>.", reply_markup=main_menu_keyboard(message.from_user.id))
+        return
 
     if text.lower().startswith("переименовать:"):
         try:
