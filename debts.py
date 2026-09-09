@@ -114,7 +114,7 @@ async def add_debt_minimum(message: Message, state: FSMContext):
         )
     await state.clear()
     await message.answer(
-        f"✔️ Долг добавлен.\n\nТекущий режим: <b>{mode}</b>.\n\n{advice}",
+        f"✔️ Долг добавлен.\n\nТекущий уровень: <b>{mode}</b>.\n\n{advice}",
         reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
@@ -212,7 +212,7 @@ async def debt_payment_save(message: Message, state: FSMContext):
     await message.answer(
         f"Платёж учтён — <b>{fmt_money(applied)} ₽</b>.\n"
         f"Остаток — <b>{fmt_money(credit.principal_balance)} ₽</b>.\n"
-        f"Текущий режим — <b>{allocator.active_mode()}</b>.",
+        f"Текущий уровень — <b>{allocator.active_mode()}</b>.",
         reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
@@ -245,7 +245,7 @@ async def debt_balance_save(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         f"Остаток обновлён: <b>{fmt_money(amount)} ₽</b>.\n"
-        f"Текущий режим — <b>{allocator.active_mode()}</b>.",
+        f"Текущий уровень — <b>{allocator.active_mode()}</b>.",
         reply_markup=main_menu_keyboard(message.from_user.id),
     )
 

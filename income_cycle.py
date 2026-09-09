@@ -22,9 +22,9 @@ def financial_profile(employment_type: str, income_rhythm: str) -> str:
 def profile_route(profile: str, include_debt_stages: bool = True) -> tuple[str, ...]:
     debt = ("Минимальная подушка", "Погашение долгов") if include_debt_stages else ()
     routes = {
-        STABLE_EMPLOYEE: ("ФМ-подушка", "Максимальный режим"),
+        STABLE_EMPLOYEE: ("ФМ-подушка", "Максимальный уровень"),
         STABLE_FREELANCER: (
-            "ФМ-подушка", "Стабилизатор-КМ", "Стабилизатор-УЖ", "Максимальный режим"
+            "ФМ-подушка", "Стабилизатор-КМ", "Стабилизатор-УЖ", "Максимальный уровень"
         ),
         CYCLIC: (
             "Фонд Зарплаты-КМ",
@@ -32,7 +32,7 @@ def profile_route(profile: str, include_debt_stages: bool = True) -> tuple[str, 
             "ФМ-подушка",
             "Стабилизатор-КМ",
             "Стабилизатор-УЖ",
-            "Максимальный режим",
+            "Максимальный уровень",
         ),
     }
     if profile not in routes:

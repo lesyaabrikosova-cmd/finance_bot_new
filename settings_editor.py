@@ -87,9 +87,9 @@ async def show_settings_menu(message: Message, telegram_id: int):
     )
 
     dev_button = (
-        "🛠 Выключить режим разработчика"
+        "🛠 Выключить уровень разработчика"
         if s.developer_mode
-        else "🛠 Включить режим разработчика"
+        else "🛠 Включить уровень разработчика"
     )
 
     goals = ", ".join(
@@ -127,32 +127,32 @@ async def show_settings_menu(message: Message, telegram_id: int):
         + (f"🛟 Стабилизатор дохода: <b>{rub(st.stabilizer_balance)}</b> / {rub(s.stabilizer_full_limit)}\n" if s.needs_stabilizer else "")
         + (f"Фонд Зарплаты: <b>{rub(st.intercontract_reserve)}</b> / {rub(allocator.intercontract_current_limit)}\n" if s.income_rhythm == "cyclic" else "")
         +
-        f"🛠 Режим разработчика: <b>{dev_status}</b>\n\n"
+        f"🛠 Уровень разработчика: <b>{dev_status}</b>\n\n"
         f"❤️ Категории КЖ: {escape(categories)}\n"
         f"Цели и Сундуки: {escape(goals)}\n\n"
-        f"Распределение этапа C: ⭐️ цели {s.goals_share_c}% / 🛡️ подушка {s.pillow_share_c}%",
+        f"Бракеты: {s.bracket_a}% / {s.bracket_b}% / {s.bracket_c}% / {s.bracket_d}%",
         reply_markup=keyboard([
-            [("🛡️ Изменить Подушку", "settings:pillow")],
-            [("ФМ-подушка", "settings:force_months"), ("Стабилизатор", "settings:stabilizer_months")],
-            [("Баланс Стабилизатора", "settings:stabilizer_balance")],
-            [("Фонд Зарплаты", "settings:intercontract_balance")],
-            [("🔴 Изменить КЖ", "settings:critical"), ("💚 Изменить Быт. резерв", "settings:household")],
-            *(
-                [
-                    [("Изменить рабочую жизнь", "phaselife:fill:work")],
-                    [("Изменить жизнь в перерыве", "phaselife:fill:break")],
-                ]
-                if s.income_rhythm == "cyclic"
-                else []
-            ),
-            [("💰 Средний доход", "settings:income")],
-            [("Ритм поступлений", "settings:rhythm")],
-            [("Типы доходов", "settings:income_types")],
-            [("Плановые платежи", "settings:planned")],
-            [("❤️ Категории КЖ", "settings:life_categories")],
+            [(f"Профиль: { {'stable': 'Стабильный', 'piecework': 'Сдельный', 'cyclic': 'Циклический'}.get(allocator.profile_id, allocator.profile_id)}", "settings:rhythm")],
+            [("Средний доход", "settings:income"), ("Типы доходов", "settings:income_types")],
+            [("Настройки Подушки", "settings:force_months")],
+            [("Баланс Подушки", "settings:pillow")],
+            *([
+                [("Настройки Стабилизатора", "settings:stabilizer_months")],
+                [("Баланс Стабилизатора", "settings:stabilizer_balance")],
+            ] if s.needs_stabilizer else []),
+            *([[("Баланс Фонда Зарплаты", "settings:intercontract_balance")]] if allocator.profile_id == "cyclic" else []),
+            [("Изменить КМ", "settings:critical"), ("Категории КМ", "settings:life_categories")],
+            [("Изменить Бытовой резерв", "settings:household")],
             [("Цели и Сундуки", "goals:manage")],
+            [("Бракеты", "brackets:open")],
+            [("Расходы к дате", "settings:planned")],
+            *([
+                [("Изменить рабочую жизнь", "phaselife:fill:work")],
+                [("Изменить жизнь в перерыве", "phaselife:fill:break")],
+            ] if allocator.profile_id == "cyclic" else []),
             [(dev_button, "settings:developer")],
             [("🗑 Полный сброс учёта", "settings:full_reset")],
+            *([[("🧹 Удалить профиль и всю историю", "settings:erase_all")]] if s.developer_mode else []),
             [("🔄 Пройти настройку заново", "setup:restart")],
             [("⬅️ Главное меню", "menu:back")],
         ]),
@@ -553,7 +553,7 @@ async def toggle_developer(
     )
 
     await callback.message.answer(
-        f"✅ Режим разработчика {status}."
+        f"✅ Уровень разработчика {status}."
     )
 
     await show_settings_menu(
@@ -584,7 +584,8 @@ async def ask_full_reset(
         "💚 Бытовой резерв текущего периода\n"
         "👛 Доход текущего периода\n"
         "🏛️ Налог текущего периода\n"
-        "📜 История распределений\n\n"
+        "📜 История распределений и оплаты налогов\n"
+        "🏛️ Накопления на налоги и плановые платежи\n\n"
         "<b>Настройки профиля сохранятся.</b>\n"
         "КЖ, Бытовой резерв, категории, проценты, налог, "
         "тип занятости и данные кредитов останутся без изменений.",
@@ -644,6 +645,13 @@ async def confirm_full_reset(
     st.intercontract_reserve = Decimal("0")
     st.contract_obligations_reserve = Decimal("0")
 
+    st.fund_salary_currencies = {}
+    st.fund_salary_start_reserves = {}
+    st.fund_salary_period_rates = {}
+    st.cycle_income = Decimal("0")
+    for goal in allocator.settings.goals:
+        goal.balance = Decimal("0")
+
     # Накопительные финансовые показатели
     st.investments = Decimal("0")
     st.early_repayment = Decimal("0")
@@ -679,6 +687,8 @@ async def confirm_full_reset(
         callback.from_user.id,
         allocator,
     )
+
+    db.clear_accounting_history(callback.from_user.id)
 
     await callback.message.answer(
         "✅ <b>УЧЁТ ПОЛНОСТЬЮ ОБНУЛЁН</b>\n\n"
@@ -1189,26 +1199,47 @@ async def save_c_strategy(callback: CallbackQuery, state: FSMContext):
 
 @router.message(EditSettingsStates.c_split)
 async def save_c_split(message: Message, state: FSMContext):
-    parts = [part.strip() for part in message.text.split(",")]
-    if len(parts) != 2:
-        await message.answer("Введите два процента через запятую, например: 60,40")
-        return
-
-    first = parse_decimal(parts[0])
-    second = parse_decimal(parts[1])
-
-    if (
-        first is None or second is None
-        or first < 0 or second < 0
-        or abs(first + second - Decimal("100")) > Decimal("0.0001")
-    ):
-        await message.answer("Проценты должны быть неотрицательными и в сумме давать 100%.")
-        return
-
-    allocator = db.load_allocator(message.from_user.id)
-    allocator.settings.goals_share_c = first
-    allocator.settings.pillow_share_c = second
-    db.save_allocator(message.from_user.id, allocator)
-
     await state.clear()
-    await message.answer(f"✅ Этап C обновлён: ⭐️ {first}% / 🛡️ {second}%", reply_markup=main_menu_keyboard(message.from_user.id))
+    await message.answer(
+        "Проценты остатка больше не настраиваются отдельно: они определяются правилами уровня. "
+        "Там, где остаток делится между двумя направлениями, он делится поровну.",
+        reply_markup=main_menu_keyboard(message.from_user.id),
+    )
+
+
+@router.callback_query(F.data == "settings:erase_all")
+async def ask_erase_all(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or not allocator.settings.developer_mode:
+        return
+    await state.clear()
+    await state.update_data(erase_all_pending=True)
+    await callback.message.answer(
+        "<b>УДАЛИТЬ ПРОФИЛЬ И ВСЮ ИСТОРИЮ?</b>\n\n"
+        "Будут удалены настройки, балансы, Цели и Сундуки, кредиты, "
+        "все распределения, налоги, оплаты налогов и плановые платежи.\n"
+        "Это касается только вашего аккаунта. Отменить удаление нельзя.\n"
+        "После удаления отправьте /start, чтобы пройти настройку с нуля.\n"
+        "Старые сообщения в Telegram останутся, но данные в боте будут удалены.",
+        reply_markup=keyboard([
+            [("Удалить всё и начать с нуля", "settings:erase_all_confirm")],
+            [("Отмена", "settings:full_reset_cancel")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "settings:erase_all_confirm")
+async def confirm_erase_all(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    pending = (await state.get_data()).get("erase_all_pending")
+    allocator = db.load_allocator(callback.from_user.id)
+    if not pending or allocator is None or not allocator.settings.developer_mode:
+        await callback.message.answer("Откройте удаление заново в настройках режима разработчика.")
+        return
+    db.delete_user(callback.from_user.id)
+    await state.clear()
+    await callback.message.answer(
+        "Профиль и вся история удалены. Налоги, оплаты и обязательства тоже очищены.\n\n"
+        "Отправьте /start — начнём с чистого профиля."
+    )

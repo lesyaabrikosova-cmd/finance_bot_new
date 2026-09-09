@@ -19,6 +19,7 @@ from financial_engine import (
 from storage import db
 from ui import keyboard, main_menu_keyboard
 from mode_presentation import mode_image_path
+from charts import send_chart_report
 
 
 router = Router()
@@ -68,7 +69,7 @@ async def send_text_with_image(
 
 
 # ============================================================
-# ОПИСАНИЯ РЕЖИМОВ
+# ОПИСАНИЯ УРОВНЕЙ
 # ============================================================
 
 EMPLOYEE_MODES = {
@@ -228,8 +229,8 @@ HELP_TEXT = (
     "Новый доход — внести поступление и получить распределение.\n\n"
     "Балансы — посмотреть текущее положение дел и аналитику "
     "расчётного периода.\n\n"
-    "Режим — посмотреть текущий финансовый уровень, описание "
-    "и остаток до следующего режима.\n\n"
+    "Уровень — посмотреть текущий финансовый уровень, описание "
+    "и остаток до следующего уровня.\n\n"
     "Кредиты — посмотреть кредиты и остатки.\n\n"
     "Цели — посмотреть цели и накопления.\n\n"
     "Новый расчетный период — вручную начать новый период.\n\n"
@@ -433,7 +434,7 @@ async def menu_back(
 
 
 # ============================================================
-# РЕЖИМ
+# УРОВЕНЬ
 # ============================================================
 
 async def send_mode(
@@ -505,7 +506,7 @@ async def send_mode(
     if plan["transfers"]:
         rows.append([("Сбалансировать резервы", "mode:rebalance")])
     rows.extend([
-        [("Изменить размеры резервов", "settings:open")],
+        [("Изменить размеры резервов", "menu:reserves")],
         [("← Главное меню", "menu:back")],
     ])
 
@@ -601,7 +602,7 @@ async def explain_resilience_mode(callback: CallbackQuery):
         f"{levels}{priority_text}\n\n"
         "Деньги между банковскими счетами автоматически не переводятся.",
         reply_markup=keyboard([
-            [("← К режиму", "menu:state")],
+            [("← К уровню", "menu:state")],
             [("← Главное меню", "menu:back")],
         ]),
     )
@@ -620,7 +621,7 @@ async def show_reserve_rebalancing(callback: CallbackQuery):
             "<b>СЕЙЧАС ДЕЙСТВУЕТ ДОЛГОВОЙ МАРШРУТ</b>\n\n"
             "Сначала Аллокатор проверяет Минимальную подушку и погашение долга. "
             "Обычная балансировка защитных резервов станет доступна после закрытия долгов.",
-            reply_markup=keyboard([[('← К режиму', 'menu:state')]]),
+            reply_markup=keyboard([[('← К уровню', 'menu:state')]]),
         )
         return
     account_lines = []
@@ -644,7 +645,7 @@ async def show_reserve_rebalancing(callback: CallbackQuery):
     if not transfer_lines:
         await callback.message.answer(
             "<b>БАЛАНСИРОВКА НЕ ТРЕБУЕТСЯ</b>\n\n" + "\n".join(account_lines),
-            reply_markup=keyboard([[('← К режиму', 'menu:state')]]),
+            reply_markup=keyboard([[('← К уровню', 'menu:state')]]),
         )
         return
 
@@ -665,7 +666,7 @@ async def show_reserve_rebalancing(callback: CallbackQuery):
         "а затем подтвердите их.",
         reply_markup=keyboard([
             [("✔️ Переводы выполнены", "mode:rebalance:confirm")],
-            [("Изменить размеры резервов", "settings:open")],
+            [("Изменить размеры резервов", "menu:reserves")],
             [("Пока не выполнять", "menu:state")],
         ]),
     )
@@ -682,7 +683,7 @@ async def confirm_reserve_rebalancing(callback: CallbackQuery):
     if not plan["transfers"]:
         await callback.message.answer(
             "Балансы уже изменились, поэтому прежний план больше не требуется.",
-            reply_markup=keyboard([[('Открыть режим', 'menu:state')]]),
+            reply_markup=keyboard([[('Открыть уровень', 'menu:state')]]),
         )
         return
     allocator.apply_reserve_rebalancing()
@@ -697,7 +698,7 @@ async def confirm_reserve_rebalancing(callback: CallbackQuery):
         "Аллокатор зафиксировал подтверждённые переводы:\n\n"
         + "\n".join(lines)
         + "\n\nЭта операция не считается новым доходом и не изменяет налоговую статистику.",
-        reply_markup=keyboard([[('Открыть режим', 'menu:state')]]),
+        reply_markup=keyboard([[('Открыть уровень', 'menu:state')]]),
     )
 
 
@@ -1001,7 +1002,7 @@ async def send_balances(
     if next_info:
 
         lines.append(
-            f"→ До следующего режима "
+            f"→ До следующего уровня "
             f"{next_info['next_name']}: "
             f"<b>{rub(next_info['remaining'])}</b>"
         )
@@ -1009,12 +1010,12 @@ async def send_balances(
     else:
 
         lines.append(
-            "→ До следующего режима: "
-            "<b>максимальный режим достигнут</b>"
+            "→ До следующего уровня: "
+            "<b>максимальный уровень достигнут</b>"
         )
 
     # --------------------------------------------------------
-    # Только режим разработчика
+    # Только уровень разработчика
     # --------------------------------------------------------
 
     if settings.developer_mode:
@@ -1022,7 +1023,7 @@ async def send_balances(
         lines.extend([
             "",
             "<b>ЗАЩИТНЫЕ РЕЗЕРВЫ — "
-            "РЕЖИМ РАЗРАБОТЧИКА</b>",
+            "УРОВЕНЬ РАЗРАБОТЧИКА</b>",
             f"МП: "
             f"{rub(state.pillow_minimum)} / "
             f"{rub(settings.minimum_reserve_limit)}",
@@ -1034,8 +1035,21 @@ async def send_balances(
             f"{rub(settings.stabilizer_full_limit)}",
         ])
 
-    await message.answer(
-        "\n".join(lines),
+    balances = {
+        "Текущая жизнь (КМ и БР)": state.life_balance,
+        "Подушка": state.pillow_balance,
+        "На обязательные платежи": state.accumulated_minimum_payments,
+        "Инвестиции — направлено всего": state.investments,
+        "Цели и Сундуки": sum(state.goal_balances.values(), Decimal(0)),
+    }
+    if settings.needs_stabilizer:
+        balances["Стабилизатор"] = state.stabilizer_balance
+    if settings.income_rhythm == "cyclic":
+        balances["Фонд Зарплаты"] = state.intercontract_reserve
+        balances["Обязательства во время работы"] = state.contract_obligations_reserve
+    await send_chart_report(
+        message, balances, "БАЛАНСЫ", "\n".join(lines),
+        subtitle="Учтённые суммы в боте · инвестиции без переоценки",
         reply_markup=main_menu_keyboard(telegram_id),
     )
 
@@ -1227,11 +1241,10 @@ async def send_income_analysis(
 
     if total_income <= 0:
 
-        await send_text_with_image(
-            message,
+        await send_chart_report(
+            message, {}, "АНАЛИЗ ДОХОДОВ",
             "В текущем расчётном периоде "
             "пока нет поступлений.",
-            INCOME_ANALYSIS_IMAGE_PATH,
             reply_markup=main_menu_keyboard(telegram_id),
         )
 
@@ -1261,10 +1274,9 @@ async def send_income_analysis(
             f"({pct(amount, total_income)})"
         )
 
-    await send_text_with_image(
-        message,
-        "\n".join(lines),
-        INCOME_ANALYSIS_IMAGE_PATH,
+    await send_chart_report(
+        message, totals, "АНАЛИЗ ДОХОДОВ", "\n".join(lines),
+        subtitle="Источники дохода · текущий расчётный период",
         reply_markup=main_menu_keyboard(telegram_id),
     )
 
@@ -1284,4 +1296,25 @@ async def menu_income_analysis(
     await send_income_analysis(
         callback.message,
         callback.from_user.id,
+    )
+
+
+@router.callback_query(F.data == "menu:reserves")
+async def menu_reserves(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await callback.message.answer("Сначала создайте профиль через /start.")
+        return
+    rows = [[("Баланс Подушки", "settings:pillow")]]
+    if allocator.settings.needs_stabilizer:
+        rows.append([("Баланс Стабилизатора", "settings:stabilizer_balance")])
+    if allocator.profile_id == "cyclic":
+        rows.append([("Баланс Фонда Зарплаты", "settings:intercontract_balance")])
+    rows.append([("Главное меню", "menu:back")])
+    await callback.message.answer(
+        "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
+        "Выберите резерв и укажите, сколько денег в нём сейчас. "
+        "Аллокатор учтёт новую сумму при определении вашего уровня.",
+        reply_markup=keyboard(rows),
     )

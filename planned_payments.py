@@ -16,7 +16,7 @@ def months_remaining(due_date: str, today: date | None = None) -> int:
 
 
 def refresh_planned_payment_targets(
-    telegram_id: int, allocator, today: date | None = None
+    telegram_id: int, allocator, today: date | None = None, *, persist: bool = True
 ) -> None:
     """Подтягивает месячный взнос к фактическому остатку и сроку."""
     obligations = db.load_planned_payments(telegram_id)
@@ -30,7 +30,7 @@ def refresh_planned_payment_targets(
             Decimal("0.01"), rounding=ROUND_CEILING
         )
         new_by_envelope[envelope] = new_by_envelope.get(envelope, ZERO) + monthly
-        if monthly != item["monthly_amount"]:
+        if persist and monthly != item["monthly_amount"]:
             db.update_planned_payment_monthly(telegram_id, item["id"], monthly)
 
     for envelope, new_total in new_by_envelope.items():

@@ -33,7 +33,7 @@ class ModePresentationTests(unittest.TestCase):
             for mode, asset_key in modes.items():
                 configured_assets.add(asset_key)
                 path = mode_image_path(profile_id, mode)
-                self.assertIsNotNone(path, f"Нет изображения: {profile_id}, режим {mode}")
+                self.assertIsNotNone(path, f"Нет изображения: {profile_id}, уровень {mode}")
                 self.assertTrue(path.is_file())
 
         files_on_disk = {path.stem for path in MODE_IMAGES_DIR.glob("*.png")}

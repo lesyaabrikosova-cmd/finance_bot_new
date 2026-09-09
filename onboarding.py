@@ -35,7 +35,7 @@ from financial_engine import (
 from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
 
 from storage import db
-from ui import main_menu_keyboard
+from ui import main_menu_keyboard, button_text
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 
 
@@ -111,6 +111,7 @@ class SetupStates(StatesGroup):
     km_education_pass_frequency = State()
     km_education_due_date = State()
     km_education_confirm = State()
+    km_food_required_amount = State()
     km_custom_period = State()
     km_edit_name = State()
     km_edit_amount = State()
@@ -163,8 +164,12 @@ class SetupStates(StatesGroup):
     goal_deadline = State()
     goal_buffer_percent = State()
     goal_percentages_review = State()
+    goal_quick_edit_amount = State()
+    goal_quick_edit_deadline = State()
     goal_vacation_item = State()
     goal_vacation_review = State()
+    onboarding_forecast = State()
+    budget_optimization_amount = State()
 
     # Кредиты
     debt_strategy = State()
@@ -215,15 +220,7 @@ def keyboard(
             seen_callbacks.add(data)
             normalized_row.append(
                 InlineKeyboardButton(
-                    text=(
-                        "✖️ Отмена" if text == "Отмена"
-                        else "+ Другое" if text == "Другое"
-                        else "Продолжить →" if text == "Продолжить"
-                        else "← Назад" if text == "Назад"
-                        else "✔️ Готово" if text == "Готово"
-                        else "✔️ Сохранить" if text == "Сохранить"
-                        else text
-                    ),
+                    text=button_text(text),
                     callback_data=data,
                 )
             )
@@ -238,7 +235,7 @@ def life_result_keyboard() -> InlineKeyboardMarkup:
     """Кнопки проверки стоимости жизни до окончательного подтверждения."""
     return keyboard([
         [("Продолжить →", "kmfinal:continue")],
-        [("↔️ Перераспределить КМ и БР", "lifeclassification:show")],
+        [("КМ ⇄ БР", "lifeclassification:show")],
         [("✎ Редактировать расходы", "lifeedit:list")],
         [("✎ Изменить сумму КМ", "kmfinal:override")],
         [("✎ Изменить сумму БР", "lifeoverride:br")],
@@ -739,11 +736,11 @@ def should_auto_route_to_reserve(
     months: Decimal,
     combined_onboarding: bool,
 ) -> bool:
-    """Неежемесячные цифровые расходы, привычки и комиссии относятся к БР."""
+    """Неежемесячные цифровые расходы и комиссии относятся к БР."""
     return (
         combined_onboarding
         and months > 1
-        and category in {"communication", "habits", "fees"}
+        and category in {"communication", "fees"}
     )
 
 
@@ -955,8 +952,13 @@ def life_expense_summary(items: list[dict], symbol: str = "₽") -> str:
                 f"• <b>{escape(name)}</b> — {format_money_symbol(amount, symbol)} / "
                 f"{source_period_label(Decimal(months))}"
             )
-        blocks.append(f"<b><u>{escape(category.upper())}</u></b>\n\n" + "\n".join(lines))
+        blocks.append(life_category_heading(category) + "\n\n" + "\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def life_category_heading(category: str) -> str:
+    """Единое оформление заголовка категории в сводках стоимости жизни."""
+    return f"<b><u>{escape(str(category).upper())}</u></b>"
 
 
 def format_money_symbol(value: Decimal, symbol: str = "₽") -> str:
@@ -1060,7 +1062,14 @@ def default_km_storage(item: dict) -> dict:
 
 
 def build_default_km_storage(items: list[dict]) -> list[dict]:
-    return [default_km_storage(item) for item in items]
+    result = [default_km_storage(item) for item in items]
+    education_count = sum(item.get("category") == "education" for item in items)
+    if education_count > 1:
+        for item in result:
+            if item.get("category") == "education":
+                item["storage"] = "separate"
+                item["envelope_name"] = "Образование"
+    return result
 
 
 def life_categories_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
@@ -1215,6 +1224,15 @@ def is_gift_expense(item: dict) -> bool:
     return category == "gifts" or (category == "children" and subtype == "gifts")
 
 
+def is_future_goal_expense(item: dict) -> bool:
+    """Расход учтён при онбординге, но будет предложен как будущая Цель."""
+    return bool(item.get("future_goal"))
+
+
+def is_deferred_life_expense(item: dict) -> bool:
+    return is_gift_expense(item) or is_future_goal_expense(item)
+
+
 def gift_history_monthly(items: list[dict]) -> Decimal:
     return money2(sum(
         (Decimal(str(item.get("monthly", "0"))) for item in items if is_gift_expense(item)),
@@ -1225,11 +1243,46 @@ def gift_history_monthly(items: list[dict]) -> Decimal:
 def br_group_totals(items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in items:
-        if is_gift_expense(item):
+        if is_deferred_life_expense(item):
             continue
         label = item["category_label"]
         result[label] = money2(result.get(label, Decimal("0")) + Decimal(item["monthly"]))
     return result
+
+
+def life_result_breakdown_lines(
+    destination_items: list[dict],
+    other_destination_items: list[dict],
+) -> list[str]:
+    """Раскрывает только категории, которые одновременно встретились в КМ и БР."""
+    visible = [item for item in destination_items if not is_deferred_life_expense(item)]
+    other = [item for item in other_destination_items if not is_deferred_life_expense(item)]
+    split_categories = {
+        str(item.get("source_category") or item.get("category") or "") for item in visible
+    } & {
+        str(item.get("source_category") or item.get("category") or "") for item in other
+    }
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for item in visible:
+        key = str(item.get("source_category") or item.get("category") or "")
+        label = str(item.get("category_label") or "Другое")
+        groups.setdefault((key, label), []).append(item)
+
+    lines: list[str] = []
+    for (key, label), items in groups.items():
+        if key in split_categories:
+            for item in items:
+                lines.append(
+                    f"• {escape(str(item.get('name') or label))} — "
+                    f"{rub(Decimal(str(item.get('monthly', '0'))))}"
+                )
+        else:
+            total = money2(sum(
+                (Decimal(str(item.get("monthly", "0"))) for item in items),
+                Decimal("0"),
+            ))
+            lines.append(f"• {escape(label)} — {rub(total)}")
+    return lines
 
 
 def cyclic_gift_history_monthly(phase_budgets: dict, work_months: Decimal, gap_months: Decimal) -> Decimal:
@@ -2066,7 +2119,7 @@ async def show_km_menu(
         [("Одежда", "lifebr:clothes"), ("Подарки", "lifebr:gifts")],
         [("Спорт", "lifebr:gym"), ("Быт", "lifebr:repairs")],
         [("Комиссии", "kmcat:fees"), ("Услуги", "lifebr:services")],
-        [("+ Другое", "lifebr:other")],
+        [("+ Другое", "lifeother:start")],
     ]
     if items or br_items:
         rows.append([("✎ Редактировать", "lifeedit:list"), ("✔️ Готово", "km:finish")])
@@ -2153,6 +2206,36 @@ async def choose_combined_reserve_category(callback: CallbackQuery, state: FSMCo
     )
 
 
+@router.callback_query(F.data == "lifeother:start")
+async def choose_other_life_destination(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer(
+        "<b>ДРУГОЙ РАСХОД</b>\n\nКуда отнести этот расход?",
+        reply_markup=keyboard([
+            [("Критический минимум", "lifeother:km")],
+            [("Бытовой резерв", "lifeother:br")],
+            [("← Назад", "km:cancel")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.in_({"lifeother:km", "lifeother:br"}))
+async def start_other_life_expense(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    destination = callback.data.rsplit(":", 1)[1]
+    await state.update_data(
+        pending_life_destination=destination,
+        pending_km_category="other",
+        pending_km_category_label="Другое",
+        pending_km_subcategory="other",
+    )
+    await state.set_state(SetupStates.km_item_name)
+    await callback.message.answer(
+        "<b>ДРУГОЙ РАСХОД</b>\n\n——————\n<b>→ Введите название расхода.</b>",
+        reply_markup=life_input_keyboard("lifeother:start"),
+    )
+
+
 @router.callback_query(F.data.startswith("lifeclothes:"))
 async def choose_clothes_input(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -2179,7 +2262,7 @@ async def choose_clothes_input(callback: CallbackQuery, state: FSMContext):
     )
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("lifebrquick:"))
+@router.callback_query(F.data.startswith("lifebrquick:"))
 async def choose_life_reserve_item(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     _, category, code = callback.data.split(":", 2)
@@ -2276,6 +2359,12 @@ async def show_km_category_after_save(
 ):
     """Показывает компактный итог текущей категории после сохранения."""
     data = await state.get_data()
+    if (
+        category == "transport"
+        and str(data.get("pending_km_subcategory") or "").startswith("car_")
+    ):
+        await show_car_expense_menu(message, state, notice=notice)
+        return
     grouped = category_added_entries(data, category)
     symbol = data.get("phase_currency_symbol", "₽") if data.get("income_rhythm") == "cyclic" else "₽"
     added = "\n".join(
@@ -2330,12 +2419,12 @@ async def show_km_category_after_save(
             text,
             reply_markup=keyboard([
                 [("Колледж и ВУЗ", "kmeducation:college")],
-                [("Курс", "kmeducation:course"), ("Репетитор", "kmeducation:tutor")],
+                [("Профессиональный курс", "kmeducation:course"), ("Репетитор", "kmeducation:tutor")],
                 [("Иностранные языки", "kmeducation:languages")],
                 [("Музыка и искусство", "kmeducation:arts")],
                 [("Профессиональное обучение", "kmeducation:professional")],
                 [("Мастер-классы", "kmeducation:masterclass"), ("Хобби", "kmeducation:hobby")],
-                [("Абонемент", "kmeducation:pass")],
+                [("Абонемент", "kmeducation:pass"), ("Клуб по интересам", "kmeducation:club")],
                 [("+ Другое", "kmeducation:other"), ("✔️ Готово", "km:cancel")],
             ]),
         )
@@ -2404,7 +2493,7 @@ async def show_km_category_after_save(
     await show_km_menu(message, state)
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmcat:"))
+@router.callback_query(F.data.startswith("kmcat:"))
 async def choose_km_category(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     key = callback.data.split(":", 1)[1]
@@ -2465,12 +2554,12 @@ async def choose_km_category(callback: CallbackQuery, state: FSMContext):
             "<b>ОБРАЗОВАНИЕ</b>\n\nДобавьте расходы на обучение, развитие и занятия.",
             reply_markup=keyboard([
                 [("Колледж и ВУЗ", "kmeducation:college")],
-                [("Курс", "kmeducation:course"), ("Репетитор", "kmeducation:tutor")],
+                [("Профессиональный курс", "kmeducation:course"), ("Репетитор", "kmeducation:tutor")],
                 [("Иностранные языки", "kmeducation:languages")],
                 [("Музыка и искусство", "kmeducation:arts")],
                 [("Профессиональное обучение", "kmeducation:professional")],
                 [("Мастер-классы", "kmeducation:masterclass"), ("Хобби", "kmeducation:hobby")],
-                [("Абонемент", "kmeducation:pass")],
+                [("Абонемент", "kmeducation:pass"), ("Клуб по интересам", "kmeducation:club")],
                 [("← Назад", "km:cancel")],
             ]),
         )
@@ -2578,7 +2667,7 @@ async def show_housing_expense_types(message: Message, state: FSMContext):
     )
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmhousing:"))
+@router.callback_query(F.data.startswith("kmhousing:"))
 async def choose_housing_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     action = callback.data.split(":", 1)[1]
@@ -2731,7 +2820,7 @@ async def housing_input_back(callback: CallbackQuery, state: FSMContext):
         await show_housing_objects(callback.message, state)
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmhousingobj:"))
+@router.callback_query(F.data.startswith("kmhousingobj:"))
 async def choose_housing_object(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     code = callback.data.split(":", 1)[1]
@@ -2764,7 +2853,7 @@ async def custom_housing_object_name(message: Message, state: FSMContext):
     await continue_housing_object(message, state, object_name)
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmhousingexpense:"))
+@router.callback_query(F.data.startswith("kmhousingexpense:"))
 async def choose_housing_object_expense(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     subtype = callback.data.split(":", 1)[1]
@@ -2807,7 +2896,7 @@ async def custom_housing_expense_name(message: Message, state: FSMContext):
     await show_housing_objects(message, state)
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmtransport:"))
+@router.callback_query(F.data.startswith("kmtransport:"))
 async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     subtype = callback.data.split(":", 1)[1]
@@ -2834,17 +2923,7 @@ async def choose_transport_subcategory(callback: CallbackQuery, state: FSMContex
         )
         return
     if subtype == "car":
-        await callback.message.answer(
-            "<b>АВТОМОБИЛЬ</b>\n\nВыберите расход.",
-            reply_markup=keyboard([
-                [("Бензин", "kmtransportcar:fuel"), ("Страхование", "kmtransportcar:insurance")],
-                [("ТО", "kmtransportcar:maintenance"), ("Расходники", "kmtransportcar:supplies")],
-                [("Автосервис", "kmtransportcar:service"), ("Шиномонтаж", "kmtransportcar:tireservice")],
-                [("Платные дороги", "kmtransportcar:tolls"), ("Мойка", "kmtransportcar:wash")],
-                [("Резина", "kmtransportcar:tires"), ("Штрафы ГИБДД", "kmtransportcar:fines")],
-                [("← Назад", "kmtransport:back"), ("+ Свой расход", "kmtransportcar:other")],
-            ]),
-        )
+        await show_car_expense_menu(callback.message, state)
         return
     if subtype not in labels:
         return
@@ -2932,7 +3011,51 @@ TRANSPORT_CAR_LABELS = {
 }
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmtransportcar:"))
+def car_expense_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [("Бензин", "kmtransportcar:fuel"), ("Страхование", "kmtransportcar:insurance")],
+        [("ТО", "kmtransportcar:maintenance"), ("Расходники", "kmtransportcar:supplies")],
+        [("Автосервис", "kmtransportcar:service"), ("Шиномонтаж", "kmtransportcar:tireservice")],
+        [("Платные дороги", "kmtransportcar:tolls"), ("Мойка", "kmtransportcar:wash")],
+        [("Резина", "kmtransportcar:tires"), ("Штрафы ГИБДД", "kmtransportcar:fines")],
+        [("+ Свой расход", "kmtransportcar:other"), ("✔️ Готово", "kmtransport:back")],
+    ])
+
+
+async def show_car_expense_menu(
+    message: Message,
+    state: FSMContext,
+    notice: str = "",
+):
+    """Оставляет пользователя внутри автомобиля до явного завершения раздела."""
+    data = await state.get_data()
+    car_items = [
+        item
+        for item in list(data.get("km_items", [])) + list(data.get("br_items", []))
+        if item.get("category") == "transport"
+        and str(item.get("subcategory") or "").startswith("car_")
+    ]
+    added = ""
+    if car_items:
+        symbol = (
+            data.get("phase_currency_symbol", "₽")
+            if data.get("income_rhythm") == "cyclic"
+            else "₽"
+        )
+        lines = [
+            f"• <b>{escape(km_item_display_name(item))}</b> — "
+            f"{format_money_symbol(Decimal(str(item['monthly'])), symbol)} / мес."
+            for item in car_items
+        ]
+        added = "\n\nДобавлено:\n\n" + "\n".join(lines)
+    text = "<b>АВТОМОБИЛЬ</b>\n\nВыберите расход." + added
+    if notice:
+        text = notice + "\n\n" + text
+    await state.set_state(SetupStates.km_menu)
+    await message.answer(text, reply_markup=car_expense_keyboard())
+
+
+@router.callback_query(F.data.startswith("kmtransportcar:"))
 async def choose_car_expense(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     code = callback.data.rsplit(":", 1)[1]
@@ -2980,17 +3103,7 @@ async def transport_input_back(callback: CallbackQuery, state: FSMContext):
     target = callback.data.rsplit(":", 1)[1]
     await state.set_state(SetupStates.km_menu)
     if target == "car":
-        await callback.message.answer(
-            "<b>АВТОМОБИЛЬ</b>\n\nВыберите расход.",
-            reply_markup=keyboard([
-                [("Бензин", "kmtransportcar:fuel"), ("Страхование", "kmtransportcar:insurance")],
-                [("ТО", "kmtransportcar:maintenance"), ("Расходники", "kmtransportcar:supplies")],
-                [("Автосервис", "kmtransportcar:service"), ("Шиномонтаж", "kmtransportcar:tireservice")],
-                [("Платные дороги", "kmtransportcar:tolls"), ("Мойка", "kmtransportcar:wash")],
-                [("Резина", "kmtransportcar:tires"), ("Штрафы ГИБДД", "kmtransportcar:fines")],
-                [("← Назад", "kmtransport:back"), ("+ Свой расход", "kmtransportcar:other")],
-            ]),
-        )
+        await show_car_expense_menu(callback.message, state)
         return
     await callback.message.answer(
         "<b>ТРАНСПОРТ</b>\n\nВыберите обязательный транспортный расход.",
@@ -3092,7 +3205,7 @@ async def ask_preset_km_amount(message: Message, state: FSMContext, name: str):
     )
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmquick:"))
+@router.callback_query(F.data.startswith("kmquick:"))
 async def choose_quick_km_subcategory(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     _, category, subtype = callback.data.split(":", 2)
@@ -3139,10 +3252,21 @@ async def choose_quick_km_subcategory(callback: CallbackQuery, state: FSMContext
             "br"
             if (category == "children" and subtype in {"clothes", "camp", "gifts"})
             or (category == "food" and subtype in {"outside", "fastfood", "delivery"})
+            or (category == "habits" and subtype in {"hookah", "alcohol", "nonalcohol"})
             else "km"
         ),
     )
     if subtype == "other":
+        if category == "habits":
+            await callback.message.answer(
+                "<b>СВОЙ РАСХОД</b>\n\nКак часто этот расход возникает в жизни?",
+                reply_markup=keyboard([
+                    [("Регулярно", "kmhabitsother:regular")],
+                    [("Время от времени", "kmhabitsother:occasional")],
+                    [("← Назад", "kmcat:habits")],
+                ]),
+            )
+            return
         await state.set_state(SetupStates.km_item_name)
         await callback.message.answer(
             f"<b>{escape(category_labels[category].upper())}</b>\n\n——————\n"
@@ -3153,7 +3277,26 @@ async def choose_quick_km_subcategory(callback: CallbackQuery, state: FSMContext
     await ask_preset_km_amount(callback.message, state, labels[category][subtype])
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmcommunication:"))
+@router.callback_query(F.data.startswith("kmhabitsother:"))
+async def choose_other_habit_frequency(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    frequency = callback.data.rsplit(":", 1)[1]
+    if frequency not in {"regular", "occasional"}:
+        return
+    await state.update_data(
+        pending_km_category="habits",
+        pending_km_category_label="Вредные привычки",
+        pending_km_subcategory="other",
+        pending_life_destination="km" if frequency == "regular" else "br",
+    )
+    await state.set_state(SetupStates.km_item_name)
+    await callback.message.answer(
+        "<b>СВОЙ РАСХОД</b>\n\n——————\n<b>→ Введите название расхода.</b>",
+        reply_markup=life_input_keyboard("kmcat:habits"),
+    )
+
+
+@router.callback_query(F.data.startswith("kmcommunication:"))
 async def choose_communication_subcategory(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     subtype = callback.data.rsplit(":", 1)[1]
@@ -3350,7 +3493,7 @@ async def continue_communication_detail(message: Message, state: FSMContext, det
     )
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmcommunicationlabel:"))
+@router.callback_query(F.data.startswith("kmcommunicationlabel:"))
 async def choose_communication_label(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     code = callback.data.rsplit(":", 1)[1]
@@ -3421,30 +3564,34 @@ async def communication_input_back(callback: CallbackQuery, state: FSMContext):
     )
 
 
-@router.callback_query(SetupStates.km_menu, F.data.startswith("kmeducation:"))
+@router.callback_query(F.data.startswith("kmeducation:"))
 async def choose_education_subcategory(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     subtype = callback.data.rsplit(":", 1)[1]
     labels = {
-        "college": "Колледж и ВУЗ", "course": "Курс", "tutor": "Репетитор",
+        "college": "Колледж и ВУЗ", "course": "Профессиональный курс", "tutor": "Репетитор",
         "languages": "Иностранные языки", "arts": "Музыка и искусство",
         "professional": "Профессиональное обучение", "masterclass": "Мастер-классы",
-        "hobby": "Хобби", "pass": "Абонемент",
+        "hobby": "Хобби", "pass": "Абонемент", "club": "Клуб по интересам",
         "other": "Другое",
     }
     if subtype not in labels:
         return
+    future_goal_subtypes = {"languages", "arts", "masterclass", "hobby", "pass", "club"}
     await state.update_data(
         pending_km_category="education",
         pending_km_category_label="Образование",
         pending_km_subcategory=subtype,
+        pending_life_destination=("future_goal" if subtype in future_goal_subtypes else "km"),
     )
     if subtype == "other":
-        await state.set_state(SetupStates.km_item_name)
         await callback.message.answer(
-            "<b>ДРУГОЙ РАСХОД НА ОБРАЗОВАНИЕ</b>\n\n——————\n"
-            "<b>→ Введите название расхода.</b>",
-            reply_markup=life_input_keyboard(current_life_back_callback(await state.get_data())),
+            "<b>ДРУГОЙ РАСХОД НА ОБРАЗОВАНИЕ</b>\n\nК какому виду он относится?",
+            reply_markup=keyboard([
+                [("Профессиональное образование", "kmeducationother:professional")],
+                [("Личное развитие", "kmeducationother:personal")],
+                [("← Назад", "kmcat:education")],
+            ]),
         )
         return
     await state.set_state(SetupStates.km_item_name)
@@ -3461,13 +3608,34 @@ async def choose_education_subcategory(callback: CallbackQuery, state: FSMContex
     )
 
 
+@router.callback_query(F.data.startswith("kmeducationother:"))
+async def choose_other_education_kind(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    kind = callback.data.rsplit(":", 1)[1]
+    if kind not in {"professional", "personal"}:
+        return
+    await state.update_data(
+        pending_km_category="education",
+        pending_km_category_label="Образование",
+        pending_km_subcategory="other",
+        pending_life_destination="km" if kind == "professional" else "future_goal",
+    )
+    await state.set_state(SetupStates.km_item_name)
+    await callback.message.answer(
+        "<b>ДРУГОЙ РАСХОД НА ОБРАЗОВАНИЕ</b>\n\n——————\n"
+        "<b>→ Введите название расхода.</b>",
+        reply_markup=life_input_keyboard("kmcat:education"),
+    )
+
+
 @router.message(SetupStates.km_item_name)
 async def km_item_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     if parse_decimal(name) is not None:
         await message.answer(
             "Похоже, вы ввели сумму вместо названия. Сначала напишите короткое название, "
-            "например <code>Квартира</code>. Сумму я спрошу следующим сообщением."
+            "например <code>Квартира</code>. Сумму я спрошу следующим сообщением.",
+            reply_markup=keyboard([[("✖️ Отмена", "km:cancel")]]),
         )
         return
     if len(name) < 2:
@@ -3848,6 +4016,25 @@ async def save_pass_accumulated(message: Message, state: FSMContext):
 async def save_km_item(message: Message, state: FSMContext, months: Decimal):
     data = await state.get_data()
     amount = Decimal(data["pending_km_item_amount"])
+    if (
+        data.get("pending_km_category") == "food"
+        and data.get("pending_km_subcategory") in {"outside", "fastfood", "delivery"}
+        and not data.get("pending_food_role")
+    ):
+        await state.update_data(pending_food_months=str(months))
+        await state.set_state(SetupStates.km_menu)
+        await message.answer(
+            "<b>КАКУЮ РОЛЬ ИГРАЕТ ЭТОТ РАСХОД?</b>\n\n"
+            "У некоторых людей такие расходы необходимы из-за работы, командировок, "
+            "здоровья или отсутствия другой возможности. В других ситуациях их можно сократить.",
+            reply_markup=keyboard([
+                [("Необходима вся сумма", "foodrole:essential")],
+                [("Необходима часть", "foodrole:split")],
+                [("Можно сократить", "foodrole:flexible")],
+                [("← Назад", f"kmcat:food")],
+            ]),
+        )
+        return
     accumulated = (
         Decimal(str(data.get("pending_km_accumulated", "0")))
         if data.get("pending_km_subcategory") == "pass"
@@ -3878,7 +4065,8 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         item["due_date"] = data["pending_km_due_date"]
     if data.get("pending_km_one_time"):
         item["one_time"] = True
-    if data.get("pending_life_destination") == "br":
+    destination = data.get("pending_life_destination")
+    if destination in {"br", "future_goal"}:
         br_items = list(data.get("br_items", []))
         br_item = {
             "category": item["category"],
@@ -3889,6 +4077,8 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
             "monthly": item["monthly"],
             "subcategory": item.get("subcategory"),
         }
+        if destination == "future_goal":
+            br_item["future_goal"] = True
         if item.get("due_date"):
             br_item["due_date"] = item["due_date"]
         br_items.append(br_item)
@@ -3896,6 +4086,8 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         await state.update_data(br_items=br_items, pending_life_destination=None)
         await state.set_state(SetupStates.km_menu)
         notice = f"Добавлено: <b>{escape(br_item['name'])}</b> — {monthly_text} / мес."
+        if destination == "future_goal":
+            notice += " Будет предложено как отдельная Цель."
         await show_km_category_after_save(message, state, category, notice)
         return
     items = list(data.get("km_items", []))
@@ -3947,6 +4139,126 @@ async def save_km_item(message: Message, state: FSMContext, months: Decimal):
         tax_due_text = f"\nСрок уплаты — <b>{date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}</b>"
     notice = f"Добавлено: <b>{escape(km_item_display_name(item))}</b> — {monthly_text} / мес.{tax_due_text}"
     await show_km_category_after_save(message, state, item["category"], notice)
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("foodrole:"))
+async def choose_food_expense_role(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    role = callback.data.rsplit(":", 1)[1]
+    data = await state.get_data()
+    months = Decimal(str(data.get("pending_food_months", "1")))
+    if role in {"essential", "flexible"}:
+        await state.update_data(
+            pending_food_role=role,
+            pending_life_destination="km" if role == "essential" else "br",
+        )
+        await save_km_item(callback.message, state, months)
+        await state.update_data(pending_food_role=None, pending_food_months=None)
+        return
+    if role != "split":
+        return
+    amount = Decimal(str(data["pending_km_item_amount"]))
+    rows = []
+    for percent in (25, 50, 75):
+        part = money2(amount * Decimal(percent) / Decimal("100"))
+        rows.append([(f"{percent}% — {rub(part)}", f"foodsplit:{percent}")])
+    rows.extend([
+        [("Указать сумму", "foodsplit:custom")],
+        [("← Назад", "foodrole:back")],
+    ])
+    await callback.message.answer(
+        "<b>КАКАЯ ЧАСТЬ БЫЛА НЕОБХОДИМОЙ?</b>\n\n"
+        f"Вы указали <b>{rub(amount)}</b> {input_period_label(months)}.\n\n"
+        "Выберите сумму, которую нельзя было избежать из-за работы, командировок, "
+        "здоровья или других обстоятельств. Остальная часть попадёт в Бытовой резерв.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "foodrole:back")
+async def return_to_food_role(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.km_menu)
+    await callback.message.answer(
+        "<b>КАКУЮ РОЛЬ ИГРАЕТ ЭТОТ РАСХОД?</b>",
+        reply_markup=keyboard([
+            [("Необходима вся сумма", "foodrole:essential")],
+            [("Необходима часть", "foodrole:split")],
+            [("Можно сократить", "foodrole:flexible")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.km_menu, F.data.startswith("foodsplit:"))
+async def choose_food_required_part(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    value = callback.data.rsplit(":", 1)[1]
+    if value == "custom":
+        await state.set_state(SetupStates.km_food_required_amount)
+        data = await state.get_data()
+        await callback.message.answer(
+            f"Введите необходимую часть из <b>{rub(Decimal(str(data['pending_km_item_amount'])))}</b> "
+            "за указанный период. Она должна быть больше нуля и меньше общей суммы."
+        )
+        return
+    try:
+        percent = Decimal(value)
+    except InvalidOperation:
+        return
+    data = await state.get_data()
+    required = money2(Decimal(str(data["pending_km_item_amount"])) * percent / Decimal("100"))
+    await save_split_food_expense(callback.message, state, required)
+
+
+@router.message(SetupStates.km_food_required_amount)
+async def save_custom_food_required_part(message: Message, state: FSMContext):
+    required = parse_decimal(message.text)
+    data = await state.get_data()
+    total = Decimal(str(data["pending_km_item_amount"]))
+    if required is None or required <= 0 or required >= total:
+        await message.answer(f"Введите сумму больше нуля и меньше {rub(total)}.")
+        return
+    await save_split_food_expense(message, state, required)
+
+
+async def save_split_food_expense(message: Message, state: FSMContext, required: Decimal):
+    data = await state.get_data()
+    total = Decimal(str(data["pending_km_item_amount"]))
+    months = Decimal(str(data.get("pending_food_months", "1")))
+    flexible = total - required
+    base = {
+        "category": "food",
+        "category_label": "Питание",
+        "name": data["pending_km_item_name"],
+        "months": str(months),
+        "subcategory": data.get("pending_km_subcategory"),
+    }
+    km_item = {
+        **base,
+        "amount": str(required),
+        "monthly": str(money2(required / months)),
+        "classification_part": "essential",
+    }
+    br_item = {
+        **base,
+        "amount": str(flexible),
+        "monthly": str(money2(flexible / months)),
+        "classification_part": "flexible",
+    }
+    await state.update_data(
+        km_items=[*data.get("km_items", []), km_item],
+        br_items=[*data.get("br_items", []), br_item],
+        pending_food_role=None,
+        pending_food_months=None,
+        pending_life_destination=None,
+    )
+    await state.set_state(SetupStates.km_menu)
+    await show_km_category_after_save(
+        message,
+        state,
+        "food",
+        f"Разделено: <b>{rub(required)}</b> в КМ и <b>{rub(flexible)}</b> в БР.",
+    )
 
 
 @router.callback_query(SetupStates.km_menu, F.data.in_({"edupayment:add", "edupayment:continue"}))
@@ -4115,8 +4427,8 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
     )
 
     data = await state.get_data()
-    lines = [f"• {escape(name)} — {rub(value)}" for name, value in groups.items()]
-    br_lines = [f"• {escape(name)} — {rub(value)}" for name, value in br_groups.items()]
+    lines = life_result_breakdown_lines(items, br_items)
+    br_lines = life_result_breakdown_lines(br_items, items)
     sustainable = money2(rounded + br_rounded)
     phase_result_note = ""
     if data.get("income_rhythm") == "cyclic" and data.get("life_phase") in {"work", "break"}:
@@ -4192,33 +4504,25 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
 async def show_life_classification(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    km_lines = [
-        f"• <b>{escape(km_item_display_name(item))}</b> — {rub(Decimal(item['monthly']))}\n"
-        f"  Причина: {escape(life_classification_reason(item, 'km'))}."
-        for item in data.get("km_items", [])
+    km_items = list(data.get("km_items", []))
+    br_items = [
+        item for item in data.get("br_items", [])
+        if not is_deferred_life_expense(item)
     ]
-    br_lines = [
-        f"• <b>{escape(item.get('name', 'Расход'))}</b> — {rub(Decimal(item['monthly']))}\n"
-        f"  Причина: {escape(life_classification_reason(item, 'br'))}."
-        for item in data.get("br_items", [])
-        if not is_gift_expense(item)
-    ]
-    gift_lines = [
-        f"• <b>{escape(item.get('name', 'Подарки'))}</b> — {rub(Decimal(item['monthly']))}\n"
-        f"  Причина: {escape(life_classification_reason(item, 'goal'))}."
-        for item in data.get("br_items", [])
-        if is_gift_expense(item)
+    deferred_items = [
+        item for item in data.get("br_items", [])
+        if is_deferred_life_expense(item)
     ]
     blocks = [
-        "<b>ПРОВЕРЬТЕ РАСПРЕДЕЛЕНИЕ МЕЖДУ КМ И БР</b>\n\n"
-        "Причины основаны только на выбранной категории и указанном периоде оплаты. "
-        "Аллокатор не предполагает за вас, можно ли отказаться от конкретного расхода. "
+        "<b>ПРОВЕРЬТЕ КАТЕГОРИИ КМ И БР</b>\n\n"
+        "Аллокатор определил расходы Критического минимума и Бытового резерва. "
+        "Причины основаны на правилах категорий и указанном периоде оплаты. "
         "Если расход оказался не в той части жизни, выберите его и перенесите.",
-        "<b>КРИТИЧЕСКИЙ МИНИМУМ</b>\n" + ("\n".join(km_lines) or "• Нет расходов"),
-        "<b>БЫТОВОЙ РЕЗЕРВ</b>\n" + ("\n".join(br_lines) or "• Нет расходов"),
     ]
-    if gift_lines:
-        blocks.append("<b>⭐️ БУДУЩАЯ ЦЕЛЬ «ПОДАРКИ»</b>\n" + "\n".join(gift_lines))
+    blocks.extend(life_classification_section_blocks("КРИТИЧЕСКИЙ МИНИМУМ", km_items, "km"))
+    blocks.extend(life_classification_section_blocks("БЫТОВОЙ РЕЗЕРВ", br_items, "br"))
+    if deferred_items:
+        blocks.extend(life_classification_section_blocks("БУДУЩИЕ ЦЕЛИ", deferred_items, "goal"))
     pages: list[str] = []
     current = ""
     for block in blocks:
@@ -4234,10 +4538,90 @@ async def show_life_classification(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         pages[-1],
         reply_markup=keyboard([
-            [("↔️ Выбрать расход", "lifeedit:list")],
+            [("Выбрать расход", "lifeedit:list")],
             [("← К стоимости жизни", "km:finish")],
         ]),
     )
+
+
+LIFE_CLASSIFICATION_REASONS = {
+    "km": {
+        "Недвижимость": "Обязательные расходы на жильё.",
+        "Питание": "Базовые регулярные расходы на питание.",
+        "Связь и подписки": "Необходимые услуги связи с ежемесячной оплатой.",
+        "Транспорт": "Необходимые поездки и обязательные транспортные расходы.",
+        "Здоровье": "Расходы на лечение и сохранение здоровья.",
+        "Питомцы": "Ответственность за здоровье и содержание питомца.",
+        "Дети": "Расходы на развитие и содержание ребёнка.",
+        "Образование": "Необходимые расходы на профессиональное образование.",
+        "Вредные привычки": "Регулярные расходы, связанные с курением или парением.",
+        "Комиссии": "Регулярные обязательные комиссии и сборы.",
+        "Другое": "Обязательный индивидуальный расход.",
+    },
+    "br": {
+        "Питание": "Гибкая или нерегулярная часть питания.",
+        "Связь и подписки": "Периодические или необязательные сервисы и подписки.",
+        "Транспорт": "Поездки ради удобства, когда доступна более экономная альтернатива.",
+        "Дети": "Периодические расходы на развитие и содержание ребёнка.",
+        "Вредные привычки": "Нерегулярные расходы, которые можно пересмотреть.",
+        "Комиссии": "Периодические комиссии и сборы, которые нужно заранее учитывать.",
+        "Одежда": "Периодические расходы на одежду и обувь.",
+        "Красота и уход": "Регулярные и периодические расходы на уход за собой.",
+        "Спорт": "Планируемые расходы на физическую активность.",
+        "Развлечения": "Нерегулярные расходы на досуг.",
+        "Быт": "Нерегулярные расходы на поддержание дома и вещей.",
+        "Услуги": "Нерегулярные расходы на профессиональные услуги.",
+        "Другое": "Нерегулярный, плохо прогнозируемый или гибкий индивидуальный расход.",
+    },
+    "goal": {
+        "Подарки": "Планируемый расход, для которого будет создан отдельный Сундук.",
+        "Дети": "Планируемые подарки, для которых будет создан отдельный Сундук.",
+        "Образование": "Планируемый расход на обучение или развитие, для которого будет создана отдельная Цель.",
+    },
+}
+
+
+def life_classification_group_reason(category: str, destination: str) -> str:
+    reasons = LIFE_CLASSIFICATION_REASONS.get(destination, {})
+    return reasons.get(category, "Расход распределён по выбранной категории и периоду оплаты.")
+
+
+def group_life_classification_items(items: list[dict]) -> list[tuple[str, list[dict]]]:
+    grouped: dict[str, list[dict]] = {}
+    for item in items:
+        grouped.setdefault(life_item_category_label(item), []).append(item)
+    ordered = [category for category in LIFE_CATEGORY_ORDER if category in grouped]
+    ordered.extend(category for category in grouped if category not in ordered)
+    return [(category, grouped[category]) for category in ordered]
+
+
+def format_life_classification_section(
+    title: str,
+    items: list[dict],
+    destination: str,
+) -> str:
+    return "\n\n".join(life_classification_section_blocks(title, items, destination))
+
+
+def life_classification_section_blocks(
+    title: str,
+    items: list[dict],
+    destination: str,
+) -> list[str]:
+    parts = [life_category_heading(title)]
+    if not items:
+        return [parts[0] + "\n\nНет расходов."]
+    for category, category_items in group_life_classification_items(items):
+        lines = [
+            f"• {escape(km_item_display_name(item))} — {rub(Decimal(item['monthly']))}"
+            for item in category_items
+        ]
+        parts.append(
+            f"<b>{escape(category.upper())}</b>\n"
+            f"<i>{escape(life_classification_group_reason(category, destination))}</i>\n"
+            + "\n".join(lines)
+        )
+    return parts
 
 
 async def clear_pending_km(state: FSMContext):
@@ -4424,7 +4808,10 @@ async def km_edit_name_start(callback: CallbackQuery, state: FSMContext):
 async def km_edit_name_save(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     if parse_decimal(name) is not None:
-        await message.answer("Похоже, это сумма. Введите название словами.")
+        await message.answer(
+            "Похоже, это сумма. Введите название словами.",
+            reply_markup=keyboard([[("✖️ Отмена", "km:cancel")]]),
+        )
         return
     if len(name) < 2:
         await message.answer("Введите понятное название.")
@@ -4550,7 +4937,25 @@ async def show_km_storage_review(message: Message, state: FSMContext):
         reply_markup=keyboard([
             [("Изменить", "kmstorage:edit"), ("✔️ Всё устраивает", "kmstorage:accept")],
             [("ℹ️", "kmstorage:help")],
+            [("← Назад", "kmstorage:back-to-life-result")],
         ]),
+    )
+
+
+@router.callback_query(SetupStates.km_envelopes_menu, F.data == "kmstorage:back-to-life-result")
+async def back_to_life_result(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    critical = Decimal(str(data.get("critical_life", "0")))
+    reserve = Decimal(str(data.get("household_reserve", "0")))
+    await state.set_state(SetupStates.km_menu)
+    await callback.message.answer(
+        "<b>СТОИМОСТЬ ВАШЕЙ ЖИЗНИ РАССЧИТАНА</b>\n\n"
+        f"Критический минимум — <b>{rub(critical)}</b>\n"
+        f"Бытовой резерв — <b>{rub(reserve)}</b>\n"
+        f"Устойчивая жизнь — <b>{rub(critical + reserve)}</b>.\n\n"
+        "Вы вернулись к результату. Здесь можно исправить расходы или итоговые суммы.",
+        reply_markup=life_result_keyboard(),
     )
 
 
@@ -4957,7 +5362,11 @@ async def choose_br_category(callback: CallbackQuery, state: FSMContext):
 async def br_item_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     if parse_decimal(name) is not None:
-        await message.answer("Похоже, вы ввели сумму вместо названия. Сначала напишите короткое название, например <code>Зимняя обувь</code>.")
+        await message.answer(
+            "Похоже, вы ввели сумму вместо названия. Сначала напишите короткое название, "
+            "например <code>Зимняя обувь</code>.",
+            reply_markup=keyboard([[("✖️ Отмена", "br:cancel")]]),
+        )
         return
     if len(name) < 2:
         await message.answer("Введите понятное название расхода.")
@@ -5219,7 +5628,12 @@ async def br_edit_name_start(callback: CallbackQuery, state: FSMContext):
 @router.message(SetupStates.br_edit_name)
 async def br_edit_name_save(message: Message, state: FSMContext):
     name=(message.text or '').strip()
-    if parse_decimal(name) is not None: await message.answer("Похоже, это сумма. Введите название словами."); return
+    if parse_decimal(name) is not None:
+        await message.answer(
+            "Похоже, это сумма. Введите название словами.",
+            reply_markup=keyboard([[("✖️ Отмена", "br:cancel")]]),
+        )
+        return
     if len(name)<2: await message.answer("Введите понятное название."); return
     data=await state.get_data(); index=int(data.get('pending_br_edit_index',-1)); items=list(data.get('br_items',[]))
     if 0<=index<len(items): item=dict(items[index]); item['name']=name; items[index]=item; await state.update_data(br_items=items)
@@ -5631,7 +6045,7 @@ async def br_override_save(message: Message, state: FSMContext):
 async def ask_pillow_policy(message: Message, state: FSMContext):
     data = await state.get_data()
     # МП — нижний слой той же Подушки. Цель сохраняется в профиле даже у
-    # недолжника, чтобы при появлении нового долга режим пересчитался сразу.
+    # недолжника, чтобы при появлении нового долга уровень пересчитался сразу.
     minimum_months = "1" if data.get("income_rhythm", "monthly") == "monthly" else "2"
     await state.update_data(minimum_reserve_months=minimum_months)
     await state.set_state(SetupStates.force_majeure_months)
@@ -6600,7 +7014,7 @@ async def save_interest_savings(
 
 
 # ============================================================
-# РЕЖИМ РАЗРАБОТЧИКА
+# УРОВЕНЬ РАЗРАБОТЧИКА
 # ============================================================
 
 
@@ -6614,30 +7028,30 @@ async def ask_developer_mode(
     )
 
     await message.answer(
-        "🛠 <b>Режим разработчика</b>\n\n"
+        "🛠 <b>Уровень разработчика</b>\n\n"
 
         "Обычному пользователю он не нужен.\n\n"
 
-        "В обычном режиме бот показывает только "
+        "На обычном уровне бот показывает только "
         "необходимые суммы и рекомендации.\n\n"
 
-        "В режиме разработчика будут видны:\n"
+        "На уровне разработчика будут видны:\n"
         "• внутренние слои подушки;\n"
         "• промежуточные вычисления;\n"
         "• нулевые строки;\n"
         "• подробные формулы и проверки.\n\n"
 
-        "Оставить обычный режим?",
+        "Оставить обычный уровень?",
         reply_markup=keyboard([
             [
                 (
-                    "✅ Обычный режим",
+                    "✅ Обычный уровень",
                     "developer:no",
                 )
             ],
             [
                 (
-                    "🛠 Режим разработчика",
+                    "🛠 Уровень разработчика",
                     "developer:yes",
                 )
             ],
@@ -6867,7 +7281,7 @@ def build_settings_from_data(
         bracket_b=Decimal("25"),
         bracket_c=Decimal("30"),
         bracket_d=Decimal("35"),
-        bracket_e=Decimal("40"),
+        bracket_e=Decimal("35"),
 
         goals_share_c=Decimal("50"),
         pillow_share_c=Decimal("50"),
@@ -7010,13 +7424,76 @@ GOAL_SUGGESTIONS = (
 
 
 def goals_available_in_onboarding(allocator: FinancialAllocator) -> bool:
-    """Цели открываются с режимов 3/3/5 для трёх профилей."""
+    """Цели открываются с уровней 3/3/5 для трёх профилей."""
     minimum_mode = {
         "stable": 3,
         "piecework": 3,
         "cyclic": 5,
     }[allocator.profile_id]
     return allocator.active_mode() >= minimum_mode
+
+
+INVESTMENT_UNLOCK_LEVELS = {
+    "stable": 4,
+    "piecework": 5,
+    "cyclic": 7,
+}
+
+GOAL_UNLOCK_LEVELS = {
+    "stable": 3,
+    "piecework": 3,
+    "cyclic": 5,
+}
+
+
+def investment_unlock_level(profile_id: str) -> int:
+    return INVESTMENT_UNLOCK_LEVELS[profile_id]
+
+
+def financial_opportunities_text(allocator: FinancialAllocator, has_goals: bool) -> str:
+    """Пояснение фактического распределения, даже если кубок выше текущего приоритета."""
+    profile_id = allocator.profile_id
+    level = allocator.active_mode()
+    goal_level = GOAL_UNLOCK_LEVELS[profile_id]
+    investment_level = investment_unlock_level(profile_id)
+    unlock_text = (
+        f"Цели {'станут доступны' if level < goal_level else 'доступны'} "
+        f"с <b>{goal_level}-го уровня</b>, "
+        f"а инвестиции — с <b>{investment_level}-го</b>."
+    )
+    mode = allocator.allocation_mode()
+    policy = allocator.bracket_policy("C")
+    labels = {"МП": "Минимальная подушка", "Досрочное": "Досрочное погашение",
+              "МР": "Фонд Зарплаты", "ФМ": "ФМ-подушка", "СтабД": "Стабилизатор-КМ" if mode == 4 else "Стабилизатор-Полная",
+              "Инвест": "Инвестиции", "Цели": "Цели и Сундуки"}
+
+    def distribution_lines(selected_policy):
+        return "\n".join(
+            f"• <b>{format(share.normalize(), 'f')}%</b> — {labels[target]}"
+            for target, share in selected_policy.allocations(Decimal("100")).items()
+            if share > 0
+        )
+
+    if mode in {1, 2}:
+        return (f"{unlock_text}\n\n<b>Сейчас: {labels[policy.bracket_target]}</b>\n"
+                "Свободные деньги после текущих расходов направляются сюда. "
+                "Когда этот шаг завершится, оставшаяся часть поступления пойдёт дальше.")
+    prefix = f"{unlock_text}\n\n<b>Когда текущая жизнь обеспечена</b>\n"
+    filling_fund = (profile_id == "cyclic" and mode == 3
+                    and allocator.state.intercontract_reserve < allocator.intercontract_current_limit)
+    if mode in {3, 4} and not filling_fund:
+        balanced = deepcopy(allocator)
+        balanced.settings.protective_stage_c_strategy = "balanced"
+        protection = deepcopy(allocator)
+        protection.settings.protective_stage_c_strategy = "protection"
+        return (prefix + "Для свободной части обычного дохода можно выбрать:\n\n"
+                "<b>Защита и свои планы</b>\n" + distribution_lines(balanced.bracket_policy("C"))
+                + "\n\n<b>ИЛИ — всё в защиту</b>\n" + distribution_lines(protection.bracket_policy("C"))
+                + "\n\nЦели наполняются до нужной суммы; их остаток принимают Сундуки.")
+    return (prefix + distribution_lines(policy)
+            + ("\n\nСначала наполняем Фонд Зарплаты на оставшийся перерыв."
+               if filling_fund else "\n\nЭто доли свободной части обычного дохода. Для сверхдохода действует отдельный бракет.")
+            + "\n\nПри заполнении резерва оставшиеся деньги продолжат распределяться по новым правилам.")
 
 
 def normalized_onboarding_goals(drafts: list[dict]) -> list[dict]:
@@ -7055,14 +7532,14 @@ def normalized_onboarding_goals(drafts: list[dict]) -> list[dict]:
 async def maybe_start_goals_onboarding(message: Message, state: FSMContext):
     data = await state.get_data()
     if data.get("onboarding_goals_completed"):
-        await show_confirmation(message, state)
+        await show_onboarding_time_forecast(message, state)
         return
     settings = build_settings_from_data(data)
     state_object = build_state_from_data(data, settings)
     allocator = FinancialAllocator(settings=settings, state=state_object)
     if not goals_available_in_onboarding(allocator):
         await state.update_data(onboarding_goals_completed=True, goals=[])
-        await show_confirmation(message, state)
+        await show_onboarding_time_forecast(message, state)
         return
     await state.update_data(
         goal_drafts=[],
@@ -7202,6 +7679,15 @@ async def show_goals_menu(message: Message, state: FSMContext):
     can_add = len(drafts) < 10
     if can_add and "подарки" not in selected:
         rows.append([("🧳 Сундук Подарков", "goals:gift:offer")])
+    for index, item in enumerate(data.get("br_items", [])):
+        name = str(item.get("name", "")).strip()
+        if (
+            can_add
+            and is_future_goal_expense(item)
+            and name
+            and name.casefold() not in selected
+        ):
+            rows.append([(f"⭐️ {name}", f"goals:future:{index}")])
     for index, suggestion in enumerate(GOAL_SUGGESTIONS):
         if can_add and suggestion["name"].casefold() not in selected:
             rows.append([(
@@ -7229,6 +7715,27 @@ async def show_goals_menu(message: Message, state: FSMContext):
         "Нажмите на любой — я коротко расскажу, зачем он нужен. "
         "<b>Без вашего подтверждения ничего не добавится.</b>",
         reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(SetupStates.goals_menu, F.data.startswith("goals:future:"))
+async def offer_future_expense_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        index = int(callback.data.rsplit(":", 1)[1])
+        item = list((await state.get_data()).get("br_items", []))[index]
+    except (ValueError, IndexError):
+        await callback.message.answer("Не удалось найти этот расход. Выберите его ещё раз.")
+        return
+    if not is_future_goal_expense(item):
+        await show_goals_menu(callback.message, state)
+        return
+    suggestion = {"name": str(item["name"]), "position_type": "goal"}
+    await state.update_data(pending_goal=suggestion)
+    await show_goal_suggestion(
+        callback.message,
+        suggestion,
+        (await state.get_data()).get("income_rhythm"),
     )
 
 
@@ -7490,6 +7997,12 @@ async def choose_custom_goal_type(callback: CallbackQuery, state: FSMContext):
 @router.message(SetupStates.goal_name)
 async def save_custom_goal_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
+    if parse_decimal(name) is not None:
+        await message.answer(
+            "Похоже, вы ввели сумму вместо названия. Сначала напишите название Цели или Сундука.",
+            reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
+        )
+        return
     if not name or len(name) > 60:
         await message.answer("Введите название цели длиной до 60 символов.")
         return
@@ -7539,7 +8052,8 @@ async def ask_goal_target(message: Message, state: FSMContext, pending: dict):
     await message.answer(
         f"<b>⭐️ {escape(str(pending['name']).upper())}</b>\n\n"
         "Сколько нужно накопить?\n\n"
-        "——————\n<b>→ Введите конечную сумму.</b>",
+        "——————\n<b>→ Введите конечную сумму.</b>\n"
+        "Если конечной суммы нет, лучше выберите 🧳 <b>Сундук</b>.",
         reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
     )
 
@@ -7681,10 +8195,10 @@ async def explain_why_goals_matter(callback: CallbackQuery, state: FSMContext):
         "Отпуск, подарки и будущая замена телефона тоже требуют денег.\n\n"
         "Если не готовиться заранее, такие расходы конкурируют с обычной жизнью или "
         "превращаются в долг. Даже небольшая постоянная доля делает бюджет спокойнее.\n\n"
-        "Вы можете продолжить без целей и настроить их позже в Главном меню или Настройках.",
+        "Можно пока не выбирать Цели. Оставим Сундук «Будущие покупки»: он будет принимать свободные деньги. Позже его можно переименовать.",
         reply_markup=keyboard([
             [("← Вернуться к списку", "goals:cancel-add")],
-            [("Продолжить без целей", "goals:none:confirm")],
+            [("Оставить Сундук для будущих покупок", "goals:none:confirm")],
         ]),
     )
 
@@ -7692,8 +8206,8 @@ async def explain_why_goals_matter(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(SetupStates.goals_menu, F.data == "goals:none:confirm")
 async def finish_without_goals(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await state.update_data(goals=[], onboarding_goals_completed=True)
-    await show_confirmation(callback.message, state)
+    await state.update_data(goals=[{"name": "Будущие покупки", "position_type": "chest", "percentage": "100"}], onboarding_goals_completed=True)
+    await show_onboarding_time_forecast(callback.message, state)
 
 
 @router.callback_query(SetupStates.goals_menu, F.data == "goals:done")
@@ -7704,6 +8218,13 @@ async def finish_goals_onboarding(callback: CallbackQuery, state: FSMContext):
         await explain_why_goals_matter(callback, state)
         return
     await callback.answer()
+    if not any(item.get("position_type") == "chest" for item in drafts):
+        await callback.message.answer(
+            "Добавьте хотя бы один Сундук. Когда Цели наполнятся, он примет оставшиеся деньги. "
+            "Можно выбрать, например, Подарки или Хотелки.",
+            reply_markup=keyboard([[("← Выбрать Сундук", "goals:cancel-add")]]),
+        )
+        return
     for item in drafts:
         item.pop("percentage", None)
         item.pop("is_auto_percentage", None)
@@ -7734,8 +8255,8 @@ async def ask_next_goal_percentage(message: Message, state: FSMContext):
         f"<b>{rub_rounded(capacity['minimum'])[:-2]}–{rub_rounded(capacity['maximum'])} в месяц</b>"
     )
     prompt = (
-        f"<b>→ Введите процент от {minimum} до {maximum} на "
-        f"{goal_icon(drafts[index])} {escape(goal_draft_display_name(drafts[index]))}.</b>\n"
+        f"<b>→ Введите процент от {minimum} до {maximum} </b>\n\n"
+        f"<b>на {goal_icon(drafts[index])} {escape(goal_draft_display_name(drafts[index]))}.</b>\n\n"
         "Например: 20"
     )
     if index == 0:
@@ -7791,10 +8312,11 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
     minimum = Decimal(str(capacity["minimum"]))
     maximum = Decimal(str(capacity["maximum"]))
     preview_allocator = onboarding_goal_allocator(data, drafts)
-    review_items = list(zip(drafts, preview_allocator.settings.goals))
-    review_items.sort(key=lambda pair: Decimal(str(pair[0]["percentage"])), reverse=True)
+    review_items = list(enumerate(zip(drafts, preview_allocator.settings.goals)))
+    review_items.sort(key=lambda pair: Decimal(str(pair[1][0]["percentage"])), reverse=True)
     lines = []
-    for item, goal in review_items:
+    warning_indices = []
+    for draft_index, (item, goal) in review_items:
         share = Decimal(str(item["percentage"])) / Decimal("100")
         line = (
             f"{goal_icon(item)} <b>{escape(goal_review_name(item))} — {item['percentage']}%</b>\n"
@@ -7807,8 +8329,10 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
             if status == "on_track":
                 line += "\n&#160;&#160;&#160;&#160;&#160;&#160;✔️ <i>При выбранной доле срок выглядит реалистично.</i>"
             elif status == "depends_on_income":
+                warning_indices.append(draft_index)
                 line += "\n&#160;&#160;&#160;&#160;&#160;&#160;⚠️ <i>Срок достижим только в более доходные месяцы.</i>"
             elif status == "unreachable":
+                warning_indices.append(draft_index)
                 line += (
                     f"\n&#160;&#160;&#160;&#160;&#160;&#160;⚠️ <i>Нужно около "
                     f"{rub_rounded(forecast['required_monthly'])} / мес. Увеличьте срок, "
@@ -7827,16 +8351,123 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
                     line += f"\n&#160;&#160;&#160;&#160;&#160;&#160;ℹ️ <i>Ориентировочный срок — {estimate}.</i>"
         lines.append(line)
     await state.set_state(SetupStates.goal_percentages_review)
+    action_rows = [
+        [(f"✎ {goal_draft_display_name(drafts[index])}", f"goals:quick-edit:{index}")]
+        for index in warning_indices
+    ]
+    action_rows.extend([
+        [("✔️ Сохранить", "goals:percent:save")],
+        [("Редактировать проценты", "goals:percent:restart")],
+        [("Изменить список", "goals:percent:list")],
+    ])
     await message.answer(
         "<b>РАСПРЕДЕЛЕНИЕ ЦЕЛЕЙ</b>\n\n"
         + "\n\n".join(lines)
         + "\n\nПоследняя позиция получила остаток автоматически. Сумма долей — 100%.",
+        reply_markup=keyboard(action_rows),
+    )
+
+
+@router.callback_query(SetupStates.goal_percentages_review, F.data.startswith("goals:quick-edit:"))
+async def show_goal_quick_edit(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    index = int(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    drafts = list(data.get("goal_drafts", []))
+    if not 0 <= index < len(drafts) or drafts[index].get("position_type") == "chest":
+        await show_goal_percentages_review(callback.message, state)
+        return
+    await state.update_data(goal_quick_edit_index=index)
+    await callback.message.answer(
+        f"<b>⭐️ {escape(goal_draft_display_name(drafts[index]).upper())}</b>\n\n"
+        "Что нужно исправить?",
         reply_markup=keyboard([
-            [("✔️ Сохранить", "goals:percent:save")],
-            [("Редактировать проценты", "goals:percent:restart")],
-            [("Изменить список", "goals:percent:list")],
+            [("Изменить конечную сумму", "goals:quick-edit:amount")],
+            [("Изменить срок", "goals:quick-edit:deadline")],
+            [("← Назад", "goals:quick-edit:back")],
         ]),
     )
+
+
+@router.callback_query(F.data == "goals:quick-edit:back")
+async def back_from_goal_quick_edit(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await show_goal_percentages_review(callback.message, state)
+
+
+@router.callback_query(F.data == "goals:quick-edit:amount")
+async def start_goal_quick_amount(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    item = list(data.get("goal_drafts", []))[int(data["goal_quick_edit_index"])]
+    await state.set_state(SetupStates.goal_quick_edit_amount)
+    await callback.message.answer(
+        f"Текущая конечная сумма — <b>{rub(Decimal(str(item['target_amount'])))}</b>.\n\n"
+        "——————\n<b>→ Введите новую конечную сумму.</b>",
+        reply_markup=keyboard([[("✖️ Отмена", "goals:quick-edit:back")]]),
+    )
+
+
+@router.message(SetupStates.goal_quick_edit_amount)
+async def save_goal_quick_amount(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    data = await state.get_data()
+    index = int(data.get("goal_quick_edit_index", -1))
+    drafts = list(data.get("goal_drafts", []))
+    balance = Decimal(str(drafts[index].get("balance", "0"))) if 0 <= index < len(drafts) else Decimal("0")
+    if value is None or value <= 0 or value < balance:
+        await message.answer(f"Введите сумму не меньше уже накопленных {rub(balance)}.")
+        return
+    item = dict(drafts[index])
+    item["target_amount"] = str(value)
+    drafts[index] = item
+    await state.update_data(goal_drafts=drafts)
+    await show_goal_percentages_review(message, state)
+
+
+@router.callback_query(F.data == "goals:quick-edit:deadline")
+async def start_goal_quick_deadline(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SetupStates.goal_quick_edit_deadline)
+    await callback.message.answer(
+        "<b>ИЗМЕНИТЬ СРОК ЦЕЛИ</b>\n\n"
+        "Введите новую дату в формате <code>ДД.ММ.ГГГГ</code>.",
+        reply_markup=keyboard([
+            [("Без срока", "goals:quick-edit:no-deadline")],
+            [("✖️ Отмена", "goals:quick-edit:back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "goals:quick-edit:no-deadline")
+async def clear_goal_quick_deadline(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    index = int(data.get("goal_quick_edit_index", -1))
+    drafts = list(data.get("goal_drafts", []))
+    if 0 <= index < len(drafts):
+        item = dict(drafts[index])
+        item["deadline"] = None
+        drafts[index] = item
+        await state.update_data(goal_drafts=drafts)
+    await show_goal_percentages_review(callback.message, state)
+
+
+@router.message(SetupStates.goal_quick_edit_deadline)
+async def save_goal_quick_deadline(message: Message, state: FSMContext):
+    deadline = parse_tax_due_date(message.text)
+    if deadline is None or deadline <= date.today():
+        await message.answer("Введите будущую дату в формате <code>ДД.ММ.ГГГГ</code>.")
+        return
+    data = await state.get_data()
+    index = int(data.get("goal_quick_edit_index", -1))
+    drafts = list(data.get("goal_drafts", []))
+    if 0 <= index < len(drafts):
+        item = dict(drafts[index])
+        item["deadline"] = deadline.isoformat()
+        drafts[index] = item
+        await state.update_data(goal_drafts=drafts)
+    await show_goal_percentages_review(message, state)
 
 
 @router.callback_query(F.data == "goals:percent:cancel")
@@ -7877,6 +8508,361 @@ async def save_goal_percentages_review(callback: CallbackQuery, state: FSMContex
         goals=list(data.get("goal_drafts", [])),
         onboarding_goals_completed=True,
     )
+    await show_onboarding_time_forecast(callback.message, state)
+
+
+def human_duration(months: int) -> str:
+    months = max(1, int(months))
+    if months < 12:
+        return f"{months} мес."
+    years, rest = divmod(months, 12)
+    year_word = "год" if years % 10 == 1 and years % 100 != 11 else (
+        "года" if years % 10 in {2, 3, 4} and years % 100 not in {12, 13, 14} else "лет"
+    )
+    return f"{years} {year_word}" + (f" {rest} мес." if rest else "")
+
+
+def forecast_duration_range(minimum: int, maximum: int) -> str:
+    fast, slow = sorted((max(1, minimum), max(1, maximum)))
+    if fast == slow:
+        return f"примерно через {human_duration(fast)}"
+    if fast < 12 and slow < 12:
+        return f"примерно через {fast}–{slow} мес."
+    return f"примерно через {human_duration(fast)} — {human_duration(slow)}"
+
+
+def priority_reached(allocator: FinancialAllocator, original_name: str) -> bool:
+    current = allocator.current_protection_priority()
+    return current is None or str(current["name"]) != original_name
+
+
+def simulate_priority_months(
+    source: FinancialAllocator,
+    monthly_income: Decimal,
+    *,
+    max_months: int = 600,
+) -> int | None:
+    simulated = deepcopy(source)
+    priority = simulated.current_protection_priority()
+    if priority is None:
+        return 0
+    debt_route = any(credit.active for credit in simulated.settings.credits)
+    priority_name = "Долги" if debt_route else str(priority["name"])
+    income_type = next(iter(simulated.settings.income_type_tax_rates), "Основной доход")
+    for month in range(1, max_months + 1):
+        simulated.process_income(
+            monthly_income,
+            income_type,
+            reset_period=True,
+        )
+        for credit in simulated.settings.credits:
+            if credit.active:
+                credit.process_minimum_payment()
+        if debt_route:
+            reached = not any(credit.active for credit in simulated.settings.credits)
+        else:
+            reached = priority_reached(simulated, priority_name)
+        if reached:
+            return month
+    return None
+
+
+def onboarding_time_forecast(data: dict) -> dict:
+    settings = build_settings_from_data(data)
+    allocator = FinancialAllocator(settings, build_state_from_data(data, settings))
+    priority = allocator.current_protection_priority()
+    if priority is None:
+        goals = []
+        for goal in settings.goals:
+            if goal.is_chest or goal.target_amount is None:
+                continue
+            result = allocator.goal_forecast(goal)
+            fast = result.get("estimated_months_fast")
+            slow = result.get("estimated_months_conservative")
+            if fast is not None or slow is not None:
+                goals.append({
+                    "name": goal_display_name(goal.name, False),
+                    "fast": int(fast if fast is not None else slow),
+                    "slow": int(slow if slow is not None else fast),
+                })
+        return {"kind": "goals", "goals": goals, "allocator": allocator}
+
+    average = settings.average_income
+    if average <= 0:
+        return {"kind": "unavailable", "allocator": allocator}
+    if settings.income_rhythm == "monthly":
+        incomes = (average, average)
+    else:
+        incomes = (money2(average * Decimal("0.85")), money2(average * Decimal("1.15")))
+    slow = simulate_priority_months(allocator, incomes[0])
+    fast = simulate_priority_months(allocator, incomes[1])
+    priority_name = (
+        "Долги"
+        if any(credit.active for credit in settings.credits)
+        else str(priority["name"])
+    )
+    return {
+        "kind": "priority",
+        "name": priority_name,
+        "fast": fast,
+        "slow": slow,
+        "variable": incomes[0] != incomes[1],
+        "allocator": allocator,
+    }
+
+
+async def show_onboarding_time_forecast(message: Message, state: FSMContext):
+    data = await state.get_data()
+    try:
+        result = onboarding_time_forecast(data)
+    except ValueError:
+        await show_confirmation(message, state)
+        return
+    lines = ["<b>ВАШ ФИНАНСОВЫЙ МАРШРУТ</b>"]
+    if result["kind"] == "priority":
+        lines.extend(["", f"Сейчас главный приоритет — <b>{escape(result['name'])}</b>."])
+        if result["fast"] is None or result["slow"] is None:
+            lines.extend(["", "При текущем доходе срок пока нельзя надёжно определить."])
+        else:
+            lines.extend([
+                "",
+                f"При текущем уровне дохода вы сможете завершить этот этап "
+                f"<b>{forecast_duration_range(result['fast'], result['slow'])}</b>.",
+            ])
+        if result["variable"]:
+            lines.extend(["", "Диапазон учитывает менее и более доходные месяцы относительно указанного среднего."])
+    elif result["kind"] == "goals" and result["goals"]:
+        lines.extend(["", "Финансовая защита сформирована. При текущем распределении:", ""])
+        for goal in result["goals"]:
+            lines.append(
+                f"⭐️ <b>{escape(goal['name'])}</b> — "
+                f"{forecast_duration_range(goal['fast'], goal['slow']).removeprefix('примерно ')}"
+            )
+    elif result["kind"] == "goals":
+        lines.extend(["", "Финансовая защита сформирована. Целей с конечной суммой пока нет."])
+    else:
+        lines.extend(["", "Для временного прогноза пока недостаточно данных о доходе."])
+    lines.extend(["", "Это предварительная оценка: фактический срок зависит от будущих доходов."])
+    await state.set_state(SetupStates.onboarding_forecast)
+    actions = []
+    if data.get("income_rhythm") != "cyclic":
+        actions.append([("Найти деньги для важного", "budgetoptimizer:start")])
+    actions.append([("Продолжить →", "onboardingforecast:continue")])
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=keyboard(actions),
+    )
+
+
+BUDGET_OPTIMIZER_CATEGORIES = {
+    "food", "transport", "subscriptions", "clothes", "care", "gym",
+    "leisure", "habits", "services",
+}
+
+
+def budget_optimizer_candidate(item: dict) -> bool:
+    if is_deferred_life_expense(item):
+        return False
+    category = str(item.get("category") or "")
+    if category == "food":
+        return item.get("subcategory") in {"outside", "fastfood", "delivery"}
+    if category == "transport":
+        return item.get("subcategory") == "optional_taxi"
+    return category in BUDGET_OPTIMIZER_CATEGORIES
+
+
+def apply_budget_optimizer_plan(item: dict, new_monthly: Decimal) -> dict:
+    """Перезаписывает будущий план расхода, сохраняя исходный период ввода."""
+    updated = dict(item)
+    months = Decimal(str(updated.get("months", "1")))
+    monthly = money2(new_monthly)
+    updated["monthly"] = str(monthly)
+    updated["amount"] = str(money2(monthly * months))
+    return updated
+
+
+def forecast_snapshot(result: dict) -> dict:
+    if result.get("kind") == "priority":
+        return {
+            "kind": "priority",
+            "name": result.get("name"),
+            "fast": result.get("fast"),
+            "slow": result.get("slow"),
+        }
+    goals = list(result.get("goals") or [])
+    if goals:
+        return {"kind": "goal", **goals[0]}
+    return {"kind": str(result.get("kind", "unavailable"))}
+
+
+def forecast_snapshot_text(snapshot: dict) -> str:
+    fast, slow = snapshot.get("fast"), snapshot.get("slow")
+    if fast is None or slow is None:
+        return "срок пока нельзя надёжно определить"
+    return forecast_duration_range(int(fast), int(slow))
+
+
+async def show_budget_optimizer_item(message: Message, state: FSMContext):
+    data = await state.get_data()
+    indices = list(data.get("budget_optimizer_indices", []))
+    position = int(data.get("budget_optimizer_position", 0))
+    if position >= len(indices):
+        await finish_budget_optimizer(message, state)
+        return
+    items = list(data.get("br_items", []))
+    index = int(indices[position])
+    if not 0 <= index < len(items):
+        await state.update_data(budget_optimizer_position=position + 1)
+        await show_budget_optimizer_item(message, state)
+        return
+    item = items[index]
+    monthly = Decimal(str(item["monthly"]))
+    ten = money2(monthly * Decimal("0.10"))
+    twenty = money2(monthly * Decimal("0.20"))
+    await state.set_state(SetupStates.onboarding_forecast)
+    await message.answer(
+        f"<b>{escape(str(item.get('name', 'РАСХОД')).upper())}</b>\n\n"
+        f"Сейчас запланировано: <b>{rub(monthly)} / мес.</b>\n\n"
+        f"Расход {position + 1} из {len(indices)}.",
+        reply_markup=keyboard([
+            [(f"Освободить 10% ({rub(ten)})", "budgetoptimizer:cut:10")],
+            [(f"Освободить 20% ({rub(twenty)})", "budgetoptimizer:cut:20")],
+            [("Указать свой план", "budgetoptimizer:custom")],
+            [("Не менять", "budgetoptimizer:skip")],
+        ]),
+    )
+
+
+@router.callback_query(SetupStates.onboarding_forecast, F.data == "budgetoptimizer:start")
+async def start_budget_optimizer(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    indices = [
+        index for index, item in enumerate(data.get("br_items", []))
+        if budget_optimizer_candidate(item)
+    ]
+    if not indices:
+        await callback.message.answer(
+            "Гибких расходов для пересмотра не найдено.",
+            reply_markup=keyboard([[("Продолжить →", "onboardingforecast:continue")]]),
+        )
+        return
+    baseline = forecast_snapshot(onboarding_time_forecast(data))
+    await state.update_data(
+        budget_optimizer_indices=indices,
+        budget_optimizer_position=0,
+        budget_optimizer_baseline=baseline,
+        budget_optimizer_freed="0",
+    )
+    await callback.message.answer(
+        "<b>НАЙТИ ДЕНЬГИ ДЛЯ ВАЖНОГО</b>\n\n"
+        "Аллокатор покажет только гибкие расходы Бытового резерва. "
+        "Выберите те, которые готовы скорректировать в будущем. "
+        "Критический минимум останется без изменений."
+    )
+    await show_budget_optimizer_item(callback.message, state)
+
+
+@router.callback_query(SetupStates.onboarding_forecast, F.data.startswith("budgetoptimizer:cut:"))
+async def cut_budget_optimizer_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    percent = Decimal(callback.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    indices = list(data["budget_optimizer_indices"])
+    position = int(data["budget_optimizer_position"])
+    items = list(data.get("br_items", []))
+    index = int(indices[position])
+    item = dict(items[index])
+    old_monthly = Decimal(str(item["monthly"]))
+    factor = (Decimal("100") - percent) / Decimal("100")
+    item = apply_budget_optimizer_plan(item, old_monthly * factor)
+    items[index] = item
+    freed = Decimal(str(data.get("budget_optimizer_freed", "0"))) + old_monthly - Decimal(item["monthly"])
+    await state.update_data(
+        br_items=items,
+        budget_optimizer_position=position + 1,
+        budget_optimizer_freed=str(money2(freed)),
+    )
+    await show_budget_optimizer_item(callback.message, state)
+
+
+@router.callback_query(SetupStates.onboarding_forecast, F.data == "budgetoptimizer:skip")
+async def skip_budget_optimizer_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    await state.update_data(budget_optimizer_position=int(data["budget_optimizer_position"]) + 1)
+    await show_budget_optimizer_item(callback.message, state)
+
+
+@router.callback_query(SetupStates.onboarding_forecast, F.data == "budgetoptimizer:custom")
+async def custom_budget_optimizer_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    item = list(data["br_items"])[int(data["budget_optimizer_indices"][int(data["budget_optimizer_position"])])]
+    await state.set_state(SetupStates.budget_optimization_amount)
+    await callback.message.answer(
+        f"Сейчас запланировано <b>{rub(Decimal(str(item['monthly'])))} / мес.</b>\n\n"
+        "Введите новую плановую сумму в месяц. Она не может быть больше текущей."
+    )
+
+
+@router.message(SetupStates.budget_optimization_amount)
+async def save_custom_budget_optimizer_item(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    data = await state.get_data()
+    position = int(data["budget_optimizer_position"])
+    index = int(data["budget_optimizer_indices"][position])
+    items = list(data.get("br_items", []))
+    item = dict(items[index])
+    old_monthly = Decimal(str(item["monthly"]))
+    if value is None or value < 0 or value > old_monthly:
+        await message.answer(f"Введите сумму от 0 до {rub(old_monthly)}.")
+        return
+    item = apply_budget_optimizer_plan(item, value)
+    items[index] = item
+    freed = Decimal(str(data.get("budget_optimizer_freed", "0"))) + old_monthly - value
+    await state.update_data(
+        br_items=items,
+        budget_optimizer_position=position + 1,
+        budget_optimizer_freed=str(money2(freed)),
+    )
+    await show_budget_optimizer_item(message, state)
+
+
+async def finish_budget_optimizer(message: Message, state: FSMContext):
+    data = await state.get_data()
+    br_groups = br_group_totals(list(data.get("br_items", [])))
+    br_exact = money2(sum(br_groups.values(), Decimal("0")))
+    br_rounded = round_up_thousand(br_exact) if br_exact > 0 else Decimal("0")
+    await state.update_data(
+        household_reserve_exact=str(br_exact),
+        household_reserve=str(br_rounded),
+        household_reserve_categories={name: str(value) for name, value in br_groups.items()},
+    )
+    data = await state.get_data()
+    before = dict(data.get("budget_optimizer_baseline") or {})
+    after = forecast_snapshot(onboarding_time_forecast(data))
+    freed = Decimal(str(data.get("budget_optimizer_freed", "0")))
+    lines = [
+        "<b>ВЫ НАШЛИ ДЕНЬГИ ДЛЯ ВАЖНОГО</b>",
+        "",
+        f"Освобождается: <b>{rub(freed)} / мес.</b>",
+        "",
+        f"Было: {escape(forecast_snapshot_text(before))}.",
+        f"Стало: <b>{escape(forecast_snapshot_text(after))}</b>.",
+    ]
+    if before.get("name"):
+        lines.insert(2, f"Текущий приоритет — <b>{escape(str(before['name']))}</b>.")
+    await state.set_state(SetupStates.onboarding_forecast)
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=keyboard([[("Продолжить →", "onboardingforecast:continue")]]),
+    )
+
+
+@router.callback_query(SetupStates.onboarding_forecast, F.data == "onboardingforecast:continue")
+async def continue_after_onboarding_forecast(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     await show_confirmation(callback.message, state)
 
 
@@ -7919,6 +8905,11 @@ async def show_confirmation(
 
     if settings.needs_stabilizer:
         accounts.append(("🛟", "Стабилизатор дохода"))
+
+    investment_level = investment_unlock_level(allocator.profile_id)
+    investments_available = mode >= investment_level
+    if investments_available:
+        accounts.append(("📈", "Инвестиции"))
 
     for name in settings.life_categories.keys():
         if name == "Налоги":
@@ -7966,22 +8957,7 @@ async def show_confirmation(
             + "\n\n"
         )
 
-    if settings.goals:
-        goals_ps = (
-            "Цели настроены и будут получать деньги после финансирования "
-            "Критического Минимума и Бытового Резерва. Инвестиции появятся, "
-            "когда ваш финансовый режим будет готов направлять туда деньги."
-        )
-    elif goals_available_in_onboarding(allocator):
-        goals_ps = (
-            "Цели уже доступны. Вы сможете настроить их позднее в Главном меню. "
-            "Инвестиции появятся, когда финансовый режим будет готов направлять туда деньги."
-        )
-    else:
-        goals_ps = (
-            "Цели и инвестиции появятся тогда, когда ваш финансовый режим "
-            "действительно будет готов направлять туда деньги."
-        )
+    goals_ps = financial_opportunities_text(allocator, bool(settings.goals))
 
     deficit = settings.total_critical_life - settings.average_income
     deficit_warning = ""
@@ -8030,17 +9006,19 @@ async def show_confirmation(
             f"{rhythm_labels.get(settings.income_rhythm)}\n\n"
             f"{reserve_progress_block('Подушка', allocator.pillow_total_balance, settings.force_majeure_limit)}\n\n"
             f"{reserve_progress_block('Стабилизатор', state_object.pillow_stabilizer, settings.stabilizer_full_limit)}\n\n"
-            f"{rub(settings.average_income)} — Средний доход\n"
-            f"{rub(settings.critical_life)} — Критический Минимум\n"
-            f"{rub(settings.household_reserve)} — Бытовой Резерв\n"
+            "<blockquote>"
+            f"{rub(settings.average_income)} — Средний доход\n\n"
+            f"{rub(settings.critical_life)} — Критический Минимум\n\n"
+            f"{rub(settings.household_reserve)} — Бытовой Резерв\n\n"
             f"{rub(settings.household_life)} — Устойчивая Жизнь"
+            "</blockquote>"
             f"{deficit_warning}\n\n"
             f"<b><u>ТИПЫ ДОХОДА:</u></b>\n\n{tax_types}\n\n"
             f"{goals_text}"
             "<b><u>КОНВЕРТЫ:</u></b>\n\n"
             "Откройте накопительные счета на ежедневный остаток в своём банке. Переименуйте.\n\n"
             f"{accounts_text}\n\n"
-            "<b><u>ПРЕДВАРИТЕЛЬНЫЙ РЕЖИМ:</u></b>\n\n"
+            "<b><u>ПРЕДВАРИТЕЛЬНЫЙ УРОВЕНЬ:</u></b>\n\n"
             f"{mode_progress}\n\n"
             "<b><u>P.S.:</u></b>\n\n"
             f"{goals_ps}"
@@ -8050,17 +9028,19 @@ async def show_confirmation(
             "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
             f"➖ <b>Профиль</b> — {rhythm_labels.get(settings.income_rhythm)}\n\n"
             f"{cycle_text}"
+            "<blockquote>"
             f"➖ <b>Средний доход</b> — {rub(settings.average_income)}\n\n"
             f"➖ <b>Критический Минимум</b> — {rub(settings.critical_life)}\n\n"
             f"➖ <b>Бытовой Резерв</b> — {rub(settings.household_reserve)}\n\n"
             f"➖ <b>Устойчивая Жизнь</b> — {rub(settings.household_life)}"
+            "</blockquote>"
             f"{deficit_warning}\n\n"
             f"<b><u>ТИПЫ ДОХОДОВ:</u></b>\n\n{tax_types}\n\n"
             f"{goals_text}"
             "<b><u>КОНВЕРТЫ:</u></b>\n\n"
             "Откройте накопительные счета на ежедневный остаток в своём банке. Переименуйте.\n\n"
             f"{accounts_text}\n\n"
-            "<b><u>ПРЕДВАРИТЕЛЬНЫЙ РЕЖИМ:</u></b>\n\n"
+            "<b><u>ПРЕДВАРИТЕЛЬНЫЙ УРОВЕНЬ:</u></b>\n\n"
             f"{mode_progress}\n\n"
             "<b><u>P.S.:</u></b>\n\n"
             f"{goals_ps}"
@@ -8198,6 +9178,7 @@ async def confirm_save(
         reply_markup=keyboard([
             [("Начать новый месяц сегодня", "periodsetup:today")],
             [("Выбрать дату начала", "periodsetup:date")],
+            [("Цели и Сундуки", "goals:manage")],
             [("✖️ Отмена", "periodsetup:cancel")],
         ]),
     )
@@ -8314,6 +9295,7 @@ def first_allocation_preview_text(allocator: FinancialAllocator, total: Decimal)
     lines = "\n".join(
         f"• <b>{escape(name)}</b> — {rub(amount)}"
         for name, amount in allocations.items()
+        if amount > 0
     ) or "• Распределять пока нечего"
     return (
         "<b>ПЕРВОЕ РАСПРЕДЕЛЕНИЕ</b>\n\n"
@@ -8394,9 +9376,12 @@ async def start_first_allocation(callback: CallbackQuery, state: FSMContext):
         f"Во время настройки вы уже указали остатки на сумму <b>{rub(known_total)}</b>. "
         "Аллокатор использует их автоматически — повторно вводить те же деньги не нужно.\n\n"
         "Если есть дополнительные свободные деньги, которые ещё нигде не учтены, добавьте "
-        "только эту дополнительную сумму.\n\n"
-        "Если часть Фонда Зарплаты хранится в валюте, можно сохранить фактический валютный "
-        "остаток и зафиксировать курс на расчётный период. Ежедневно пересчитывать его не потребуется.",
+        "только эту дополнительную сумму."
+        + (
+            "\n\nЕсли часть Фонда Зарплаты хранится в валюте, можно сохранить фактический валютный "
+            "остаток и зафиксировать курс на расчётный период. Ежедневно пересчитывать его не потребуется."
+            if allocator.profile_id == "cyclic" else ""
+        ),
         reply_markup=keyboard([
             [("Распределить известные деньги", "firstallocation:separated")],
             [("Добавить свободные деньги", "firstallocation:extra")],
@@ -8507,6 +9492,7 @@ async def apply_first_allocation(callback: CallbackQuery, state: FSMContext):
         before = {}
         allocations = allocator.apply_first_distribution(total)
     db.save_allocator(callback.from_user.id, allocator)
+    db.close_initial_distribution(callback.from_user.id)
     await state.clear()
     confirmed_mode = allocator.active_mode()
     confirmed_progress = "🏆" * confirmed_mode + "➖" * (
@@ -8536,7 +9522,7 @@ async def apply_first_allocation(callback: CallbackQuery, state: FSMContext):
         "<b>ПЕРВОЕ РАСПРЕДЕЛЕНИЕ СОХРАНЕНО</b>\n\n"
         f"{lines}\n\n"
         "Теперь физически переведите указанные суммы по соответствующим счетам и конвертам.\n\n"
-        "<b><u>СТАРТОВЫЙ РЕЖИМ ПОДТВЕРЖДЁН:</u></b>\n\n"
+        "<b><u>СТАРТОВЫЙ УРОВЕНЬ ПОДТВЕРЖДЁН:</u></b>\n\n"
         f"{confirmed_progress}\n\n"
         f"«{escape(allocator.mode_title(confirmed_mode))}»",
         reply_markup=main_menu_keyboard(callback.from_user.id),

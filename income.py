@@ -29,7 +29,7 @@ from financial_engine import (
 
 from storage import db
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
-from ui import main_menu_keyboard
+from ui import main_menu_keyboard, button_text
 from taxes import apply_planned_tax_allocation, refresh_planned_tax_targets
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets
 
@@ -94,7 +94,7 @@ def keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=("✖️ Отмена" if text == "Отмена" else "+ Другое" if text == "Другое" else text),
+                    text=button_text(text),
                     callback_data=data,
                 )
                 for text, data in row
@@ -223,6 +223,7 @@ async def start_income(
 
         return
 
+    db.close_initial_distribution(telegram_id)
     await state.clear()
 
     await state.set_state(
@@ -1195,14 +1196,14 @@ async def confirm_income(
             await state.set_state(IncomeStates.strategy_choice)
             await callback.message.answer(
                 "<b>КАК РАСПРЕДЕЛИТЬ СВОБОДНУЮ ЧАСТЬ?</b>\n\n"
-                "Сначала Аллокатор в любом случае обеспечит текущую жизнь и обязательные платежи. "
-                "Для оставшейся части доступны два варианта.\n\n"
-                "<b>Оставить место для целей</b>\n"
+                "Оба варианта учитывают текущую жизнь и обязательные платежи. "
+                "Разница — в распределении свободной части.\n\n"
+                "<b>Пополнять защиту и свои планы</b>\n"
                 f"• защита — примерно <b>{rub(balanced_protection)}</b>\n"
-                f"• цели — примерно <b>{rub(balanced_goals)}</b>\n\n"
+                f"• Цели и Сундуки — примерно <b>{rub(balanced_goals)}</b>\n\n"
                 f"<b>Быстрее наполнить «{escape(destination)}»</b>\n"
                 f"• защита — примерно <b>{rub(full_protection)}</b>\n"
-                f"• цели — <b>{rub(full_goals)}</b>\n\n"
+                f"• Цели и Сундуки — <b>{rub(full_goals)}</b>\n\n"
                 "Это предварительный расчёт. Деньги ещё не распределены.",
                 reply_markup=keyboard([
                     [("⭐️ Часть — в цели", "income:strategy:balanced"), ("Без части на цели", "income:strategy:protection")],
@@ -1406,17 +1407,10 @@ async def send_distribution_report(
         ),
     )
 
-    add_distribution_line(
-        "🔁",
-        "Фонд Зарплаты",
-        allocations.get("Фонд Зарплаты", ZERO),
-    )
-
-    add_distribution_line(
-        "🛟",
-        "Стабилизатор дохода",
-        allocations.get("Стабилизатор дохода", ZERO),
-    )
+    if allocator.profile_id == "cyclic":
+        add_distribution_line("🔁", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", ZERO))
+    if settings.needs_stabilizer:
+        add_distribution_line("🛟", "Стабилизатор дохода", allocations.get("Стабилизатор дохода", ZERO))
 
     for key, value in allocations.items():
         if key.startswith("Рабочие обязательства:"):
@@ -1608,7 +1602,7 @@ async def send_distribution_report(
         lines.append(
             reward_text.get(
                 mode,
-                f"До следующего режима осталось {remaining} ₽."
+                f"До следующего уровня осталось {remaining} ₽."
             )
         )
 
@@ -1678,7 +1672,7 @@ async def send_distribution_report(
     ]
 
     # ========================================================
-    # РЕЖИМ РАЗРАБОТЧИКА
+    # УРОВЕНЬ РАЗРАБОТЧИКА
     # ========================================================
 
     if developer_mode:
@@ -1686,7 +1680,7 @@ async def send_distribution_report(
         check = result.checks
 
         developer_lines = [
-            "<b>РАСЧЁТ — РЕЖИМ РАЗРАБОТЧИКА</b>",
+            "<b>РАСЧЁТ — УРОВЕНЬ РАЗРАБОТЧИКА</b>",
             "",
             f"Контрольная сумма: "
             f"{rub(check['total'])}",
@@ -1714,7 +1708,8 @@ async def send_distribution_report(
 
     await send_photo_with_sections(
         message,
-        INCOME_DISTRIBUTION_IMAGE_PATH,
+        (INCOME_DISTRIBUTION_IMAGE_PATH.with_name("super_income_distribution.png")
+         if result.super_stage_allocated > 0 else INCOME_DISTRIBUTION_IMAGE_PATH),
         main_sections,
         reply_markup=(None if developer_mode else menu),
     )

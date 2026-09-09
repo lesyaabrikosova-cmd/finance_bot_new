@@ -8,8 +8,16 @@ from decimal import Decimal
 _TEST_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 
-from financial_engine import FinancialAllocator, UserSettings  # noqa: E402
+from financial_engine import Credit, FinancialAllocator, UserSettings  # noqa: E402
 from forecast import simulate_cyclic_forecast, simulate_standard_forecast  # noqa: E402
+from onboarding import (  # noqa: E402
+    apply_budget_optimizer_plan,
+    budget_optimizer_candidate,
+    forecast_duration_range,
+    forecast_snapshot_text,
+    human_duration,
+    simulate_priority_months,
+)
 
 
 class CyclicForecastTests(unittest.TestCase):
@@ -90,6 +98,64 @@ class CyclicForecastTests(unittest.TestCase):
         self.assertEqual(distributable, Decimal("50000"))
         self.assertIsNotNone(result)
         self.assertGreater(simulated.state.pillow_balance, Decimal("0"))
+
+    def test_onboarding_monthly_forecast_does_not_change_source(self):
+        source = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Наёмный",
+            critical_life=Decimal("30000"),
+            household_reserve=Decimal("5000"),
+            average_income=Decimal("80000"),
+            income_rhythm="monthly",
+            force_majeure_months=Decimal("3"),
+            life_categories={"Жизнь": Decimal("30000")},
+        ))
+        before = deepcopy(source)
+        months = simulate_priority_months(source, Decimal("80000"))
+        self.assertIsNotNone(months)
+        self.assertEqual(source.state, before.state)
+        self.assertEqual(source.settings, before.settings)
+
+    def test_debt_forecast_runs_through_minimum_pillow_to_full_repayment(self):
+        source = FinancialAllocator(UserSettings(
+            has_debts=True,
+            employment_type="Наёмный",
+            critical_life=Decimal("30000"),
+            household_reserve=Decimal("5000"),
+            average_income=Decimal("90000"),
+            minimum_reserve_months=Decimal("1"),
+            force_majeure_months=Decimal("3"),
+            credits=[Credit("Кредит", Decimal("100000"), None, Decimal("10"), Decimal("10000"))],
+        ))
+        months = simulate_priority_months(source, Decimal("90000"), max_months=120)
+        self.assertIsNotNone(months)
+        self.assertGreater(months, 1)
+
+    def test_forecast_duration_is_human_readable(self):
+        self.assertEqual(human_duration(18), "1 год 6 мес.")
+        self.assertEqual(forecast_duration_range(18, 20), "примерно через 1 год 6 мес. — 1 год 8 мес.")
+
+    def test_budget_optimizer_only_selects_flexible_reserve_expenses(self):
+        self.assertTrue(budget_optimizer_candidate({"category": "food", "subcategory": "delivery"}))
+        self.assertTrue(budget_optimizer_candidate({"category": "transport", "subcategory": "optional_taxi"}))
+        self.assertTrue(budget_optimizer_candidate({"category": "clothes"}))
+        self.assertFalse(budget_optimizer_candidate({"category": "food", "subcategory": "supermarket"}))
+        self.assertFalse(budget_optimizer_candidate({"category": "transport", "subcategory": "required_taxi"}))
+        self.assertFalse(budget_optimizer_candidate({"category": "gifts"}))
+        self.assertFalse(budget_optimizer_candidate({"category": "education", "future_goal": True}))
+
+    def test_budget_optimizer_overwrites_plan_and_preserves_period(self):
+        item = {"name": "Доставка", "amount": "12000", "monthly": "2000", "months": "6"}
+        updated = apply_budget_optimizer_plan(item, Decimal("1600"))
+        self.assertEqual(updated["monthly"], "1600.00")
+        self.assertEqual(updated["amount"], "9600.00")
+        self.assertEqual(item["monthly"], "2000")
+
+    def test_budget_optimizer_forecast_summary_is_human_readable(self):
+        self.assertEqual(
+            forecast_snapshot_text({"fast": 18, "slow": 20}),
+            "примерно через 1 год 6 мес. — 1 год 8 мес.",
+        )
 
 
 if __name__ == "__main__":

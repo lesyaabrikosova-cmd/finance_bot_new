@@ -54,7 +54,7 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         })
         with patch("ui.db.load_allocator", return_value=allocator):
             texts = self.button_texts(main_menu_keyboard(1))
-        self.assertIn("⚠️ Заполнить рабочую жизнь", texts)
+        self.assertIn("Заполнить рабочую жизнь", texts)
 
     def test_missing_life_button_disappears_when_both_are_complete(self):
         allocator = self.cyclic_allocator({
@@ -63,7 +63,7 @@ class PhaseLifeStageTwoTests(unittest.TestCase):
         })
         with patch("ui.db.load_allocator", return_value=allocator):
             texts = self.button_texts(main_menu_keyboard(1))
-        self.assertNotIn("⚠️ Заполнить рабочую жизнь", texts)
+        self.assertNotIn("Заполнить рабочую жизнь", texts)
         self.assertNotIn("⚠️ Заполнить жизнь в перерыве", texts)
 
     def test_early_work_phase_button_is_available_during_break(self):

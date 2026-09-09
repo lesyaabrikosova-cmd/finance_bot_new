@@ -27,6 +27,30 @@ ONE = Decimal("1")
 HUNDRED = Decimal("100")
 CENT = Decimal("0.01")
 
+@dataclass(frozen=True)
+class BracketPolicy:
+    """Брекет и правило остатка; доли остатка всегда относительные."""
+
+    rate: Decimal
+    bracket_target: str
+    remainder_targets: Tuple[str, ...]
+
+    def split(self, amount: Decimal) -> Tuple[Decimal, Decimal]:
+        bracket = amount * self.rate / HUNDRED
+        return bracket, amount - bracket
+
+    def allocations(self, amount: Decimal) -> Dict[str, Decimal]:
+        bracket, remainder = self.split(amount)
+        result = {self.bracket_target: bracket}
+        distributed = ZERO
+        for index, target in enumerate(self.remainder_targets):
+            part = (remainder - distributed if index == len(self.remainder_targets) - 1
+                    else remainder / Decimal(len(self.remainder_targets)))
+            result[target] = result.get(target, ZERO) + part
+            distributed += part
+        return result
+
+
 VACATION_BUDGET_ITEMS = (
     ("tickets", "Билеты"),
     ("accommodation", "Проживание"),
@@ -240,7 +264,7 @@ def update_goal_percentage(
 
 
 # ============================================================
-# КОНСТАНТЫ РЕЖИМОВ
+# КОНСТАНТЫ УРОВНЕЙ
 # ============================================================
 
 MODE_1 = 1
@@ -296,12 +320,12 @@ def normalize_profile_id(profile_type: str | None, employment_type: str, income_
 
 
 MODE_NAMES = {
-    MODE_1: "Режим 1",
-    MODE_2: "Режим 2",
-    MODE_3: "Режим 3",
-    MODE_4: "Режим 4",
-    MODE_5: "Режим 5",
-    MODE_6: "Максимальный режим",
+    MODE_1: "Уровень 1",
+    MODE_2: "Уровень 2",
+    MODE_3: "Уровень 3",
+    MODE_4: "Уровень 4",
+    MODE_5: "Уровень 5",
+    MODE_6: "Максимальный уровень",
 }
 
 
@@ -605,7 +629,7 @@ class UserSettings:
     bracket_b: Decimal = Decimal("25")
     bracket_c: Decimal = Decimal("30")
     bracket_d: Decimal = Decimal("35")
-    bracket_e: Decimal = Decimal("40")
+    bracket_e: Decimal = Decimal("35")  # Старое поле хранения; расчёты используют bracket_d.
 
     goals_share_c: Decimal = Decimal("50")
     pillow_share_c: Decimal = Decimal("50")
@@ -927,8 +951,30 @@ class UserSettings:
     # ВАЛИДАЦИЯ
     # ========================================================
 
+    def set_brackets(self, a, b, c, d) -> None:
+        """Меняет четыре ставки атомарно; старые сохранённые профили читаются как прежде."""
+        try:
+            rates = tuple(Decimal(str(value)) for value in (a, b, c, d))
+        except (ValueError, ArithmeticError):
+            raise ValueError("Укажите четыре целых процента.") from None
+        if any(not rate.is_finite() for rate in rates):
+            raise ValueError("Укажите четыре конечных числа.")
+        if any(rate != rate.to_integral_value() or not ZERO <= rate <= HUNDRED for rate in rates):
+            raise ValueError("Бракеты должны быть целыми процентами от 0 до 100.")
+        if rates[0] >= HUNDRED or rates[1] >= HUNDRED:
+            raise ValueError("Бракеты A и B должны быть меньше 100%, чтобы оставались деньги на жизнь.")
+        if any(left > right for left, right in zip(rates, rates[1:])):
+            raise ValueError("Следующий бракет должен быть равен предыдущему или больше него.")
+        self.bracket_a, self.bracket_b, self.bracket_c, self.bracket_d = rates
+        self.bracket_e = self.bracket_d  # Совместимость со старой схемой SQLite.
+
     def validate(self) -> List[str]:
         errors = []
+
+        for name, rate in (("A", self.bracket_a), ("B", self.bracket_b),
+                           ("C", self.bracket_c), ("D", self.bracket_d)):
+            if not rate.is_finite() or not ZERO <= rate <= HUNDRED or (name in {"A", "B"} and rate == HUNDRED):
+                errors.append(f"Некорректный бракет {name}: A/B — от 0 до менее 100%, C/D — от 0 до 100%.")
 
         if self.critical_life <= ZERO:
             errors.append(
@@ -1152,7 +1198,7 @@ class AllocatorState:
 
     # Фактические деньги Фонда Зарплаты могут храниться в разных валютах.
     # Курсы фиксируются пользователем на расчётный период: ежедневные колебания
-    # биржевого ориентира не должны самопроизвольно менять финансовый режим.
+    # биржевого ориентира не должны самопроизвольно менять финансовый уровень.
     fund_salary_currencies: Dict[str, Decimal] = field(default_factory=dict)
     fund_salary_period_rates: Dict[str, Decimal] = field(default_factory=dict)
     fund_salary_start_reserves: Dict[str, Decimal] = field(default_factory=dict)
@@ -1409,6 +1455,7 @@ class DistributionResult:
     transition_message: Optional[str] = None
     regular_income_part: Decimal = ZERO
     super_income_part: Decimal = ZERO
+    super_stage_allocated: Decimal = ZERO
 
     def total_allocated_after_tax(self) -> Decimal:
         return sum(
@@ -1451,12 +1498,43 @@ class FinancialAllocator:
                 )
             )
 
+        self.ensure_active_chest()
         self._ensure_goal_balances()
         self._ensure_life_categories()
 
     # ========================================================
     # ИНИЦИАЛИЗАЦИЯ
     # ========================================================
+
+    def ensure_active_chest(self) -> Goal:
+        """Безопасная миграция старых профилей без изменения существующих долей."""
+        chests = [g for g in self.settings.active_goals if g.is_chest]
+        if chests:
+            return chests[0]
+        names = {g.name.casefold() for g in self.settings.goals}
+        names.update(name.casefold() for name in self.state.goal_balances)
+        base = "Будущие покупки"
+        name, suffix = base, 2
+        while name.casefold() in names:
+            name, suffix = f"{base} {suffix}", suffix + 1
+        chest = Goal(name, ZERO if self.settings.active_goals else HUNDRED,
+                     position_type="chest", order_index=len(self.settings.goals))
+        self.settings.goals.append(chest)
+        self.state.goal_balances[name] = ZERO
+        return chest
+
+    def is_last_active_chest(self, goal: Goal) -> bool:
+        return (goal.is_chest and goal.status == "active"
+                and sum(g.is_chest for g in self.settings.active_goals) == 1)
+
+    def goal_remaining_capacity(self, goal: Goal) -> Optional[Decimal]:
+        if goal.is_chest or goal.full_target_amount is None:
+            return None
+        # Ядро распределяет рубли. Без курса нельзя сравнивать их с валютной целью.
+        if goal.currency_code != "RUB":
+            return ZERO
+        current = self.state.goal_balances.get(goal.name, goal.balance)
+        return max(ZERO, goal.full_target_amount - current)
 
     def _ensure_goal_balances(self):
         for goal in self.settings.goals:
@@ -1679,7 +1757,7 @@ class FinancialAllocator:
         start_layer: str,
     ) -> Decimal:
         """
-        Технический водопад защитных сущностей в порядке финансовых режимов.
+        Технический водопад защитных сущностей в порядке финансовых уровней.
 
         Возвращает остаток, если все предусмотренные резервы заполнены.
         """
@@ -1848,7 +1926,7 @@ class FinancialAllocator:
         return {name: money(value) for name, value in result.items() if value > ZERO}
 
     # ========================================================
-    # ОПРЕДЕЛЕНИЕ РЕЖИМА
+    # ОПРЕДЕЛЕНИЕ УРОВНЯ
     # ========================================================
 
     @property
@@ -2017,6 +2095,9 @@ class FinancialAllocator:
                 raise ValueError("Выбранная цель не найдена.")
             if goal.status != "active":
                 raise ValueError("Выбранная позиция сейчас не активна.")
+            capacity = self.goal_remaining_capacity(goal)
+            if capacity is not None and amount > capacity:
+                raise ValueError("Сумма превышает остаток до цели. Выберите Сундук или уменьшите перевод.")
             self.state.goal_balances[goal.name] = (
                 self.state.goal_balances.get(goal.name, ZERO) + amount
             )
@@ -2262,33 +2343,35 @@ class FinancialAllocator:
             * (ONE - self.estimated_average_tax_rate / HUNDRED)
         )
 
-    def current_stage_c_goal_share(self) -> Decimal:
-        """Доля этапа C для Целей из параметров текущего режима и стратегии."""
-        mode = self.allocation_mode()
+    def bracket_policy(self, stage: str, mode: Optional[int] = None) -> BracketPolicy:
+        """Единый источник правил для расчёта, прогноза и будущих карточек."""
+        mode = self.allocation_mode() if mode is None else mode
         s = self.settings
-        if mode in {MODE_1, MODE_2}:
-            return ZERO
-        if mode == MODE_3:
-            filling_salary_fund = (
-                self.profile_id == PROFILE_CYCLIC
-                and self.state.intercontract_reserve < self.intercontract_current_limit
-            )
-            if filling_salary_fund or s.protective_stage_c_strategy == "protection":
-                return ZERO
-            return s.protective_stage_c_goals_share / HUNDRED
-        if mode == MODE_4:
-            if s.protective_stage_c_strategy == "protection":
-                return ZERO
-            return s.protective_stage_c_goals_share / HUNDRED
-        if mode == MODE_5:
-            if s.protective_stage_c_strategy == "protection":
-                return ZERO
-            return (
-                (ONE - s.bracket_c / HUNDRED)
-                * s.goals_share_c
-                / HUNDRED
-            )
-        return ONE - s.bracket_c / HUNDRED
+        target = self.bracket_up_target(mode)
+        if stage in {"A", "B"}:
+            return BracketPolicy(s.bracket_a if stage == "A" else s.bracket_b,
+                                 target, ("КМ" if stage == "A" else "БР",))
+        if stage == "C":
+            if mode in {MODE_1, MODE_2}:
+                remainder = (target,)
+            elif mode in {MODE_3, MODE_4}:
+                filling_fund = (mode == MODE_3 and self.profile_id == PROFILE_CYCLIC
+                                and self.state.intercontract_reserve < self.intercontract_current_limit)
+                remainder = ((target,) if filling_fund or s.protective_stage_c_strategy == "protection"
+                             else (target, "Цели"))
+            elif mode == MODE_5:
+                remainder = ("Инвест", "Цели")
+            else:
+                remainder = ("Цели",)
+            return BracketPolicy(s.bracket_c, target, remainder)
+        if stage == "D":
+            return BracketPolicy(s.bracket_d,
+                                 "Инвест" if mode in {MODE_5, MODE_6} else target,
+                                 ("СтабД" if mode == MODE_5 else "Цели" if mode == MODE_6 else target,))
+        raise ValueError(f"Неизвестный этап: {stage}")
+
+    def current_stage_c_goal_share(self) -> Decimal:
+        return self.bracket_policy("C").allocations(ONE).get("Цели", ZERO)
 
     def _estimated_goals_capacity_for_income(
         self,
@@ -2490,12 +2573,12 @@ class FinancialAllocator:
     def mode_display_name(self, mode: Optional[int] = None) -> str:
         selected = self.active_mode() if mode is None else mode
         if selected == self.profile_mode_total:
-            return "Максимальный режим"
-        return f"Режим {selected}"
+            return "Максимальный уровень"
+        return f"Уровень {selected}"
 
     def allocation_mode(self) -> int:
         """
-        Возвращает совместимый режим финансовых правил MODE_1–MODE_6.
+        Возвращает совместимый уровень финансовых правил MODE_1–MODE_6.
 
         Несколько последовательных ступеней циклического маршрута используют
         одинаковые правила распределения, но остаются отдельными достижениями.
@@ -2539,7 +2622,7 @@ class FinancialAllocator:
     ) -> List[Tuple[int, Decimal]]:
         """
         Возвращает возможные переходы в виде:
-        (следующий режим, остаток до перехода).
+        (следующий уровень, остаток до перехода).
         """
         s = self.settings
         st = self.state
@@ -2641,8 +2724,8 @@ class FinancialAllocator:
             if remaining is not None and remaining > ZERO:
                 return (
                     f"❌ Перехода нет. "
-                    f"Режим: {self.mode_display_name(before)}. "
-                    f"До следующего режима "
+                    f"Уровень: {self.mode_display_name(before)}. "
+                    f"До следующего уровня "
                     f"осталось {fmt_money(remaining)} ₽."
                 )
 
@@ -2696,7 +2779,7 @@ class FinancialAllocator:
         self,
         mode: int,
     ) -> Optional[Decimal]:
-        """Сумма в направлении роста до следующего режима."""
+        """Сумма в направлении роста до следующего уровня."""
         s = self.settings
         st = self.state
 
@@ -2745,11 +2828,11 @@ class FinancialAllocator:
         transition_share: Decimal,
     ) -> Decimal:
         """
-        Ограничивает обрабатываемую базу ближайшей границей режима.
+        Ограничивает обрабатываемую базу ближайшей границей уровня.
 
         transition_share — доля базы, которая продвигает пользователя
-        к следующему режиму. Остаток после границы должен быть повторно
-        обработан на том же этапе уже по правилам нового режима.
+        к следующему уровню. Остаток после границы должен быть повторно
+        обработан на том же этапе уже по правилам нового уровня.
         """
         amount = D(amount)
         transition_share = D(transition_share)
@@ -2768,7 +2851,7 @@ class FinancialAllocator:
         amount: Decimal,
         stage,
     ) -> Decimal:
-        """Повторяет один и тот же этап после каждой смены режима."""
+        """Повторяет один и тот же этап после каждой смены уровня."""
         amount = D(amount)
 
         while amount > ZERO:
@@ -2821,11 +2904,7 @@ class FinancialAllocator:
         if part_a <= ZERO:
             return amount
 
-        up_calculated = (
-            part_a
-            * bracket
-            / HUNDRED
-        )
+        up_calculated, life_part = self.bracket_policy("A", mode).split(part_a)
         up_target = self.bracket_up_target(mode)
         final_overflow = ZERO
 
@@ -2958,11 +3037,7 @@ class FinancialAllocator:
         if part_b <= ZERO:
             return amount
 
-        up_calculated = (
-            part_b
-            * bracket
-            / HUNDRED
-        )
+        up_calculated, reserve_part = self.bracket_policy("B", mode).split(part_b)
         up_target = self.bracket_up_target(mode)
         final_overflow = ZERO
 
@@ -3035,156 +3110,31 @@ class FinancialAllocator:
         ):
             return amount
 
-        s = self.settings
-        st = self.state
+        return self._allocate_policy(amount, mode, "C", steps, allocations)
 
-        if mode == MODE_1:
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                ONE,
-            )
-            overflow = self.allocate_protection_waterfall(part, "МП", allocations)
-
-            return amount - part + overflow
-
-        if mode == MODE_2:
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                ONE,
-            )
-            applied = self.apply_early_repayment(
-                part,
-                steps,
-            )
-
-            allocations[
-                "Досрочное"
-            ] += applied
-
-            return amount - applied
-
-        if mode == MODE_3:
-            filling_salary_fund = (
-                self.profile_id == PROFILE_CYCLIC
-                and st.intercontract_reserve < self.intercontract_current_limit
-            )
-            protection_share = (
-                ONE
-                if filling_salary_fund or s.protective_stage_c_strategy == "protection"
-                else ONE - s.protective_stage_c_goals_share / HUNDRED
-            )
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                protection_share,
-            )
-            protection_part = part * protection_share
-            goal_part = part - protection_part
-            overflow = self.allocate_protection_waterfall(
-                protection_part,
-                "МР" if s.needs_intercontract_reserve else "ФМ",
-                allocations,
-            )
-            self._allocate_goals(goal_part, allocations)
-
-            return amount - part + overflow
-
-        if mode == MODE_4:
-            protection_share = (
-                ONE
-                if s.protective_stage_c_strategy == "protection"
-                else ONE - s.protective_stage_c_goals_share / HUNDRED
-            )
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                protection_share,
-            )
-            protection_part = part * protection_share
-            goal_part = part - protection_part
-            overflow = self.allocate_protection_waterfall(
-                protection_part, "СтабД", allocations
-            )
-            self._allocate_goals(goal_part, allocations)
-
-            return amount - part + overflow
-
-        if mode == MODE_5:
-            pillow_share = (
-                (ONE - s.bracket_c / HUNDRED)
-                * s.pillow_share_c
-                / HUNDRED
-            )
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                pillow_share,
-            )
-            investment_part = (
-                part
-                * s.bracket_c
-                / HUNDRED
-            )
-
-            remaining = (
-                part
-                - investment_part
-            )
-
-            st.investments += investment_part
-
-            allocations[
-                "Инвестиции"
-            ] += investment_part
-
-            if s.protective_stage_c_strategy == "protection":
-                goal_part = ZERO
-                pillow_part = remaining
+    def _allocate_policy(self, amount, mode, stage, steps, allocations):
+        policy = self.bracket_policy(stage, mode)
+        transition_target = self.bracket_up_target(mode)
+        transition_share = policy.allocations(ONE).get(transition_target, ZERO)
+        part = self.amount_until_mode_transition(amount, mode, transition_share)
+        bracket, remainder = policy.split(part)
+        steps.append(f"Бракет {stage} ({policy.rate}%): {bracket}; остаток: {remainder}")
+        overflow = ZERO
+        for target, value in policy.allocations(part).items():
+            if value <= ZERO:
+                continue
+            if target == "Цели":
+                self._allocate_goals(value, allocations)
+            elif target == "Инвест":
+                self.state.investments += value
+                allocations["Инвестиции"] = allocations.get("Инвестиции", ZERO) + value
+            elif target == "Досрочное":
+                applied = self.apply_early_repayment(value, steps)
+                allocations["Досрочное"] = allocations.get("Досрочное", ZERO) + applied
+                overflow += value - applied
             else:
-                goal_part = remaining / Decimal("2")
-                pillow_part = remaining - goal_part
-
-            self._allocate_goals(
-                goal_part,
-                allocations,
-            )
-
-            pillow_overflow = self.allocate_protection_waterfall(
-                pillow_part, "СтабД", allocations
-            )
-
-            return amount - part + pillow_overflow
-
-        if mode == MODE_6:
-            investment_part = (
-                amount
-                * s.bracket_c
-                / HUNDRED
-            )
-
-            remaining = (
-                amount
-                - investment_part
-            )
-
-            st.investments += investment_part
-
-            allocations[
-                "Инвестиции"
-            ] += investment_part
-
-            self._allocate_goals(
-                remaining,
-                allocations,
-            )
-
-            return ZERO
-
-        raise ValueError(
-            f"Неизвестный режим: {mode}"
-        )
+                overflow += self.allocate_protection_waterfall(value, target, allocations)
+        return amount - part + overflow
 
     # ========================================================
     # ЦЕЛИ
@@ -3199,62 +3149,54 @@ class FinancialAllocator:
         if amount <= ZERO:
             return
 
-        goals = self.settings.active_goals
-
-        if not goals:
-            allocations[
-                "Цели:ЦЕЛИ (всего)"
-            ] = (
-                allocations.get(
-                    "Цели:ЦЕЛИ (всего)",
-                    ZERO,
-                )
-                + amount
-            )
-            return
-
+        self.ensure_active_chest()
         split = self.split_goal_amount(amount)
+        for name, part in split.items():
+            if part <= ZERO:
+                continue
+            self.state.goal_balances[name] = self.state.goal_balances.get(name, ZERO) + part
+            key = f"Цели:{name}"
+            allocations[key] = allocations.get(key, ZERO) + part
 
-        for goal in goals:
-            part = split[goal.name]
-
-            self.state.goal_balances[
-                goal.name
-            ] = (
-                self.state.goal_balances.get(
-                    goal.name,
-                    ZERO,
-                )
-                + part
-            )
-
-            key = f"Цели:{goal.name}"
-
-            allocations[key] = (
-                allocations.get(
-                    key,
-                    ZERO,
-                )
-                + part
-            )
+    def _split_chest_overflow(self, amount: Decimal) -> Dict[str, Decimal]:
+        chests = [g for g in self.settings.active_goals if g.is_chest]
+        weights = [max(ZERO, g.percentage) for g in chests]
+        total = sum(weights, ZERO)
+        if total == ZERO:
+            weights = [ONE] * len(chests)
+            total = Decimal(len(chests))
+        result = {}
+        distributed = ZERO
+        for index, (chest, weight) in enumerate(zip(chests, weights)):
+            part = (amount - distributed if index == len(chests) - 1
+                    else amount * weight / total)
+            result[chest.name] = part
+            distributed += part
+        return result
 
     def split_goal_amount(self, amount: Decimal) -> Dict[str, Decimal]:
-        """Делит сумму между активными позициями без потери копеек."""
+        """Чистый расчёт: ограничиваем Цели, переполнение — только в Сундуки."""
         amount = max(ZERO, D(amount))
         goals = self.settings.active_goals
         if not goals or amount <= ZERO:
             return {}
-        result: Dict[str, Decimal] = {}
+        result = {}
         distributed = ZERO
+        overflow = ZERO
         for index, goal in enumerate(goals):
-            part = (
-                amount - distributed
-                if index == len(goals) - 1
-                else amount * goal.percentage / HUNDRED
-            )
-            result[goal.name] = result.get(goal.name, ZERO) + part
-            distributed += part
-        return result
+            planned = (amount - distributed if index == len(goals) - 1
+                       else amount * goal.percentage / HUNDRED)
+            distributed += planned
+            capacity = self.goal_remaining_capacity(goal)
+            part = planned if capacity is None else min(planned, capacity)
+            result[goal.name] = part
+            overflow += planned - part
+        if overflow > ZERO:
+            if not any(g.is_chest for g in goals):
+                raise ValueError("Добавьте активный Сундук для остатка от заполненных Целей.")
+            for name, part in self._split_chest_overflow(overflow).items():
+                result[name] = result.get(name, ZERO) + part
+        return {name: part for name, part in result.items() if part > ZERO}
 
     # ========================================================
     # ДОСРОЧНОЕ ПОГАШЕНИЕ
@@ -3340,7 +3282,7 @@ class FinancialAllocator:
         return applied_total
 
     # ========================================================
-    # БРАКЕТ D/E — СВЕРХДОХОД
+    # БРАКЕТ D — СВЕРХДОХОД
     # ========================================================
 
     def super_income(
@@ -3353,119 +3295,7 @@ class FinancialAllocator:
         if amount <= ZERO:
             return ZERO
 
-        s = self.settings
-
-        if mode == MODE_1:
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                ONE,
-            )
-            overflow = self.allocate_protection_waterfall(part, "МП", allocations)
-
-            return amount - part + overflow
-
-        if mode == MODE_2:
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                ONE,
-            )
-            applied = self.apply_early_repayment(
-                part,
-                [],
-            )
-
-            allocations[
-                "Досрочное"
-            ] += applied
-
-            return amount - applied
-
-        if mode == MODE_3:
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                ONE,
-            )
-            overflow = self.allocate_protection_waterfall(
-                part,
-                "МР" if s.needs_intercontract_reserve else "ФМ",
-                allocations,
-            )
-
-            return amount - part + overflow
-
-        if mode == MODE_4:
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                ONE,
-            )
-            overflow = self.allocate_protection_waterfall(part, "СтабД", allocations)
-
-            return amount - part + overflow
-
-        if mode == MODE_5:
-            pillow_share = (
-                ONE - s.bracket_d / HUNDRED
-            )
-            part = self.amount_until_mode_transition(
-                amount,
-                mode,
-                pillow_share,
-            )
-            invest = (
-                part
-                * s.bracket_d
-                / HUNDRED
-            )
-
-            remainder = (
-                part
-                - invest
-            )
-
-            self.state.investments += invest
-
-            allocations[
-                "Инвестиции"
-            ] += invest
-
-            overflow = self.allocate_protection_waterfall(
-                remainder, "СтабД", allocations
-            )
-
-            return amount - part + overflow
-
-        if mode == MODE_6:
-            invest = (
-                amount
-                * s.bracket_e
-                / HUNDRED
-            )
-
-            goals = (
-                amount
-                - invest
-            )
-
-            self.state.investments += invest
-
-            allocations[
-                "Инвестиции"
-            ] += invest
-
-            self._allocate_goals(
-                goals,
-                allocations,
-            )
-
-            return ZERO
-
-        raise ValueError(
-            f"Неизвестный режим: {mode}"
-        )
+        return self._allocate_policy(amount, mode, "D", [], allocations)
 
     # ========================================================
     # ПРОВЕРКА КЖ
@@ -3637,7 +3467,7 @@ class FinancialAllocator:
         )
 
         # --------------------------------------------
-        # После A проверяем изменение режима.
+        # После A проверяем изменение уровня.
         # --------------------------------------------
 
         # --------------------------------------------
@@ -3699,6 +3529,7 @@ class FinancialAllocator:
         # Защитный остаток обычной части (например, после переполнения слоя)
         # также считается сверхдоходом, чтобы ни одна копейка не потерялась.
         super_remaining += regular_remaining
+        super_stage_input = super_remaining
         if super_remaining > ZERO:
             super_remaining = self.run_stage_with_mode_transitions(
                 super_remaining,
@@ -3710,7 +3541,7 @@ class FinancialAllocator:
             )
 
         # --------------------------------------------
-        # Режим после всего распределения
+        # Уровень после всего распределения
         # --------------------------------------------
 
         mode_after = self.active_mode()
@@ -3867,6 +3698,7 @@ class FinancialAllocator:
             transition_message=transition,
             regular_income_part=regular_net,
             super_income_part=super_net,
+            super_stage_allocated=super_stage_input - super_remaining,
         )
 
     # ========================================================

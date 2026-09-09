@@ -59,6 +59,7 @@ from period import (
 )
 
 from forecast import router as forecast_router
+from brackets import router as brackets_router
 
 from settings_editor import (
     router as settings_router,
@@ -268,7 +269,7 @@ async def send_state(
         f"<b>{profile_names.get(settings.income_rhythm, settings.employment_type)}, "
         f"{profile_debt}</b>\n\n"
 
-        f"⚙️ Активный режим: "
+        f"⚙️ Активный уровень: "
         f"<b>{allocator.mode_display_name(mode)} "
         f"{allocator.mode_title(mode)}</b>\n\n"
 
@@ -326,7 +327,7 @@ async def send_state(
     if next_info:
 
         text += (
-            "\n\n🏆 До следующего режима "
+            "\n\n🏆 До следующего уровня "
             f"{next_info['next_name']} осталось:\n"
             f"<b>{fmt_money(next_info['remaining'])} ₽</b>"
         )
@@ -721,7 +722,7 @@ async def set_bot_commands(
         ),
         BotCommand(
             command="state",
-            description="Мой режим",
+            description="Мой уровень",
         ),
         BotCommand(
             command="about",
@@ -827,7 +828,7 @@ async def main():
     dp.include_router(
         income_router
     )
-    # Главное меню, Балансы, режим, помощь
+    # Главное меню, Балансы, уровень, помощь
     # ВАЖНО: этот роутер должен быть ДО settings_router.
     dp.include_router(
         dashboard_router
@@ -842,6 +843,7 @@ async def main():
         period_router
     )
     dp.include_router(forecast_router)
+    dp.include_router(brackets_router)
 
     # Редактирование пользовательских настроек
     dp.include_router(

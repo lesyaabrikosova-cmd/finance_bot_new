@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from copy import deepcopy
+from charts import send_chart_report
+from planned_payments import refresh_planned_payment_targets
+from taxes import refresh_planned_tax_targets
 from decimal import Decimal, InvalidOperation
 from html import escape
 
@@ -79,14 +83,49 @@ def goal_line(allocator, goal: Goal) -> str:
         "archived": " · в архиве",
     }
     state_label = state_labels.get(goal.status, "")
+    if goal.is_goal and goal.target_amount is not None and goal.currency_code != "RUB":
+        state_label += " · укажите цель в рублях для автопополнения"
+    elif goal.is_goal and goal.target_amount is not None and goal.status == "active" and allocator.goal_remaining_capacity(goal) == 0:
+        state_label += " · сумма собрана, новые деньги идут в Сундуки"
     target = ""
     if goal.target_amount is not None:
         current = allocator.state.goal_balances.get(goal.name, goal.balance)
-        target = f"\n  {rub(current)} из {rub(goal.full_target_amount)}"
+        target_text = rub(goal.full_target_amount).replace(" ₽", f" {goal.currency_code}" if goal.currency_code != "RUB" else " ₽")
+        target = f"\n  Учтено: {rub(current)} · цель: {target_text}"
     return (
         f"{icon(goal)} <b>{escape(display_name(goal))}</b> — {goal.percentage}%{state_label}"
         f"{target}"
     )
+
+
+def goal_income_preview(allocator, telegram_id):
+    """Simulate one next receipt against today's balances; never persist it."""
+    prepared = deepcopy(allocator)
+    amount = prepared.settings.average_income
+    values = {display_name(g): Decimal("0") for g in prepared.settings.goals if g.status != "archived"}
+    if amount <= 0:
+        return values, "Укажите доход в настройках, чтобы увидеть примерные суммы пополнения."
+    refresh_planned_payment_targets(telegram_id, prepared, date.today(), persist=False)
+    refresh_planned_tax_targets(telegram_id, prepared, date.today(), persist=False)
+    rates = prepared.settings.income_type_tax_rates
+    income_type = max(rates, key=rates.get) if rates else "Доход"
+    result = prepared.process_income(amount, income_type, income_date=date.today())
+    for goal in prepared.settings.goals:
+        if goal.status != "archived":
+            values[display_name(goal)] = result.allocations.get(f"Цели:{goal.name}", Decimal("0"))
+    basis = "обычном доходе" if allocator.profile_id == "stable" else "среднем доходе"
+    total = sum(values.values(), Decimal("0"))
+    text = (f"При {basis} <b>{rub(amount)}</b> до налога на Цели и Сундуки "
+            f"в этом примере пойдёт примерно <b>{rub(total)}</b>.\n"
+            f"Налог: {rub(result.tax)} · тип дохода: {escape(income_type)}.\n"
+            "Это пример одного следующего поступления с текущими балансами, а не обещание ежемесячной суммы.")
+    if len(set(rates.values())) > 1:
+        text += " Для примера взята наибольшая из настроенных ставок налога."
+    if allocator.profile_id == "cyclic":
+        text += " Для циклического профиля взято одно поступление в размере указанного среднего дохода в текущей фазе цикла."
+    if total == 0:
+        text += " Сейчас эта сумма направляется на другие финансовые приоритеты."
+    return values, text
 
 
 async def show_goals_manager(message: Message, telegram_id: int) -> None:
@@ -101,8 +140,9 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
         if goal.status != "archived"
     ]
     archived_count = sum(goal.status == "archived" for goal in goals)
+    estimates, explanation = goal_income_preview(allocator, telegram_id)
     if visible:
-        listing = "\n\n".join(goal_line(allocator, goal) for _, goal in visible)
+        listing = "\n\n".join(goal_line(allocator, goal) + f"\n  Примерное пополнение: {rub(estimates.get(display_name(goal), 0))}" for _, goal in visible)
     else:
         listing = "<b>Пока список пуст.</b>"
     rows = [
@@ -116,13 +156,22 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
         *([[(f"Архив · {archived_count}", "goalmanage:archive:list")]] if archived_count else []),
         [("← Главное меню", "menu:back")],
     ])
-    await message.answer(
+    total_estimate = sum(estimates.values(), Decimal("0"))
+    chart_values = estimates if total_estimate > 0 else {display_name(g): g.percentage for g in allocator.settings.active_goals}
+    await send_chart_report(
+        message, chart_values, "ЦЕЛИ И СУНДУКИ",
         "<b><u>ЦЕЛИ И СУНДУКИ</u></b>\n\n"
         "⭐️ Цель — конкретная сумма, которую нужно накопить.\n"
         "🧳 Сундук — постоянный запас, который можно пополнять и использовать снова.\n\n"
-        f"{listing}\n\n"
-        "Проценты показывают, как делятся только деньги, уже выделенные Аллокатором на Цели.",
+        f"{explanation}\n\n{listing}\n\n"
+        "Цели пополняются до нужной суммы с запасом, если он включён. Остаток идёт в активные Сундуки "
+        "пропорционально их долям. Если все доли Сундуков — 0%, остаток делится поровну.\n\n"
+        "Хотя бы один Сундук всегда остаётся активным. «Будущие покупки» — Сундук для остатка "
+        "в профилях, где другого Сундука ещё нет. Его можно переименовать.\n\n"
+        "Проценты относятся только к деньгам, выделенным на Цели и Сундуки.",
         reply_markup=keyboard(rows),
+        subtitle="Доли примерного пополнения" if total_estimate > 0 else "Настроенные доли · пополнение пока не рассчитано или 0 ₽",
+        percentages_only=total_estimate <= 0,
     )
 
 
@@ -674,6 +723,8 @@ async def save_simple_goal_edit(message: Message, state: FSMContext, field: str,
     allocator = db.load_allocator(message.from_user.id)
     goal = allocator.settings.goals[int(data["edit_goal_index"])]
     setattr(goal, field, value)
+    if field == "target_amount":
+        goal.currency_code = "RUB"
     goal.updated_at = datetime.now(timezone.utc).isoformat()
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
@@ -698,6 +749,9 @@ async def toggle_position(callback: CallbackQuery, state: FSMContext):
         goal.status = "active"
         goal.percentage = goal.previous_percentage or Decimal("1")
     else:
+        if allocator.is_last_active_chest(goal):
+            await callback.message.answer("Это последний активный Сундук. Добавьте или возобновите другой, чтобы было куда направлять остаток от заполненных Целей.")
+            return
         goal.previous_percentage = goal.percentage
         goal.status = "paused"
     goal.updated_at = datetime.now(timezone.utc).isoformat()
@@ -738,11 +792,13 @@ async def complete_position(callback: CallbackQuery, state: FSMContext):
     goal.status = "completed"
     goal.completed_at = datetime.now(timezone.utc).isoformat()
     goal.updated_at = goal.completed_at
-    normalize_active_goal_percentages(allocator.settings.goals)
+    for name, share in allocator._split_chest_overflow(goal.percentage).items():
+        next(g for g in allocator.settings.active_goals if g.name == name).percentage += share
+    goal.percentage = Decimal("0")
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
     await callback.message.answer(
-        f"✔️ Цель <b>{escape(goal.name)}</b> выполнена. Её доля уже распределена между активными позициями."
+        f"✔️ Цель <b>{escape(goal.name)}</b> выполнена. Её доля теперь направляется в активные Сундуки."
     )
     await show_goals_manager(callback.message, callback.from_user.id)
 
@@ -804,7 +860,11 @@ async def delete_position(callback: CallbackQuery, state: FSMContext):
     allocator = db.load_allocator(callback.from_user.id)
     index = int(callback.data.rsplit(":", 1)[1])
     try:
-        goal = allocator.settings.goals.pop(index)
+        goal = allocator.settings.goals[index]
+        if allocator.is_last_active_chest(goal):
+            await callback.message.answer("Этот Сундук пока единственный активный. Сначала добавьте или возобновите другой — он будет принимать свободные деньги.")
+            return
+        allocator.settings.goals.pop(index)
     except IndexError:
         await show_goals_manager(callback.message, callback.from_user.id)
         return

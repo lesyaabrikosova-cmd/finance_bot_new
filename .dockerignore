@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.env.*
+allocator.db
+allocator.db-shm
+allocator.db-wal
+__pycache__
+*.pyc
+.DS_Store
+.pytest_cache
+

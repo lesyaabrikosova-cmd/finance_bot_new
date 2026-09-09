@@ -19,6 +19,7 @@ except ImportError:  # Диаграмма не должна мешать раб�
 from financial_engine import fmt_money
 from storage import db
 from ui import keyboard, main_menu_keyboard
+from charts import make_chart, send_chart_report
 
 
 router = Router()
@@ -215,7 +216,7 @@ def apply_planned_tax_allocation(telegram_id: int, allocator, amount: Decimal) -
         db.update_tax_obligation_monthly(telegram_id, item["id"], ZERO)
 
 
-def refresh_planned_tax_targets(telegram_id: int, allocator, today: date | None = None) -> None:
+def refresh_planned_tax_targets(telegram_id: int, allocator, today: date | None = None, *, persist: bool = True) -> None:
     """Пересчитывает налоговый взнос по остатку до конкретной даты."""
     today = today or date.today()
     obligations = db.load_tax_obligations(telegram_id)
@@ -233,7 +234,8 @@ def refresh_planned_tax_targets(telegram_id: int, allocator, today: date | None 
         if delta == ZERO:
             continue
         delta_total += delta
-        db.update_tax_obligation_monthly(telegram_id, item["id"], monthly)
+        if persist:
+            db.update_tax_obligation_monthly(telegram_id, item["id"], monthly)
         key = f"{item['tax_type']} · {item['object_name']}"
         allocator.settings.planned_taxes[key] = monthly
     if delta_total != ZERO:
@@ -247,25 +249,10 @@ def refresh_planned_tax_targets(telegram_id: int, allocator, today: date | None 
 
 
 def make_pie_chart(groups: dict) -> bytes | None:
-    if Image is None or ImageDraw is None:
+    if Image is None:
         return None
-    values = [(name, data["total"]) for name, data in groups.items() if data["total"] > ZERO]
-    total = sum((value for _, value in values), ZERO)
-    if total <= ZERO:
-        return None
-
-    image = Image.new("RGB", (960, 540), "#17131f")
-    draw = ImageDraw.Draw(image)
-    box = (210, 40, 710, 540)
-    start = -90.0
-    for name, value in values:
-        angle = float(value / total * Decimal("360"))
-        draw.pieslice(box, start=start, end=start + angle, fill=TAX_COLORS[name], outline="#17131f", width=4)
-        start += angle
-    draw.ellipse((355, 185, 565, 395), fill="#17131f")
-    output = BytesIO()
-    image.save(output, format="PNG", optimize=True)
-    return output.getvalue()
+    return make_chart({name: data["total"] for name, data in groups.items()},
+                      "НАЛОГИ", "Фактически отложено за год", TAX_COLORS)
 
 
 def report_text(
@@ -329,15 +316,12 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         rows.append([("Учитывать оплаты", "taxes:tracking:on")])
     rows.append([("Назад", "taxes:back")])
 
-    chart = make_pie_chart(groups)
-    if chart is not None and len(text) <= 1024:
-        await message.answer_photo(
-            BufferedInputFile(chart, filename=f"taxes-{year}.png"),
-            caption=text,
-            reply_markup=keyboard(rows),
-        )
-    else:
-        await message.answer(text, reply_markup=keyboard(rows))
+    text += "\n\nДиаграмма показывает отложенные за год деньги. Добавленный налог появится в ней после пополнения при распределении дохода."
+    await send_chart_report(
+        message, {name: data["total"] for name, data in groups.items()},
+        "НАЛОГИ", text, reply_markup=keyboard(rows),
+        subtitle=f"Фактически отложено ботом за {year} год", colors=TAX_COLORS,
+    )
 
 
 @router.callback_query(F.data == "menu:taxes")

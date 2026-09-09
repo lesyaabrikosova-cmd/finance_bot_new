@@ -15,6 +15,42 @@ D = Decimal
 
 
 class ModeTransitionTests(unittest.TestCase):
+    def test_mode_5_stages_a_and_b_send_upper_brackets_to_full_stabilizer(self):
+        allocator = self.make_allocator(stabilizer="1900", life="0")
+        allocations = {
+            "Подушка": D("0"),
+            "Стабилизатор дохода": D("0"),
+            "Инвестиции": D("0"),
+            "Досрочное": D("0"),
+            "Бытовой резерв": D("0"),
+        }
+        allocator.stage_a(D("125"), 5, [], allocations)
+        self.assert_money(allocations["Стабилизатор дохода"], "25.00")
+        self.assert_money(allocations["Инвестиции"], "0.00")
+        self.assert_money(allocator.state.life_balance, "100.00")
+
+        allocator.state.life_balance = D("1000")
+        allocator.stage_b(D("133.333333333333333333"), 5, [], allocations)
+        self.assert_money(allocations["Стабилизатор дохода"], "58.33")
+        self.assert_money(allocations["Инвестиции"], "0.00")
+        self.assert_money(allocations["Бытовой резерв"], "100.00")
+
+    def test_mode_5_stage_c_is_always_30_35_35(self):
+        for strategy in ("balanced", "protection"):
+            allocator = self.make_allocator(stabilizer="1000", life="2000")
+            allocator.settings.protective_stage_c_strategy = strategy
+            allocations = {
+                "Подушка": D("0"),
+                "Стабилизатор дохода": D("0"),
+                "Инвестиции": D("0"),
+                "Досрочное": D("0"),
+                "Бытовой резерв": D("0"),
+            }
+            allocator.stage_c(D("100"), 5, [], allocations)
+            self.assert_money(allocations["Стабилизатор дохода"], "30.00")
+            self.assert_money(allocations["Инвестиции"], "35.00")
+            self.assert_money(allocations["Цели:Цель"], "35.00")
+
     def test_stage_b_splits_children_into_the_same_named_envelope(self):
         settings = UserSettings(
             has_debts=False,
@@ -86,7 +122,7 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertEqual(cyclic.intercontract_current_life_limit, D("78000"))
         self.assertEqual(cyclic.intercontract_current_limit, D("100000"))
         self.assertEqual(cyclic.active_mode(), 5)
-        self.assertEqual(cyclic.mode_display_name(), "Режим 5")
+        self.assertEqual(cyclic.mode_display_name(), "Уровень 5")
 
     def test_piecework_cups_use_total_protective_capital_but_priority_uses_real_accounts(self):
         allocator = FinancialAllocator(
@@ -220,7 +256,7 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertEqual(allocator.current_protection_priority()["name"], "Минимальная подушка")
         self.assertEqual(allocator.reserve_rebalancing_plan()["blocked_reason"], "active_debt")
 
-    def test_goal_capacity_uses_configurable_brackets_and_stage_c_share(self):
+    def test_goal_capacity_splits_remainder_after_configurable_bracket(self):
         allocator = FinancialAllocator(UserSettings(
             has_debts=False,
             employment_type="Фрилансер",
@@ -240,8 +276,8 @@ class ModeTransitionTests(unittest.TestCase):
         self.assertEqual(forecast["stage_a_required"], D("100000.00"))
         self.assertEqual(forecast["stage_b_required"], D("23529.41"))
         self.assertEqual(forecast["stage_c_available"], D("76470.59"))
-        self.assertEqual(forecast["goal_share"], D("0.2"))
-        self.assertEqual(forecast["capacity"], D("15294.12"))
+        self.assertEqual(forecast["goal_share"], D("0.4"))
+        self.assertEqual(forecast["capacity"], D("30588.24"))
 
     def test_gift_recommendation_uses_history_income_capacity_and_configurable_limits(self):
         allocator = FinancialAllocator(UserSettings(
@@ -698,8 +734,8 @@ class ModeTransitionTests(unittest.TestCase):
         result = allocator.process_income(D("1000"), "Тест")
 
         self.assert_money(result.allocations["Подушка"], "0.00")
-        self.assert_money(result.allocations["Стабилизатор дохода"], "396.15")
-        self.assert_money(result.allocations["Инвестиции"], "253.85")
+        self.assert_money(result.allocations["Стабилизатор дохода"], "353.85")
+        self.assert_money(result.allocations["Инвестиции"], "296.15")
         self.assert_money(result.allocations["Цели:Цель"], "350.00")
 
     def test_mode_5_to_maximum_keeps_stage_c(self):
@@ -709,8 +745,8 @@ class ModeTransitionTests(unittest.TestCase):
 
         self.assert_money(result.allocations["Подушка"], "0.00")
         self.assert_money(result.allocations["Стабилизатор дохода"], "100.00")
-        self.assert_money(result.allocations["Инвестиции"], "300.00")
-        self.assert_money(result.allocations["Цели:Цель"], "600.00")
+        self.assert_money(result.allocations["Инвестиции"], "316.67")
+        self.assert_money(result.allocations["Цели:Цель"], "583.33")
 
     def test_stage_a_is_repeated_after_mode_change(self):
         allocator = self.make_allocator(

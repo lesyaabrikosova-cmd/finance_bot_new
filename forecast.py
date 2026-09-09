@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
+from dashboard import send_text_with_image
 from decimal import Decimal, InvalidOperation
 from html import escape
 
@@ -58,11 +60,13 @@ async def start_forecast(callback: CallbackQuery, state: FSMContext):
             "<b>КАКУЮ СУММУ ВЫ ХОТИТЕ ПРОВЕРИТЬ?</b>\n\n"
             "Укажите сумму после налога. Прогноз покажет, как Аллокатор распределил бы её прямо сейчас."
         )
-    await callback.message.answer(
+    await send_text_with_image(
+        callback.message,
         "<b>ПРОГНОЗ РАСПРЕДЕЛЕНИЯ ДОХОДА</b>\n\n"
         "Это прогноз, а не совершённое распределение. Реальные балансы не изменятся.\n\n"
         f"{amount_question}\n\n"
         "——————\n<b>→ Введите сумму.</b>",
+        Path(__file__).resolve().parent / "assets/menu/distribution_forecast.png",
         reply_markup=keyboard([[("Отмена", "forecast:cancel")]]),
     )
 
@@ -173,7 +177,7 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
         lines.extend([
             "",
             f"⚠️ На покупки и обязательства не хватает <b>{rub(shortfall)}</b>. "
-            "При таком сценарии Аллокатору нечего направить в Фонд Зарплаты, Подушку и другие конверты.",
+            "После покупок и обязательных платежей свободных денег для распределения не остаётся.",
         ])
     lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>"])
     goal_labels = {
@@ -210,7 +214,7 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
         f"ФМ-подушка после прогноза — <b>{rub(simulated.state.pillow_force_majeure)}</b> / {rub(simulated.settings.force_majeure_limit)}",
         f"Стабилизатор после прогноза — <b>{rub(simulated.state.pillow_stabilizer)}</b> / {rub(simulated.settings.stabilizer_full_limit)}" if simulated.settings.needs_stabilizer else "",
         "",
-        f"Предполагаемый режим — <b>{simulated.mode_display_name()}</b>. "
+        f"Предполагаемый уровень — <b>{simulated.mode_display_name()}</b>. "
         f"{simulated.mode_title()}",
     ])
     await state.clear()

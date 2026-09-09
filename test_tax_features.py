@@ -12,6 +12,7 @@ os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 from onboarding import (  # noqa: E402
     add_calendar_months,
     build_contract_obligations,
+    build_default_km_storage,
     build_state_from_data,
     br_group_totals,
     category_added_entries,
@@ -24,6 +25,7 @@ from onboarding import (  # noqa: E402
     gift_history_monthly,
     housing_item_name,
     input_period_label,
+    is_future_goal_expense,
     keyboard,
     km_item_display_name,
     km_item_totals_by_name,
@@ -113,7 +115,7 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertIsNotNone(restored)
         self.assertEqual(
             [(goal.name, goal.percentage) for goal in restored.settings.goals],
-            [("Подарки", Decimal("35")), ("Отпуск", Decimal("65"))],
+            [("Подарки", Decimal("35")), ("Отпуск", Decimal("65")), ("Будущие покупки", Decimal("0"))],
         )
         self.assertEqual(restored.state.goal_balances["Подарки"], Decimal("3500"))
         self.assertEqual(restored.state.goal_balances["Отпуск"], Decimal("6500"))
@@ -136,7 +138,7 @@ class TaxFeatureTests(unittest.TestCase):
         labels = [button.text for row in markup.inline_keyboard for button in row]
         self.assertEqual(
             labels,
-            ["← Назад", "✔️ Сохранить", "✖️ Отмена", "✔️ Готово"],
+            ["Назад", "Сохранить", "Отмена", "Готово"],
         )
 
     def test_category_summary_collects_all_items_and_sums_duplicates(self):
@@ -353,6 +355,26 @@ class TaxFeatureTests(unittest.TestCase):
         })
         self.assertEqual(entries, [])
 
+    def test_future_education_goal_is_excluded_from_household_reserve(self):
+        items = [{
+            "category": "education",
+            "category_label": "Образование",
+            "name": "Иностранный язык",
+            "monthly": "3000",
+            "future_goal": True,
+        }]
+        self.assertTrue(is_future_goal_expense(items[0]))
+        self.assertEqual(br_group_totals(items), {})
+
+    def test_multiple_required_education_expenses_share_one_envelope(self):
+        items = [
+            {"category": "education", "category_label": "Образование", "name": "Курс", "monthly": "5000", "months": "1"},
+            {"category": "education", "category_label": "Образование", "name": "Репетитор", "monthly": "4000", "months": "1"},
+        ]
+        storage = build_default_km_storage(items)
+        self.assertEqual([item["storage"] for item in storage], ["separate", "separate"])
+        self.assertEqual([item["envelope_name"] for item in storage], ["Образование", "Образование"])
+
     def test_cyclic_gift_history_is_weighted_across_both_phases(self):
         result = cyclic_gift_history_monthly(
             {
@@ -418,10 +440,13 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(restored["contract_obligation_storage"], {"ЖКХ": "Недвижимость"})
 
     def test_combined_onboarding_routes_nonmonthly_ambiguous_expenses_to_reserve(self):
-        for category in ("communication", "habits", "fees"):
+        for category in ("communication", "fees"):
             self.assertTrue(
                 should_auto_route_to_reserve(category, Decimal("3"), True)
             )
+        self.assertFalse(
+            should_auto_route_to_reserve("habits", Decimal("3"), True)
+        )
 
     def test_combined_onboarding_keeps_monthly_and_obvious_expenses_in_critical_life(self):
         self.assertFalse(

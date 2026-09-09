@@ -1,0 +1,18 @@
+services:
+  bot:
+    build: .
+    container_name: rich-alchemist-bot
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      ALLOCATOR_DATA_DIR: /data
+      HEALTH_PORT: "8080"
+    volumes:
+      - allocator_data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  allocator_data:
+    name: rich_alchemist_data

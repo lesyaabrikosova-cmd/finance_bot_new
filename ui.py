@@ -3,19 +3,17 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from storage import db
 
 
-def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
-    def normalized(text: str) -> str:
-        if text == "Отмена":
-            return "✖️ Отмена"
-        if text == "Другое":
-            return "+ Другое"
-        return text
+def button_text(text: str) -> str:
+    import re
+    return re.sub(r'[\U0001F000-\U0001FAFF\u2300-\u27FF\u2B00-\u2BFF\uFE0F\u200D\u20E3]', '', text).strip() or 'Открыть'
 
+
+def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=normalized(text),
+                    text=button_text(text),
                     callback_data=data,
                 )
                 for text, data in row
@@ -43,22 +41,18 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         return keyboard([
             [("Начать первый период сейчас", "periodsetup:today")],
             [("Выбрать дату начала", "periodsetup:date")],
-            [("Цели и Сундуки", "goals:manage")],
-            [("Режим", "menu:state"), ("Настройки", "settings:open")],
+            [("Уровень", "menu:state"), ("⚙️ Настройки", "settings:open")],
         ])
 
     rows = [
         [("Новый доход", "menu:income")],
         [("Балансы", "menu:analytics"), ("Анализ доходов", "menu:income_analysis")],
-        [("Цели и Сундуки", "goals:manage")],
-        [("Режим", "menu:state"), ("Настройки", "settings:open")],
-        [("Налоги", "menu:taxes")],
+        [("Налоги", "menu:taxes"), ("Долги", "menu:credits")],
+        [("🔮 Прогноз распределения дохода", "menu:forecast")],
+        [("Уровень", "menu:state"), ("Резервы", "menu:reserves")],
+        [("⚙️ Настройки", "settings:open")],
     ]
-
-    rows.append([("Долги", "menu:credits")])
-
-    if allocator:
-        rows.append([("Прогноз распределения дохода", "menu:forecast")])
+    if allocator and db.initial_distribution_available(telegram_id):
         rows.append([("Распределить текущие деньги", "firstallocation:start")])
 
     if allocator and allocator.settings.income_rhythm == "cyclic":

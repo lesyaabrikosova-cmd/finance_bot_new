@@ -2401,6 +2401,28 @@ class Database:
     # ПОЛНОЕ УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ
     # ========================================================
 
+    def initial_distribution_available(self, telegram_id: int) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM operation_log WHERE telegram_id = ? AND operation_type IN "
+            "('income_distribution', 'initial_distribution_closed') LIMIT 1",
+            (telegram_id,),
+        ).fetchone() is None
+
+    def close_initial_distribution(self, telegram_id: int) -> None:
+        if self.initial_distribution_available(telegram_id):
+            self.save_operation(telegram_id, "initial_distribution_closed", {})
+
+    def clear_accounting_history(self, telegram_id: int):
+        """Clear persisted history and funded amounts, retaining configured targets."""
+        with self.connection:
+            for table in ("operation_log", "tax_payments"):
+                self.connection.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (telegram_id,))
+            self.connection.execute(
+                "UPDATE tax_obligations SET opening_amount = '0', saved_before = '0', "
+                "ready_reminder_sent_at = NULL WHERE telegram_id = ?", (telegram_id,))
+            self.connection.execute(
+                "UPDATE planned_payments SET saved_amount = '0' WHERE telegram_id = ?", (telegram_id,))
+
     def delete_user(
         self,
         telegram_id: int,
