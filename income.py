@@ -171,7 +171,7 @@ def tax_display_line(tax, percent=None) -> str:
     tax = Decimal(str(tax))
     if percent is not None:
         rate = Decimal(str(percent))
-        if tax > ZERO and rate > ZERO:
+        if tax > Decimal("0") and rate > Decimal("0"):
             rate_text = format(rate.normalize(), "f").replace(".", ",")
             return f"🏛️ Налог • {rate_text}% — {fmt_money(tax)}"
     return f"🏛️ Налог — {fmt_money(tax)}"
@@ -571,7 +571,8 @@ async def income_date_today(
 
 
 @router.message(
-    IncomeStates.income_date
+    IncomeStates.income_date,
+    ~F.text.startswith("/"),
 )
 async def income_date_text(
     message: Message,
@@ -590,7 +591,7 @@ async def income_date_text(
         await message.answer(
             "Не удалось распознать дату.\n\n"
             "Используйте формат:\n"
-            "<code>11.08.2026</code>"
+            f"<code>{date.today().strftime('%d.%m.%Y')}</code>"
         )
 
         return
