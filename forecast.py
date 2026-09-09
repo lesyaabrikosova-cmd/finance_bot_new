@@ -159,16 +159,17 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
                   "<blockquote>" + forecast_allocation_text(source, result.allocations if result else {}) + "</blockquote>"])
     critical = max(Decimal("0"), simulated.settings.critical_life - simulated.state.life_balance)
     sustainable = max(Decimal("0"), simulated.settings.household_life - simulated.state.life_balance)
-    lines.extend(["", f"До Критического Минимума — {rub(critical)}",
-                  f"До Устойчивой Жизни — {rub(sustainable)}", "",
-                  f"🛡️ Подушка — <b>{rub(simulated.state.pillow_balance)}</b> / {rub(simulated.settings.force_majeure_limit)}"])
+    lines.extend(["", "<b>БУДУЩИЙ УРОВЕНЬ</b>",
+                  f"{'🏆' * simulated.active_mode()}", "",
+                  "<b>БУДУЩИЕ БАЛАНСЫ</b>", "",
+                  f"↺ <b>Баланс жизни</b> — {rub(simulated.state.life_balance)}",
+                  f"➤ До <b>Критич. минимума</b> — {rub(critical)}",
+                  f"➤ До <b>Устойч. жизни</b> — {rub(sustainable)}", "",
+                  f"🛡️ Подушка — <b>{rub(simulated.state.pillow_balance)}</b>"])
     if simulated.settings.needs_stabilizer:
-        lines.append(f"🛟 Стабилизатор — <b>{rub(simulated.state.stabilizer_balance)}</b> / {rub(simulated.settings.stabilizer_full_limit)}")
+        lines.append(f"🛟 Стабилизатор — <b>{rub(simulated.state.stabilizer_balance)}</b>")
     if simulated.profile_id == "cyclic":
-        lines.append(f"🏦 Фонд Зарплаты — <b>{rub(simulated.state.intercontract_reserve)}</b> / {rub(simulated.settings.intercontract_full_limit)}")
-    lines.extend(["", "<b>ПРЕДПОЛАГАЕМЫЙ УРОВЕНЬ</b>",
-                  f"{'🏆' * simulated.active_mode()} <b>{escape(simulated.mode_display_name())}</b>.",
-                  escape(simulated.mode_title())])
+        lines.append(f"🏦 Фонд Зарплаты — <b>{rub(simulated.state.intercontract_reserve)}</b>")
     await state.clear()
     await message.answer(
         "\n".join(lines),

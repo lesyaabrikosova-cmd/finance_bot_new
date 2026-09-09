@@ -855,7 +855,7 @@ async def send_balances(
         lines.append(f"🛟 <b>Стабилизатор</b> — {rub(stabilizer_period)} ({pct(stabilizer_period, income)})")
     if settings.income_rhythm == "cyclic" and fund_salary_period > 0:
         lines.append(f"🏦 <b>Фонд Зарплаты</b> — {rub(fund_salary_period)} ({pct(fund_salary_period, income)})")
-    lines.extend(["", "<b>КАТЕГОРИИ КЖ</b>"])
+    lines.extend(["", "<b>КАТЕГОРИИ ЖИЗНИ</b>"])
 
     # --------------------------------------------------------
     # Каждая категория КЖ
