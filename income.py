@@ -167,6 +167,16 @@ def rub(
     )
 
 
+def tax_display_line(tax, percent=None) -> str:
+    tax = Decimal(str(tax))
+    if percent is not None:
+        rate = Decimal(str(percent))
+        if tax > ZERO and rate > ZERO:
+            rate_text = format(rate.normalize(), "f").replace(".", ",")
+            return f"🏛️ Налог • {rate_text}% — {fmt_money(tax)}"
+    return f"🏛️ Налог — {fmt_money(tax)}"
+
+
 # ============================================================
 # ЗАПУСК ДОБАВЛЕНИЯ ДОХОДА
 # ============================================================
@@ -648,6 +658,7 @@ async def show_income_confirmation(
         tax_rule = (
             "по настройкам профиля"
         )
+        tax_percent = allocator.settings.income_type_tax_rates.get(income_type, ZERO)
 
     else:
 
@@ -659,6 +670,7 @@ async def show_income_confirmation(
             "tax_override_label",
             "изменён вручную",
         )
+        tax_percent = data.get("tax_override_percent")
 
     after_tax = (
         amount
@@ -675,7 +687,7 @@ async def show_income_confirmation(
         f"{income_date.strftime('%d.%m.%Y')}\n"
         f"{escape(income_type)} — {rub(amount)}\n"
         "————————————\n"
-        f"🏛️ Налог — {fmt_money(tax)}\n"
+        f"{tax_display_line(tax, tax_percent)}\n"
         "————————————\n"
         f"К распределению — {fmt_money(after_tax)}",
 
@@ -731,6 +743,10 @@ async def edit_income_tax(
             income_type,
         )
     )
+    shown_tax = Decimal(str(data["tax_override"])) if data.get("tax_override") is not None else automatic_tax
+    shown_percent = data.get("tax_override_percent")
+    if shown_percent is None and data.get("tax_override") is None:
+        shown_percent = allocator.settings.income_type_tax_rates.get(income_type, ZERO)
 
     await state.set_state(
         IncomeStates.tax_edit
@@ -740,7 +756,7 @@ async def edit_income_tax(
         "🏛️ <b>НАЛОГ ЭТОГО ПОСТУПЛЕНИЯ</b>\n\n"
         f"{escape(income_type)} — {rub(amount)}\n"
         "————————————\n"
-        f"🏛️ Налог — {fmt_money(automatic_tax)}\n"
+        f"{tax_display_line(shown_tax, shown_percent)}\n"
         "————————————\n"
         "Изменение ниже действует <b>только на это "
         "поступление</b> и не меняет налоговые "
@@ -784,6 +800,7 @@ async def tax_edit_auto(
     await state.update_data(
         tax_override=None,
         tax_override_label="по настройкам профиля",
+        tax_override_percent=None,
     )
 
     await show_income_confirmation(
@@ -807,6 +824,7 @@ async def tax_edit_none(
     await state.update_data(
         tax_override="0",
         tax_override_label="НДФЛ платит работодатель — налог не резервируется",
+        tax_override_percent="0",
     )
 
     await show_income_confirmation(
@@ -857,6 +875,7 @@ async def tax_edit_fixed_percent(
 
     await state.update_data(
         tax_override=str(tax),
+        tax_override_percent=str(percent),
         tax_override_label=(
             "самозанятость от физлиц — 4%"
             if percent == Decimal("4")
@@ -932,6 +951,7 @@ async def save_custom_tax_percent(
     await state.update_data(
         tax_override=str(tax),
         tax_override_label=f"вручную {percent}%",
+        tax_override_percent=str(percent),
     )
 
     await show_income_confirmation(
@@ -995,6 +1015,7 @@ async def save_custom_tax_amount(
     await state.update_data(
         tax_override=str(tax),
         tax_override_label="сумма введена вручную",
+        tax_override_percent=None,
     )
 
     await show_income_confirmation(
