@@ -847,16 +847,17 @@ async def send_balances(
     lines = [
         "<b>БАЛАНСЫ ЗА ПЕРИОД</b>", "",
         f"💲 <b>Доход</b> — {rub(income)}",
-        f"🏛️ <b>Налог</b> — {rub_plain(tax)} ({pct(tax, income)})",
+        f"🏛️ <b>Налог</b> — {rub_plain(tax)} • {pct(tax, income)}", "",
     ]
     if investment_period > 0:
-        lines.append(f"📈 <b>Инвестиции</b> — {rub_plain(investment_period)} ({pct(investment_period, income)})")
+        lines.append(f"📈 <b>Инвестиции</b> — {rub_plain(investment_period)} • {pct(investment_period, income)}")
+        lines.append("")
     if pillow_period > 0:
-        lines.append(f"🛡️ <b>Подушка</b> — {rub_plain(pillow_period)} ({pct(pillow_period, income)})")
+        lines.append(f"🛡️ <b>Подушка</b> — {rub_plain(pillow_period)} • {pct(pillow_period, income)}")
     if settings.needs_stabilizer and stabilizer_period > 0:
-        lines.append(f"🛟 <b>Стабилизатор</b> — {rub_plain(stabilizer_period)} ({pct(stabilizer_period, income)})")
+        lines.append(f"🛟 <b>Стабилизатор</b> — {rub_plain(stabilizer_period)} • {pct(stabilizer_period, income)}")
     if settings.income_rhythm == "cyclic" and fund_salary_period > 0:
-        lines.append(f"🏦 <b>Фонд Зарплаты</b> — {rub_plain(fund_salary_period)} ({pct(fund_salary_period, income)})")
+        lines.append(f"🏦 <b>Фонд Зарплаты</b> — {rub_plain(fund_salary_period)} • {pct(fund_salary_period, income)}")
     lines.append("")
 
     # --------------------------------------------------------
@@ -887,14 +888,14 @@ async def send_balances(
         )
 
         if amount > 0:
-            lines.append(f"❤️ <b>{escape(name)}</b> — {rub_plain(amount)} ({pct(amount, income)})")
+            lines.append(f"❤️ <b>{escape(name)}</b> — {rub_plain(amount)} • {pct(amount, income)}")
 
     # --------------------------------------------------------
     # Бытовой резерв
     # --------------------------------------------------------
 
     if household_period > 0:
-        lines.extend(["", f"💚 <b>Бытовой резерв</b> — {rub_plain(household_period)} ({pct(household_period, income)})"])
+        lines.extend(["", f"💚 <b>Бытовой резерв</b> — {rub_plain(household_period)} • {pct(household_period, income)}"])
 
     # --------------------------------------------------------
     # Каждая цель
@@ -914,7 +915,7 @@ async def send_balances(
             goal_icon = "🧳" if goal.is_chest else "⭐️"
             display_name = goal_display_name(goal.name, goal.is_chest)
             if amount > 0:
-                goal_lines.append(f"{goal_icon} <b>{escape(display_name)}</b> — {rub_plain(amount)} ({pct(amount, income)})")
+                goal_lines.append(f"{goal_icon} <b>{escape(display_name)}</b> — {rub_plain(amount)} • {pct(amount, income)}")
 
     else:
 
@@ -924,7 +925,7 @@ async def send_balances(
         )
 
         if amount > 0:
-            goal_lines.append(f"⭐️ <b>Цели (всего)</b> — {rub_plain(amount)} ({pct(amount, income)})")
+            goal_lines.append(f"⭐️ <b>Цели (всего)</b> — {rub_plain(amount)} • {pct(amount, income)}")
     if goal_lines:
         lines.extend(["", *goal_lines])
 
