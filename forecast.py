@@ -38,7 +38,7 @@ def parse_decimal(text: str | None) -> Decimal | None:
 
 
 def rub(value: Decimal) -> str:
-    return fmt_money(value)
+    return f"{fmt_money(value)} ₽"
 
 
 @router.callback_query(F.data == "menu:forecast")
@@ -108,14 +108,14 @@ async def save_custom_forecast_months(message: Message, state: FSMContext):
     await render_forecast(message, state, value)
 
 
-def forecast_allocation_text(source, allocations):
+def forecast_allocation_text(source, allocations, plain: bool = False):
     groups = [[], [], [], [], []]
     known = set()
     def add(group, key, label):
         known.add(key)
         amount = Decimal(allocations.get(key, 0))
         if amount > 0:
-            groups[group].append(f"{label} — {rub(amount)}")
+            groups[group].append(f"{label} — {fmt_money(amount) if plain else rub(amount)}")
     for key, label in [("Подушка", "🛡️ Подушка"), ("Стабилизатор дохода", "🛟 Стабилизатор"),
                        ("Инвестиции", "📈 Инвестиции"), ("Фонд Зарплаты", "🏦 Фонд Зарплаты")]:
         add(0, key, label)
@@ -156,7 +156,7 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
                       f"К распределению после возвращения — <b>{rub(distributable)}</b>",
                       f"Период без дохода — <b>{months} мес.</b>"])
     lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>", "",
-                  "<blockquote>" + forecast_allocation_text(source, result.allocations if result else {}) + "</blockquote>"])
+                  "<blockquote>" + forecast_allocation_text(source, result.allocations if result else {}, plain=True) + "</blockquote>"])
     critical = max(Decimal("0"), simulated.settings.critical_life - simulated.state.life_balance)
     sustainable = max(Decimal("0"), simulated.settings.household_life - simulated.state.life_balance)
     lines.extend(["", "<b>ОЖИДАЕМЫЙ УРОВЕНЬ</b>",
