@@ -1066,6 +1066,8 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         "Отправьте весь новый список одним сообщением в формате:\n"
         "<code>Квартира=43000, Транспорт=5000, Питомец=4000</code>\n\n"
         "Всё, что не вынесено в отдельный конверт, бот автоматически оставит в «Зарплате».\n"
+        "Чтобы переименовать категорию без потери баланса, отправьте: "
+        "<code>переименовать: Старое название = Новое название</code>\n"
         "Чтобы удалить все отдельные категории, отправьте: <code>нет</code>"
     )
 
@@ -1073,6 +1075,26 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
 async def save_life_categories(message: Message, state: FSMContext):
     text = message.text.strip()
     allocator = db.load_allocator(message.from_user.id)
+
+    if text.lower().startswith("переименовать:"):
+        try:
+            old, new = text.split(":", 1)[1].split("=", 1)
+            old, new = old.strip(), new.strip()
+        except ValueError:
+            old = new = ""
+        protected = {"Подушка", "Стабилизатор", "Фонд Зарплаты", "Бытовой резерв", "Инвестиции", "Налог"}
+        if (not old or not new or old in protected or new in protected
+                or old not in allocator.settings.life_categories
+                or new in allocator.settings.life_categories):
+            await message.answer("Не удалось переименовать категорию. Проверьте старое и новое название.")
+            return
+        allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
+        if old in allocator.state.period_life_topups:
+            allocator.state.period_life_topups[new] = allocator.state.period_life_topups.pop(old)
+        db.save_allocator(message.from_user.id, allocator)
+        await state.clear()
+        await message.answer(f"Категория переименована: <b>{escape(old)}</b> → <b>{escape(new)}</b>.", reply_markup=main_menu_keyboard(message.from_user.id))
+        return
 
     if text.lower() in {"нет", "none", "0"}:
         allocator.settings.life_categories = {}
