@@ -726,25 +726,29 @@ def period_balance_chart(allocator, allocations):
         rgb = colorsys.hls_to_rgb(hue, light, .55 if brown else .7)
         return '#' + ''.join(f'{round(v * 255):02x}' for v in rgb)
     add('Налог', allocator.state.period_tax, '#7656D8')
+    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), '#65C7EA')
+    add('Подушка', allocations.get('Подушка', 0), '#EF963C')
+    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), '#3569BC')
+    add('Инвестиции', allocations.get('Инвестиции', 0), '#267344')
+    add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), '#9C7BAB')
+    add('Досрочное погашение', allocations.get('Досрочное', 0), '#74608C')
+    for key, value in allocations.items():
+        if key.startswith('Рабочие обязательства:'):
+            add(key.replace(':', ' · '), value, '#B36C75')
+
     life = dict(allocator.state.period_life_topups)
     for key, value in allocations.items():
         if key.startswith('КЖ:') and not allocator.state.period_life_topups:
             life[key[3:]] = value
-    for name, value in life.items():
+    for name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
         add(f'КМ · {name}', value, shade(name))
     add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#A7DFA0')
-    add('Подушка', allocations.get('Подушка', 0), '#EF963C')
-    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), '#3569BC')
-    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), '#65C7EA')
-    add('Инвестиции', allocations.get('Инвестиции', 0), '#267344')
-    for key, value in allocations.items():
-        if key.startswith('Цели:'):
-            name = key[5:]
-            add(f'Цели и Сундуки · {name}', value, shade(name, True))
-        elif key.startswith('Рабочие обязательства:'):
-            add(key.replace(':', ' · '), value, '#B36C75')
-    add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), '#9C7BAB')
-    add('Досрочное погашение', allocations.get('Досрочное', 0), '#74608C')
+    goal_map = {goal.name: goal for goal in getattr(getattr(allocator, 'settings', None), 'goals', [])}
+    goal_items = [(key[5:], value) for key, value in allocations.items() if key.startswith('Цели:')]
+    for name, value in sorted(goal_items, key=lambda item: D(item[1]), reverse=True):
+        goal = goal_map.get(name)
+        display = goal_display_name(name, bool(goal and goal.is_chest))
+        add(f'Цели и Сундуки · {display}', value, shade(name, True))
     return values, colors
 
 
