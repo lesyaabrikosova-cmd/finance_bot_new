@@ -67,6 +67,11 @@ CHEST_DISPLAY_NAMES = {
     "замена техники": "Сундук Техники",
     "техника": "Сундук Техники",
     "хотелки": "Сундук Хотелок",
+    "продвижение": "Сундук Продвижения",
+    "образование": "Сундук Образования",
+    "путешествия": "Сундук Путешествий",
+    "здоровье": "Сундук Здоровья",
+    "ремонт": "Сундук Ремонта",
 }
 
 
@@ -75,9 +80,16 @@ def goal_display_name(name: str, is_chest: bool = False) -> str:
     clean_name = str(name).strip()
     if not is_chest:
         return clean_name
-    if clean_name.casefold().startswith("сундук "):
-        return clean_name
-    return CHEST_DISPLAY_NAMES.get(clean_name.casefold(), f"Сундук {clean_name}")
+    prefixed = clean_name.casefold().startswith("сундук ")
+    bare = clean_name[7:].strip() if prefixed else clean_name
+    known = CHEST_DISPLAY_NAMES.get(bare.casefold())
+    if known:
+        return known
+    # Predictable singular verbal nouns: продвижение → продвижения.
+    # Do not guess cases of arbitrary multi-word names or already inflected names.
+    if len(bare.split()) == 1 and bare.casefold().endswith(("ение", "ание")):
+        return f"Сундук {bare[:-1]}я"
+    return clean_name if prefixed else f"Сундук {bare}"
 
 
 def D(value) -> Decimal:

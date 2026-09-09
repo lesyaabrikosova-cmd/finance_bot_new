@@ -21,7 +21,6 @@ router = Router()
 
 class ForecastStates(StatesGroup):
     available_before_purchases = State()
-    planned_purchases = State()
     gap_months = State()
 
 
@@ -32,7 +31,8 @@ def parse_decimal(text: str | None) -> Decimal | None:
     if "," in raw and "." not in raw:
         raw = raw.replace(",", ".")
     try:
-        return Decimal(raw)
+        value = Decimal(raw)
+        return value if value.is_finite() else None
     except (InvalidOperation, ValueError):
         return None
 
@@ -50,22 +50,13 @@ async def start_forecast(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await state.set_state(ForecastStates.available_before_purchases)
-    if allocator.settings.income_rhythm == "cyclic":
-        amount_question = (
-            "<b>СКОЛЬКО ДЕНЕГ ОСТАНЕТСЯ ПОСЛЕ НАЛОГОВ И ОБЯЗАТЕЛЬНОЙ ЖИЗНИ ВО ВРЕМЯ КОНТРАКТА?</b>\n\n"
-            "Укажите примерный рублёвый эквивалент. Фактически обменивать валюту сейчас не требуется."
-        )
-    else:
-        amount_question = (
-            "<b>КАКУЮ СУММУ ВЫ ХОТИТЕ ПРОВЕРИТЬ?</b>\n\n"
-            "Укажите сумму после налога. Прогноз покажет, как Аллокатор распределил бы её прямо сейчас."
-        )
+    await state.update_data(forecast_user_id=callback.from_user.id)
     await send_text_with_image(
         callback.message,
-        "<b>ПРОГНОЗ РАСПРЕДЕЛЕНИЯ ДОХОДА</b>\n\n"
-        "Это прогноз, а не совершённое распределение. Реальные балансы не изменятся.\n\n"
-        f"{amount_question}\n\n"
-        "——————\n<b>→ Введите сумму.</b>",
+        "<b>ПРОГНОЗ РАСПРЕДЕЛЕНИЯ</b>\n\n"
+        "Хотите проверить, как Аллокатор распределил бы ваш будущий доход прямо сейчас?\n"
+        "Экспериментируйте сколько угодно, балансы не изменятся.\n"
+        "——————\n<b>→ Введите сумму после налога.</b>",
         Path(__file__).resolve().parent / "assets/menu/distribution_forecast.png",
         reply_markup=keyboard([[("Отмена", "forecast:cancel")]]),
     )
@@ -77,33 +68,11 @@ async def save_available_forecast(message: Message, state: FSMContext):
     if value is None or value <= 0:
         await message.answer("Введите положительную сумму.")
         return
-    await state.update_data(forecast_available=str(value))
-    await state.set_state(ForecastStates.planned_purchases)
+    await state.update_data(forecast_available=str(value), forecast_user_id=message.from_user.id)
     allocator = db.load_allocator(message.from_user.id)
-    if allocator.settings.income_rhythm == "cyclic":
-        prompt = (
-            "<b>СКОЛЬКО ИЗ ЭТОЙ СУММЫ ВЫ ПЛАНИРУЕТЕ ПОТРАТИТЬ ДО ВОЗВРАЩЕНИЯ?</b>\n\n"
-            "Например: техника, одежда, косметика, подарки, развлечения и другие необязательные покупки."
-        )
-    else:
-        prompt = (
-            "<b>СКОЛЬКО ВЫ ХОТИТЕ ОСТАВИТЬ ВНЕ РАСПРЕДЕЛЕНИЯ?</b>\n\n"
-            "Аллокатор рекомендует сначала распределять весь доход. Но прогноз позволяет честно проверить "
-            "последствия суммы, которую вы хотите потратить заранее."
-        )
-    await message.answer(f"{prompt}\n\nЕсли нисколько — отправьте <code>0</code>.")
-
-
-@router.message(ForecastStates.planned_purchases)
-async def save_purchases_forecast(message: Message, state: FSMContext):
-    value = parse_decimal(message.text)
-    data = await state.get_data()
-    available = Decimal(data["forecast_available"])
-    if value is None or value < 0 or value > available:
-        await message.answer("Введите сумму от 0 до ожидаемого остатка.")
+    if allocator is None:
+        await message.answer("Сначала настройте финансовый профиль.")
         return
-    await state.update_data(forecast_purchases=str(value))
-    allocator = db.load_allocator(message.from_user.id)
     if allocator.settings.income_rhythm != "cyclic":
         await render_forecast(message, state, None)
         return
@@ -139,84 +108,67 @@ async def save_custom_forecast_months(message: Message, state: FSMContext):
     await render_forecast(message, state, value)
 
 
+def forecast_allocation_text(source, allocations):
+    groups = [[], [], [], [], []]
+    known = set()
+    def add(group, key, label):
+        known.add(key)
+        amount = Decimal(allocations.get(key, 0))
+        if amount > 0:
+            groups[group].append(f"{label} — {rub(amount)}")
+    for key, label in [("Подушка", "🛡️ Подушка"), ("Стабилизатор дохода", "🛟 Стабилизатор"),
+                       ("Инвестиции", "📈 Инвестиции"), ("Фонд Зарплаты", "🏦 Фонд Зарплаты")]:
+        add(0, key, label)
+    for key in allocations:
+        if key.startswith("КЖ:"):
+            add(1, key, f"❤️ {escape(key[3:])}")
+    add(2, "Бытовой резерв", "💚 Бытовой резерв")
+    goals = {g.name: g for g in source.settings.goals}
+    for key in allocations:
+        if key.startswith("Цели:"):
+            name = key[5:]
+            chest = bool(goals.get(name) and goals[name].is_chest)
+            add(3, key, ('🧳 ' if chest else '⭐️ ') + escape(goal_display_name(name, chest)))
+    for key in allocations:
+        if key not in known and not key.startswith("БР:"):
+            add(4, key, '💳 ' + escape(key.replace(':', ' · ')))
+    return "\n\n".join("\n".join(group) for group in groups if group) or "Нет свободной суммы для распределения"
+
+
 async def render_forecast(message: Message, state: FSMContext, months: Decimal | None):
-    source = db.load_allocator(message.from_user.id)
+    data = await state.get_data()
+    source = db.load_allocator(data.get("forecast_user_id", message.from_user.id))
     if source is None:
         return
-    data = await state.get_data()
     available = Decimal(data["forecast_available"])
-    purchases = Decimal(data["forecast_purchases"])
     if source.settings.income_rhythm == "cyclic":
         simulated, result, obligations, distributable = simulate_cyclic_forecast(
-            source, available, purchases, Decimal(months)
+            source, available, Decimal("0"), Decimal(months)
         )
     else:
         simulated, result, obligations, distributable = simulate_standard_forecast(
-            source, available, purchases
+            source, available, Decimal("0")
         )
-    shortfall = max(Decimal("0"), purchases + obligations - available)
-
-    allocations = result.allocations if result else {}
-    lines = [
-        "<b>ПРОГНОЗ РАСПРЕДЕЛЕНИЯ</b>",
-        "",
-        "Это прогноз, а не совершённое распределение. Балансы не изменены.",
-        "",
-        f"Ожидаемая сумма — <b>{rub(available)}</b>",
-        f"Планируемые покупки — <b>{rub(purchases)}</b>",
-    ]
-    if source.settings.income_rhythm == "cyclic":
-        lines.extend([
-            f"Обязательства на время контракта — <b>{rub(obligations)}</b>",
-            f"К распределению после возвращения — <b>{rub(distributable)}</b>",
-            f"Период без дохода — <b>{months} мес.</b>",
-        ])
-    else:
-        lines.append(f"К распределению — <b>{rub(distributable)}</b>")
-    if shortfall > 0:
-        lines.extend([
-            "",
-            f"⚠️ На покупки и обязательства не хватает <b>{rub(shortfall)}</b>. "
-            "После покупок и обязательных платежей свободных денег для распределения не остаётся.",
-        ])
-    lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>"])
-    goal_labels = {
-        goal.name: (
-            ("🧳 " if goal.is_chest else "⭐️ ")
-            + goal_display_name(goal.name, goal.is_chest)
-        )
-        for goal in source.settings.goals
-    }
-    for name, amount in allocations.items():
-        if Decimal(amount) > 0:
-            label = name.replace("КЖ:", "").replace("Цели:", "")
-            if name.startswith("Цели:"):
-                label = goal_labels.get(label, f"⭐️ {label}")
-            lines.append(f"• {escape(label)} — {rub(Decimal(amount))}")
-    if not any(Decimal(amount) > 0 for amount in allocations.values()):
-        lines.append("• Нет свободной суммы для распределения")
-    lines.extend([
-        "",
-        "",
-    ])
-    if simulated.settings.income_rhythm == "cyclic":
-        lines.append(
-            f"Доход текущего цикла после прогноза — <b>{rub(simulated.state.cycle_income)}</b> "
-            f"/ {rub(simulated.settings.cycle_regular_income_limit)}"
-        )
-        lines.append(f"Фонд Зарплаты после прогноза — <b>{rub(simulated.state.intercontract_reserve)}</b> / {rub(simulated.settings.intercontract_full_limit)}")
-        lines.append(
-            f"Обязательства рабочей части после прогноза — "
-            f"<b>{rub(simulated.state.contract_obligations_reserve)}</b> / "
-            f"{rub(simulated.settings.contract_obligations_total)}"
-        )
-    lines.extend([
-        f"ФМ-подушка после прогноза — <b>{rub(simulated.state.pillow_force_majeure)}</b> / {rub(simulated.settings.force_majeure_limit)}",
-        f"Стабилизатор после прогноза — <b>{rub(simulated.state.pillow_stabilizer)}</b> / {rub(simulated.settings.stabilizer_full_limit)}" if simulated.settings.needs_stabilizer else "",
-        "",
-        f"Предполагаемый уровень — <b>{simulated.mode_display_name()}</b>. "
-        f"{simulated.mode_title()}",
-    ])
+    lines = ["<b>ПРОГНОЗ РАСПРЕДЕЛЕНИЯ</b>", "",
+             f"Ожидаемая сумма — <b>{rub(available)}</b>"]
+    if source.profile_id == "cyclic":
+        lines.extend([f"Обязательства на время контракта — <b>{rub(obligations)}</b>",
+                      f"К распределению после возвращения — <b>{rub(distributable)}</b>",
+                      f"Период без дохода — <b>{months} мес.</b>"])
+    lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>", "",
+                  "<blockquote>" + forecast_allocation_text(source, result.allocations if result else {}) + "</blockquote>"])
+    critical = max(Decimal("0"), simulated.settings.critical_life - simulated.state.life_balance)
+    sustainable = max(Decimal("0"), simulated.settings.household_life - simulated.state.life_balance)
+    lines.extend(["", f"До Критического Минимума — {rub(critical)}",
+                  f"До Устойчивой Жизни — {rub(sustainable)}", "",
+                  f"🛡️ Подушка — <b>{rub(simulated.state.pillow_balance)}</b> / {rub(simulated.settings.force_majeure_limit)}"])
+    if simulated.settings.needs_stabilizer:
+        lines.append(f"🛟 Стабилизатор — <b>{rub(simulated.state.stabilizer_balance)}</b> / {rub(simulated.settings.stabilizer_full_limit)}")
+    if simulated.profile_id == "cyclic":
+        lines.append(f"🏦 Фонд Зарплаты — <b>{rub(simulated.state.intercontract_reserve)}</b> / {rub(simulated.settings.intercontract_full_limit)}")
+    lines.extend(["", "<b>ПРЕДПОЛАГАЕМЫЙ УРОВЕНЬ</b>",
+                  f"{'🏆' * simulated.active_mode()} <b>{escape(simulated.mode_display_name())}</b>.",
+                  escape(simulated.mode_title())])
     await state.clear()
     await message.answer(
         "\n".join(lines),
