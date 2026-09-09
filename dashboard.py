@@ -879,7 +879,11 @@ async def send_balances(
             "Зарплата"
         )
 
-    for name in category_names:
+    for name in sorted(
+        category_names,
+        key=lambda name: D(state.period_life_topups.get(name, 0)),
+        reverse=True,
+    ):
 
         amount = D(
             state.period_life_topups.get(
@@ -906,7 +910,11 @@ async def send_balances(
 
     if settings.goals:
 
-        for goal in settings.goals:
+        for goal in sorted(
+            settings.goals,
+            key=lambda goal: D(allocations.get(f"Цели:{goal.name}", 0)),
+            reverse=True,
+        ):
 
             amount = allocations.get(
                 f"Цели:{goal.name}",
