@@ -330,7 +330,7 @@ async def income_amount(
         tax_note = "\n\n<b>Налог:</b>\n" + "\n".join(f"• {item}" for item in taxable)
 
     await message.answer(
-        "🏷 <b>Что это за доход?</b>\n\n"
+        "<b>ВЫБЕРИТЕ ТИП ДОХОДА</b>\n\n"
 
         "Выберите сохранённый тип или добавьте новый."
         + tax_note,
@@ -532,13 +532,14 @@ async def ask_date(
     today = date.today()
 
     await message.answer(
-        "📅 <b>Когда поступили деньги?</b>\n\n"
+        "📅 <b>ДАТА ПОСТУПЛЕНИЯ</b>\n\n"
 
         f"Сегодня: "
         f"<b>{today.strftime('%d.%m.%Y')}</b>\n\n"
 
-        "Можно выбрать сегодня или ввести другую дату "
-        "в формате <code>ДД.ММ.ГГГГ</code>.",
+        "——————\n"
+        "→ Введите дату в формате <code>ДД.ММ.ГГГГ</code>\n"
+        "или нажмите <b>Сегодня</b>.",
         reply_markup=keyboard([
             [
                 (
@@ -685,13 +686,11 @@ async def show_income_confirmation(
         "<b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
 
         f"{income_date.strftime('%d.%m.%Y')}\n"
-        f"{escape(income_type)} — {rub(amount)}\n\n"
-
-        f"🏛 <b>Налог</b> — {fmt_money(tax)}\n"
-        f"💰 <b>За вычетом налога</b> — "
-        f"{fmt_money(after_tax)}\n\n"
-
-        f"Правило: <i>{escape(tax_rule)}</i>",
+        f"{escape(income_type)} — {rub(amount)}\n"
+        "————————————\n"
+        f"🏛️ Налог — {fmt_money(tax)}\n"
+        "————————————\n"
+        f"К распределению — {fmt_money(after_tax)}",
 
         reply_markup=keyboard([
             [
@@ -1627,7 +1626,7 @@ async def send_distribution_report(
     lines.extend([
         "<b>БАЛАНСЫ ПОСЛЕ ОПЕРАЦИИ</b>",
         "",
-        f"🔄 <b>Баланс жизни</b> — "
+        f"↺ <b>Баланс жизни</b> — "
         f"{money_plain(state.life_balance)}",
         f"🛡️ <b>Подушка</b> — "
         f"{money_plain(state.pillow_balance)}",
@@ -1641,9 +1640,9 @@ async def send_distribution_report(
             if settings.needs_stabilizer
             else []
         ),
-        f"🆘 <b>До Критического минимума</b> — "
+        f"➤ <b>До Критич. минимума</b> — "
         f"{money_plain(life_remaining)}",
-        f"✳️ <b>До Устойчивой жизни</b> — "
+        f"➤ <b>До Устойчив. жизни</b> — "
         f"{money_plain(sustainable_remaining)}",
     ])
 
