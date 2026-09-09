@@ -331,12 +331,8 @@ def rub(value) -> str:
 
     formatted = f"{value:,.2f}"
 
-    return (
-        formatted
-        .replace(",", " ")
-        .replace(".", ",")
-        + " ₽"
-    )
+    formatted = formatted.replace(",", " ").replace(".", ",")
+    return (formatted[:-3] if formatted.endswith(",00") else formatted) + " ₽"
 
 
 def rub_compact(value) -> str:
@@ -963,6 +959,8 @@ def life_category_heading(category: str) -> str:
 
 def format_money_symbol(value: Decimal, symbol: str = "₽") -> str:
     formatted = f"{Decimal(value):,.2f}".replace(",", " ").replace(".", ",")
+    if formatted.endswith(",00"):
+        formatted = formatted[:-3]
     return f"{formatted} {escape(symbol)}"
 
 

@@ -45,6 +45,8 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False, 
         draw.text((540, 465), '100%', anchor='mm', font=font(58, True), fill='#F9F4ED')
     else:
         center = f'{center_amount:,.2f}'.replace(',', ' ').replace('.', ',')
+        if center.endswith(',00'):
+            center = center[:-3]
         size = 44
         while draw.textlength(center, font=font(size, True)) > 258 and size > 14:
             size -= 1
@@ -63,6 +65,8 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False, 
         percent = value / (center_amount if center_amount is not None and center_amount > 0 else total) * 100
         percent_text = '<0,1' if percent < Decimal('0.1') else f'{percent:.1f}'.replace('.', ',')
         amount = f'{value:,.2f}'.replace(',', ' ').replace('.', ',')
+        if amount.endswith(',00'):
+            amount = amount[:-3]
         draw.text((x+52, y+45), f'{percent_text}%' if percentages_only else f'{amount} ₽  ·  {percent_text}%', font=font(34, True), fill='#F1CD83')
     out = BytesIO()
     im.save(out, 'PNG', optimize=True)

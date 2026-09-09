@@ -54,12 +54,12 @@ def parse_decimal(text: str) -> Decimal | None:
         return None
 
 def rub(value: Decimal) -> str:
-    formatted = f"{Decimal(value):,.2f}"
-    return formatted.replace(",", " ").replace(".", ",") + " ₽"
+    return fmt_money(value) + " ₽"
 
 def fmt_money(value: Decimal) -> str:
     formatted = f"{Decimal(value):,.2f}"
-    return formatted.replace(",", " ").replace(".", ",")
+    formatted = formatted.replace(",", " ").replace(".", ",")
+    return formatted[:-3] if formatted.endswith(",00") else formatted
 
 def distribute_existing_pillow(allocator, total: Decimal) -> None:
     s = allocator.settings
@@ -98,30 +98,47 @@ async def show_settings_menu(message: Message, telegram_id: int):
         else "🛠 Включить уровень разработчика"
     )
 
-    rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Цикличный (контрактный)"}
-
+    rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Циклический"}
     active_debts = [credit for credit in s.credits if credit.active]
-    debt_text = "Долгов нет." if not active_debts else f"Активных долгов: <b>{len(active_debts)}</b>."
-    lines = [
-        "<b>НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ</b>", "",
-        debt_text,
-        f"Ритм дохода: {rhythm_labels.get(s.income_rhythm, s.income_rhythm)}", "",
-        f"<b>Средний доход</b> — {fmt_money(s.average_income)}",
-        "————————————",
-        f"➤ <b>Критический минимум</b> — {fmt_money(s.critical_life)}",
-        f"➤ <b>Устойчивая жизнь</b> — {fmt_money(s.household_life)}",
-        "————————————",
-        f"🛡️ <b>Подушка</b> • {s.force_majeure_months} мес •",
-        f"{fmt_money(st.pillow_balance)} / {fmt_money(s.force_majeure_limit)}",
-    ]
+    reward = "🏆" * allocator.active_mode() + "➖" * (allocator.profile_mode_total - allocator.active_mode())
+    lines = ["<b>НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ</b>", "",
+             f"Профиль: {rhythm_labels.get(s.income_rhythm, s.income_rhythm)}",
+             f"Уровень: {reward}", ""]
+    if not active_debts:
+        lines.extend(["Долгов нет.", ""])
+    if s.income_rhythm == "cyclic":
+        phase = "перерыв" if st.intercontract_break_active else "рабочая часть"
+        phase_line = (f"До конца перерыва — {st.intercontract_months_remaining} мес."
+                      if st.intercontract_break_active else
+                      f"До следующего перерыва — {st.current_phase_months_remaining} мес.")
+        lines.extend([f"Цикл — {s.income_work_months} мес. работы / {s.income_gap_months} мес. перерыва",
+                      f"Текущая фаза — {phase}", phase_line, "",
+                      f"Средний доход за цикл — {fmt_money(s.cycle_regular_income_limit)}"])
+    else:
+        label = "Обычный доход" if s.income_rhythm == "monthly" else "Средний доход"
+        lines.append(f"{label} — {fmt_money(s.average_income)}" + (" в месяц" if s.income_rhythm == "monthly" else ""))
+    monthly = " в месяц" if s.income_rhythm == "cyclic" else ""
+    lines.extend(["————————————",
+                  f"➤ <b>Критический минимум</b> — {fmt_money(s.critical_life)}{monthly}",
+                  f"➤ <b>Устойчивая жизнь</b> — {fmt_money(s.household_life)}{monthly}"])
+    if active_debts:
+        debt_total = sum((credit.principal_balance for credit in active_debts), Decimal("0"))
+        payment_total = sum((credit.minimum_payment for credit in active_debts), Decimal("0"))
+        lines.extend(["————————————", "<b>ДОЛГИ</b>", "",
+                      f"Общий остаток — {fmt_money(debt_total)}",
+                      f"Минимальные платежи — {fmt_money(payment_total)} в мес"])
+    lines.append("————————————")
+    if s.income_rhythm == "cyclic":
+        lines.extend([f"🏦 <b>Фонд Зарплаты</b> • {s.income_gap_months} мес •",
+                      f"{fmt_money(st.intercontract_reserve)} / {fmt_money(allocator.intercontract_current_limit)}", ""])
+    lines.extend([f"🛡️ <b>Подушка</b> • {s.force_majeure_months} мес •",
+                  f"{fmt_money(st.pillow_balance)} / {fmt_money(s.force_majeure_limit)}"])
     if s.needs_stabilizer:
         lines.extend([
             "",
             f"🛟 <b>Стабилизатор</b> • {s.stabilizer_target_months} мес •",
             f"{fmt_money(st.stabilizer_balance)} / {fmt_money(s.stabilizer_full_limit)}",
         ])
-    if s.income_rhythm == "cyclic":
-        lines.extend(["", f"🏦 <b>Фонд Зарплаты</b> — {fmt_money(st.intercontract_reserve)} / {fmt_money(allocator.intercontract_current_limit)}"])
     lines.extend(["————————————", "<b>КАТЕГОРИИ ЖИЗНИ</b>"])
     for name, amount in s.life_categories.items():
         lines.append(f"❤️ <b>{escape(name)}</b> — {fmt_money(amount)}")
@@ -132,6 +149,9 @@ async def show_settings_menu(message: Message, telegram_id: int):
             icon = "🧳" if goal.is_chest else "⭐️"
             name = goal_display_name(goal.name, goal.is_chest)
             lines.append(f"{icon} <b>{escape(name)}</b> — {goal.percentage}%")
+    lines.extend(["————————————", "<b>НАЛОГИ С ДОХОДА</b>", ""])
+    for income_name, rate in s.income_type_tax_rates.items():
+        lines.append(f"{escape(income_name)} — {'без налога' if rate == 0 else f'{rate}%'}")
     lines.extend([
         "————————————",
         f"<b>Бракеты</b>: {s.bracket_a}% / {s.bracket_b}% / {s.bracket_c}% / {s.bracket_d}%",

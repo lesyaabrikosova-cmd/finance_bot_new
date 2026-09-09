@@ -65,7 +65,8 @@ def parse_date(text: str | None) -> date | None:
 
 def rub(value) -> str:
     formatted = f"{Decimal(str(value)):,.2f}"
-    return formatted.replace(",", " ").replace(".", ",") + " ₽"
+    formatted = formatted.replace(",", " ").replace(".", ",")
+    return (formatted[:-3] if formatted.endswith(",00") else formatted) + " ₽"
 
 
 def icon(goal: Goal) -> str:

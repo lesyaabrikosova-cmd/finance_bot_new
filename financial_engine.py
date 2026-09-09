@@ -117,7 +117,8 @@ def fmt_money(value: Decimal) -> str:
     Форматирование рублей для Telegram.
     """
     value = money(value)
-    return f"{value:,.2f}".replace(",", " ").replace(".", ",")
+    formatted = f"{value:,.2f}".replace(",", " ").replace(".", ",")
+    return formatted[:-3] if formatted.endswith(",00") else formatted
 
 
 def pct(value: Decimal) -> Decimal:
