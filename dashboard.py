@@ -849,16 +849,21 @@ async def send_balances(
         f"💲 <b>Доход</b> — {rub(income)}", "",
         f"🏛️ <b>Налог</b> — {rub_plain(tax)} • {pct(tax, income)}", "",
     ]
-    if investment_period > 0:
-        lines.append(f"📈 <b>Инвестиции</b> — {rub_plain(investment_period)} • {pct(investment_period, income)}")
-        lines.append("")
+    if settings.income_rhythm == "cyclic" and fund_salary_period > 0:
+        lines.append(f"🏦 <b>Фонд Зарплаты</b> — {rub_plain(fund_salary_period)} • {pct(fund_salary_period, income)}")
     if pillow_period > 0:
         lines.append(f"🛡️ <b>Подушка</b> — {rub_plain(pillow_period)} • {pct(pillow_period, income)}")
     if settings.needs_stabilizer and stabilizer_period > 0:
         lines.append(f"🛟 <b>Стабилизатор</b> — {rub_plain(stabilizer_period)} • {pct(stabilizer_period, income)}")
-    if settings.income_rhythm == "cyclic" and fund_salary_period > 0:
-        lines.append(f"🏦 <b>Фонд Зарплаты</b> — {rub_plain(fund_salary_period)} • {pct(fund_salary_period, income)}")
-    if investment_period <= 0:
+    if investment_period > 0:
+        lines.append(f"📈 <b>Инвестиции</b> — {rub_plain(investment_period)} • {pct(investment_period, income)}")
+    if minimum_period > 0 or early_period > 0:
+        lines.append("")
+        if minimum_period > 0:
+            lines.append(f"💳 <b>Минимальные платежи по долгам</b> — {rub_plain(minimum_period)} • {pct(minimum_period, income)}")
+        if early_period > 0:
+            lines.append(f"💳 <b>Досрочное погашение</b> — {rub_plain(early_period)} • {pct(early_period, income)}")
+    if lines[-1] != "":
         lines.append("")
 
     # --------------------------------------------------------
@@ -941,33 +946,6 @@ async def send_balances(
     # --------------------------------------------------------
     # Кредиты
     # --------------------------------------------------------
-
-    if settings.credits:
-
-        active_debt = sum(
-            (
-                credit.principal_balance
-                for credit
-                in settings.credits
-                if credit.active
-            ),
-            Decimal("0"),
-        )
-
-        lines.extend([
-            "",
-            "<b>КРЕДИТЫ</b>",
-            f"💳 Минимальные платежи за период: "
-            f"<b>{rub_plain(minimum_period)}</b> "
-            f"({pct(minimum_period, income)})",
-            f"💳 Досрочно за период: "
-            f"<b>{rub_plain(early_period)}</b> "
-            f"({pct(early_period, income)})",
-            f"💳 Досрочно погашено всего: "
-            f"<b>{rub_plain(state.early_repayment)}</b>",
-            f"💳 Остаток активных долгов: "
-            f"<b>{rub_plain(active_debt)}</b>",
-        ])
 
     # --------------------------------------------------------
     # Пороги
