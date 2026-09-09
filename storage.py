@@ -1903,6 +1903,15 @@ class Database:
     # ЗАГРУЗКА ОПЕРАЦИЙ
     # ========================================================
 
+    def record_envelope_rename(self, telegram_id, allocator, prefix, old, new):
+        """Keep historical names intact; resolve them when reports read operations."""
+        old_key, new_key = prefix + old, prefix + new
+        flows = allocator.state.period_allocations
+        if old_key in flows:
+            flows[new_key] = flows.get(new_key, Decimal('0')) + flows.pop(old_key)
+        self.save_operation(telegram_id, 'envelope_rename',
+                            {'old': old_key, 'new': new_key})
+
     def load_operations(
         self,
         telegram_id: int,
@@ -1950,6 +1959,22 @@ class Database:
                     ),
             })
 
+        renames = self.connection.execute(
+            "SELECT id, payload FROM operation_log WHERE telegram_id = ? "
+            "AND operation_type = 'envelope_rename' ORDER BY id", (telegram_id,)
+        ).fetchall()
+        for operation in result:
+            allocations = operation['payload'].get('allocations')
+            if not isinstance(allocations, dict):
+                continue
+            for rename in renames:
+                if rename['id'] <= operation['id']:
+                    continue
+                names = deserialize_json(rename['payload'])
+                old, new = names['old'], names['new']
+                if old in allocations:
+                    allocations[new] = str(Decimal(str(allocations.get(new, 0)))
+                                           + Decimal(str(allocations.pop(old))))
         return result
 
     # ========================================================

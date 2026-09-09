@@ -1179,6 +1179,7 @@ async def save_life_categories(message: Message, state: FSMContext):
         allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
         if old in allocator.state.period_life_topups:
             allocator.state.period_life_topups[new] = allocator.state.period_life_topups.pop(old)
+        db.record_envelope_rename(message.from_user.id, allocator, 'КЖ:', old, new)
         db.save_allocator(message.from_user.id, allocator)
         await state.clear()
         await message.answer(f"Категория переименована: <b>{escape(new)}</b>.", reply_markup=main_menu_keyboard(message.from_user.id))
@@ -1199,6 +1200,7 @@ async def save_life_categories(message: Message, state: FSMContext):
         allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
         if old in allocator.state.period_life_topups:
             allocator.state.period_life_topups[new] = allocator.state.period_life_topups.pop(old)
+        db.record_envelope_rename(message.from_user.id, allocator, 'КЖ:', old, new)
         db.save_allocator(message.from_user.id, allocator)
         await state.clear()
         await message.answer(f"Категория переименована: <b>{escape(old)}</b> → <b>{escape(new)}</b>.", reply_markup=main_menu_keyboard(message.from_user.id))

@@ -728,7 +728,7 @@ def period_balance_chart(allocator, allocations):
     add('Налог', allocator.state.period_tax, '#7656D8')
     life = dict(allocator.state.period_life_topups)
     for key, value in allocations.items():
-        if key.startswith('КЖ:') and key[3:] not in life:
+        if key.startswith('КЖ:') and not allocator.state.period_life_topups:
             life[key[3:]] = value
     for name, value in life.items():
         add(f'КМ · {name}', value, shade(name))
