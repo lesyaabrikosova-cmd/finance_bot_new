@@ -318,25 +318,13 @@ def get_period_allocations(
     """
     Возвращает распределения текущего расчётного периода.
 
-    1. Если period_allocations уже сохранён в state — используем его.
-    2. Если текущие данные ещё не сохранены в этом поле —
-       восстанавливаем их из постоянного SQLite operation_log
-       после последнего period_reset.
+    Суммы восстанавливаются из постоянного SQLite operation_log после
+    последнего period_reset. Это сохраняет всю историю периода при смене
+    подписи конверта. Значения state нужны только старым профилям без журнала.
     """
 
-    stored = getattr(
-        allocator.state,
-        "period_allocations",
-        None,
-    )
-
-    if stored:
-        return {
-            key: D(value)
-            for key, value in stored.items()
-        }
-
     result: dict[str, Decimal] = {}
+    has_income_records = False
 
     operations = db.load_operations(
         telegram_id,
@@ -358,6 +346,8 @@ def get_period_allocations(
         if operation_type != "income_distribution":
             continue
 
+        has_income_records = True
+
         payload = (
             operation.get("payload")
             or {}
@@ -377,7 +367,14 @@ def get_period_allocations(
                 + D(value)
             )
 
-    return result
+    # История доходов — единственный источник, который содержит все операции
+    # до и после смены подписи конверта. Состояние оставляем лишь как запасной
+    # вариант для старых профилей, где журнал ещё пуст.
+    if has_income_records:
+        return result
+
+    stored = getattr(allocator.state, "period_allocations", None) or {}
+    return {key: D(value) for key, value in stored.items()}
 
 
 # ============================================================
@@ -767,9 +764,17 @@ def period_balance_chart(allocator, allocations):
     # Состояние старых версий могло содержать прежнюю подпись категории.
     # В отчёте допустимы только действующие категории профиля: их постоянный
     # ID переживает переименование, а имя остаётся лишь подписью.
+    allocation_life = {
+        key[3:]: D(value)
+        for key, value in allocations.items()
+        if str(key).startswith('КЖ:')
+    }
     if configured_life is not None:
         life = {
-            name: D(allocator.state.period_life_topups.get(name, 0))
+            name: allocation_life.get(
+                name,
+                D(allocator.state.period_life_topups.get(name, 0)),
+            )
             for name in configured_life
         }
         if 'Зарплата' not in configured_life:
