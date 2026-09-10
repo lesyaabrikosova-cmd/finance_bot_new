@@ -768,7 +768,7 @@ def period_balance_chart(allocator, allocations):
     used_life_colors = set()
     for name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
         add(f'КМ · {name}', value, shade(name, life_colors, used_life_colors))
-    add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#A7DFA0')
+    add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#24734A')
     goal_map = {goal.name: goal for goal in getattr(getattr(allocator, 'settings', None), 'goals', [])}
     goal_items = [(key[5:], value) for key, value in allocations.items() if key.startswith('Цели:')]
     used_goal_colors, used_chest_colors = set(), set()
