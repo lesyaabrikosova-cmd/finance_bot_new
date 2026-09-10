@@ -150,7 +150,13 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
         [(f"{icon(goal)} {display_name(goal)}", f"goalmanage:view:{index}")]
         for index, goal in visible
     ]
+    current_names = {goal.name for goal in goals}
+    legacy_goal_names = [
+        name for name, amount in allocator.state.goal_balances.items()
+        if name not in current_names and Decimal(str(amount)) > 0
+    ]
     rows.extend([
+        *([[('Связать прежние суммы', 'goalmanage:repair')]] if legacy_goal_names else []),
         [("+ Добавить", "goalmanage:add")],
         [("Калькулятор отпуска", "goalmanage:vacation:start")],
         *([[("Настроить проценты", "goalmanage:percent:start")]] if allocator.settings.active_goals else []),
@@ -173,6 +179,69 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
         reply_markup=keyboard(rows),
         subtitle="Доли примерного пополнения" if total_estimate > 0 else "Настроенные доли · пополнение пока не рассчитано или 0 ₽",
         percentages_only=total_estimate <= 0,
+    )
+
+
+@router.callback_query(F.data == "goalmanage:repair")
+async def choose_legacy_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    current_names = {goal.name for goal in allocator.settings.goals}
+    legacy = [
+        (name, Decimal(str(amount)))
+        for name, amount in allocator.state.goal_balances.items()
+        if name not in current_names and Decimal(str(amount)) > 0
+    ]
+    rows = [[(f"{name} — {rub(amount)}", f"goalmanage:repair_old:{name}")]
+            for name, amount in legacy]
+    await callback.message.answer(
+        "<b>ПРЕЖНИЕ ЦЕЛИ И СУНДУКИ</b>\n\n"
+        "Выберите прежнее название, затем его текущую цель или сундук. "
+        "Аллокатор объединит накопления и историю распределений.",
+        reply_markup=keyboard(rows + [[("← Назад", "goals:manage")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("goalmanage:repair_old:"))
+async def choose_current_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    old = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    await state.update_data(legacy_goal_name=old)
+    rows = [[(display_name(goal), f"goalmanage:repair_apply:{index}")]
+            for index, goal in enumerate(allocator.settings.goals)]
+    await callback.message.answer(
+        f"Прежнее название: <b>{escape(old)}</b>\n\nВыберите его новое название.",
+        reply_markup=keyboard(rows + [[("← Назад", "goalmanage:repair")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("goalmanage:repair_apply:"))
+async def apply_legacy_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    old = data.get("legacy_goal_name")
+    try:
+        index = int(callback.data.rsplit(":", 1)[1])
+    except ValueError:
+        index = -1
+    allocator = db.load_allocator(callback.from_user.id)
+    if not old or not 0 <= index < len(allocator.settings.goals):
+        await callback.message.answer("Не удалось связать цель. Откройте список заново.")
+        return
+    goal = allocator.settings.goals[index]
+    amount = Decimal(str(allocator.state.goal_balances.pop(old, Decimal("0"))))
+    allocator.state.goal_balances[goal.name] = (
+        Decimal(str(allocator.state.goal_balances.get(goal.name, 0))) + amount
+    )
+    db.record_envelope_rename(
+        callback.from_user.id, allocator, "Цели:", old, goal.name, goal.uid,
+    )
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await callback.message.answer(
+        f"Сумма «{escape(old)}» добавлена в «{escape(display_name(goal))}».",
+        reply_markup=keyboard([[("К целям и сундукам", "goals:manage")]]),
     )
 
 

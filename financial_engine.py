@@ -1762,6 +1762,23 @@ class FinancialAllocator:
             for name, amount in targets.items()
         }
 
+    def allocation_envelope_ids(self, allocations: Dict[str, Decimal]) -> Dict[str, str]:
+        """Attach immutable IDs to user-editable destinations in an operation."""
+        goals = {goal.name: goal.uid for goal in self.settings.goals}
+        result: Dict[str, str] = {}
+        for key in allocations:
+            if key.startswith("КЖ:"):
+                name = key[3:]
+                identifier = self.settings.life_category_ids.get(name)
+                if identifier:
+                    result[key] = f"life:{identifier}"
+            elif key.startswith("Цели:"):
+                name = key[5:]
+                identifier = goals.get(name)
+                if identifier:
+                    result[key] = f"goal:{identifier}"
+        return result
+
     # ========================================================
     # НАЛОГ
     # ========================================================
@@ -3824,6 +3841,7 @@ class FinancialAllocator:
             "super_income_part": super_net,
             "planned_tax_details": planned_tax_details,
             "allocations": dict(allocations),
+            "envelope_ids": self.allocation_envelope_ids(allocations),
             "mode_before": mode_before,
             "mode_after": mode_after,
             "checks": checks,
