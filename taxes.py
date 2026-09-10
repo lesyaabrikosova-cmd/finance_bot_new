@@ -729,7 +729,10 @@ async def save_tax_obligation(
     )
 
     allocator = db.load_allocator(telegram_id)
+    reserve_effect = ""
     if allocator is not None:
+        pillow_before = allocator.settings.force_majeure_limit
+        stabilizer_before = allocator.settings.stabilizer_full_limit
         key = f"{tax_type} · {object_name}"
         allocator.settings.planned_taxes[key] = monthly
         allocator.settings.ensure_life_category_id("Налоги")
@@ -737,6 +740,20 @@ async def save_tax_obligation(
             allocator.settings.life_categories.get("Налоги", ZERO) + monthly
         )
         allocator.settings.critical_life += monthly
+        pillow_delta = allocator.settings.force_majeure_limit - pillow_before
+        stabilizer_delta = allocator.settings.stabilizer_full_limit - stabilizer_before
+        effects = [f"➤ Критический минимум — +{money(monthly)}"]
+        if pillow_delta > ZERO:
+            effects.append(f"➤ Цель Подушки — +{money(pillow_delta)}")
+        if allocator.settings.needs_stabilizer and stabilizer_delta > ZERO:
+            effects.append(f"➤ Цель Стабилизатора — +{money(stabilizer_delta)}")
+        reserve_effect = (
+            "\n\n————————————\n"
+            "<b>ИЗМЕНЕНИЕ ФИНАНСОВЫХ ЦЕЛЕЙ</b>\n\n"
+            + "\n".join(effects)
+            + "\n\nНовый обязательный платёж входит в стоимость вашей жизни, "
+            "поэтому Аллокатор увеличил цели резервов."
+        )
         db.save_allocator(telegram_id, allocator)
 
     await state.clear()
@@ -748,7 +765,8 @@ async def save_tax_obligation(
         f"{ready_line}"
         f"{due_line}"
         f"Пополнение в месяц — <b>{money(monthly)}</b>\n\n"
-        "Сумма включена в Критический минимум и будет направляться в общий конверт «Налоги».",
+        "Сумма включена в Критический минимум и будет направляться в общий конверт «Налоги»."
+        f"{reserve_effect}",
         reply_markup=main_menu_keyboard(telegram_id),
     )
 
