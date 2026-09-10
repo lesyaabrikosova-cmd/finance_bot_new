@@ -252,9 +252,14 @@ async def edit_stabilizer_balance(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(EditSettingsStates.stabilizer_balance)
     await callback.message.answer(
-        "<b>ТЕКУЩИЙ БАЛАНС СТАБИЛИЗАТОРА ДОХОДА</b>\n\n"
-        f"Сейчас: <b>{rub(allocator.state.stabilizer_balance)}</b>\n\n"
-        "Введите фактическую сумму в Стабилизаторе дохода."
+        "🛟 <b>ТЕКУЩИЙ БАЛАНС СТАБИЛИЗАТОРА</b>\n\n"
+        f"Сейчас в Аллокаторе: <b>{rub(allocator.state.stabilizer_balance)}</b>\n"
+        f"Запланированный размер: <b>{rub(allocator.settings.stabilizer_full_limit)}</b>\n\n"
+        "Теперь сверим данные с реальностью.\n\n"
+        "<b>Сколько денег сейчас фактически отложено на Стабилизатор в вашем банке?</b>\n"
+        "——————\n"
+        "<b>→ Введите сумму.</b>\n"
+        "Например: <b>175000</b>"
     )
 
 
@@ -280,7 +285,14 @@ async def edit_intercontract_balance(callback: CallbackQuery, state: FSMContext)
         return
     await state.set_state(EditSettingsStates.intercontract_balance)
     await callback.message.answer(
-        "<b>БАЛАНС ФОНДА ЗАРПЛАТЫ</b>\n\nВведите сумму, которая уже отложена на плановый перерыв."
+        "🏦 <b>ТЕКУЩИЙ БАЛАНС ФОНДА ЗАРПЛАТЫ</b>\n\n"
+        f"Сейчас в Аллокаторе: <b>{rub(allocator.state.intercontract_reserve)}</b>\n"
+        f"Запланированный размер: <b>{rub(allocator.settings.intercontract_full_limit)}</b>\n\n"
+        "Теперь сверим данные с реальностью.\n\n"
+        "<b>Сколько денег сейчас фактически отложено на Фонд Зарплаты в вашем банке?</b>\n"
+        "——————\n"
+        "<b>→ Введите сумму.</b>\n"
+        "Например: <b>175000</b>"
     )
 
 
@@ -731,12 +743,23 @@ async def confirm_full_reset(
 async def edit_pillow(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
+    has_active_debt = any(credit.active for credit in allocator.settings.credits)
+    target = (
+        allocator.settings.minimum_reserve_limit
+        if has_active_debt
+        else allocator.settings.force_majeure_limit
+    )
+    title = "МИНИМАЛЬНОЙ ПОДУШКИ" if has_active_debt else "ПОДУШКИ"
     await state.set_state(EditSettingsStates.pillow)
     await callback.message.answer(
-        "🛡️ <b>ТЕКУЩИЙ БАЛАНС ПОДУШКИ</b>\n\n"
-        f"Сейчас в Аллокаторе: <b>{rub(allocator.state.pillow_balance)}</b>\n\n"
-        "Введите фактическую сумму, которая сейчас находится в вашей Подушке.\n"
-        "Например: <code>175000</code>"
+        f"🛡️ <b>ТЕКУЩИЙ БАЛАНС {title}</b>\n\n"
+        f"Сейчас в Аллокаторе: <b>{rub(allocator.state.pillow_balance)}</b>\n"
+        f"Запланированный размер: <b>{rub(target)}</b>\n\n"
+        "Теперь сверим данные с реальностью.\n\n"
+        "<b>Сколько денег сейчас фактически отложено на Подушку в вашем банке?</b>\n"
+        "——————\n"
+        "<b>→ Введите сумму.</b>\n"
+        "Например: <b>175000</b>"
     )
 
 @router.message(EditSettingsStates.pillow)
