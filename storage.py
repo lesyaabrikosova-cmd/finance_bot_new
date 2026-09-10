@@ -361,6 +361,8 @@ class Database:
                 employment_type TEXT NOT NULL,
 
                 critical_life TEXT NOT NULL,
+                base_critical_life TEXT,
+                automatic_life_obligations TEXT NOT NULL DEFAULT '{}',
                 household_reserve TEXT NOT NULL,
                 average_income TEXT NOT NULL,
 
@@ -711,6 +713,13 @@ class Database:
                 "ALTER TABLE settings ADD COLUMN life_category_ids "
                 "TEXT NOT NULL DEFAULT '{}'"
             )
+        if "base_critical_life" not in settings_columns:
+            cursor.execute("ALTER TABLE settings ADD COLUMN base_critical_life TEXT")
+        if "automatic_life_obligations" not in settings_columns:
+            cursor.execute(
+                "ALTER TABLE settings ADD COLUMN automatic_life_obligations "
+                "TEXT NOT NULL DEFAULT '{}'"
+            )
 
         goal_columns = {
             row["name"]
@@ -875,6 +884,8 @@ class Database:
                 employment_type,
 
                 critical_life,
+                base_critical_life,
+                automatic_life_obligations,
                 household_reserve,
                 average_income,
 
@@ -906,7 +917,7 @@ class Database:
             )
 
             VALUES (
-                ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
                 ?, ?, ?,
                 ?,
                 ?,
@@ -929,6 +940,12 @@ class Database:
 
                 critical_life =
                     excluded.critical_life,
+
+                base_critical_life =
+                    excluded.base_critical_life,
+
+                automatic_life_obligations =
+                    excluded.automatic_life_obligations,
 
                 household_reserve =
                     excluded.household_reserve,
@@ -999,6 +1016,10 @@ class Database:
                 decimal_to_string(
                     settings.critical_life
                 ),
+
+                decimal_to_string(settings.base_critical_life),
+
+                serialize_json(settings.automatic_life_obligations),
 
                 decimal_to_string(
                     settings.household_reserve
@@ -1415,6 +1436,14 @@ class Database:
                 string_to_decimal(
                     row["critical_life"]
                 ),
+
+            base_critical_life=(
+                string_to_decimal(row["base_critical_life"])
+                if row["base_critical_life"] is not None else None
+            ),
+
+            automatic_life_obligations=
+                deserialize_json(row["automatic_life_obligations"]),
 
             household_reserve=
                 string_to_decimal(
@@ -2132,6 +2161,25 @@ class Database:
             for name, amount in planned_taxes.items()
         }
         settings.track_tax_payments = track_payments
+
+        # Старые профили хранили временные платежи прямо внутри КМ. Один раз
+        # отделяем их от скрытой постоянной основы и дальше пересчитываем КМ
+        # только из активных обязательств.
+        planned_payments = self.load_planned_payments(telegram_id)
+        payment_total = sum(
+            (string_to_decimal(item["monthly_amount"]) for item in planned_payments),
+            Decimal("0"),
+        )
+        if getattr(settings, "_base_critical_life_inferred", False):
+            settings.base_critical_life = max(
+                Decimal("0"), settings.base_critical_life - payment_total,
+            )
+        for item in planned_payments:
+            settings.set_automatic_life_obligation(
+                f"payment:{item['id']}",
+                string_to_decimal(item["monthly_amount"]),
+            )
+        settings.recalculate_critical_life()
 
         state = self.load_state(
             telegram_id

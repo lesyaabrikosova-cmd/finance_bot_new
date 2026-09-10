@@ -30,6 +30,9 @@ def refresh_planned_payment_targets(
             Decimal("0.01"), rounding=ROUND_CEILING
         )
         new_by_envelope[envelope] = new_by_envelope.get(envelope, ZERO) + monthly
+        allocator.settings.set_automatic_life_obligation(
+            f"payment:{item['id']}", monthly,
+        )
         if persist and monthly != item["monthly_amount"]:
             db.update_planned_payment_monthly(telegram_id, item["id"], monthly)
 
@@ -39,10 +42,6 @@ def refresh_planned_payment_targets(
             continue
         allocator.settings.life_categories[envelope] = max(
             ZERO, allocator.settings.life_categories.get(envelope, ZERO) + delta
-        )
-        allocator.settings.critical_life = max(
-            sum(allocator.settings.life_categories.values(), ZERO),
-            allocator.settings.critical_life + delta,
         )
 
 
@@ -95,6 +94,9 @@ def apply_planned_payment_allocation(
         )
         if completed:
             completed_monthly += item["monthly_amount"]
+            allocator.settings.remove_automatic_life_obligation(
+                f"payment:{item['id']}"
+            )
 
     if completed_monthly > ZERO:
         current = allocator.settings.life_categories.get(envelope_name, ZERO)
@@ -103,7 +105,3 @@ def apply_planned_payment_allocation(
             allocator.settings.life_categories[envelope_name] = next_target
         else:
             allocator.settings.life_categories.pop(envelope_name, None)
-        allocator.settings.critical_life = max(
-            sum(allocator.settings.life_categories.values(), ZERO),
-            allocator.settings.critical_life - completed_monthly,
-        )

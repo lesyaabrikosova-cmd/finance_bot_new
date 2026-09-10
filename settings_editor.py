@@ -434,9 +434,8 @@ async def close_planned_payment(message: Message, telegram_id: int, payment_id: 
         allocator.settings.life_categories[envelope] = updated
     else:
         allocator.settings.life_categories.pop(envelope, None)
-    allocator.settings.critical_life = max(
-        sum(allocator.settings.life_categories.values(), Decimal("0")),
-        allocator.settings.critical_life - monthly,
+    allocator.settings.remove_automatic_life_obligation(
+        f"payment:{payment_id}"
     )
     db.deactivate_planned_payment(telegram_id, payment_id)
     db.save_allocator(telegram_id, allocator)
@@ -779,7 +778,12 @@ async def save_critical(message: Message, state: FSMContext):
             "Сначала уменьшите категории либо введите КЖ не меньше этой суммы."
         )
         return
-    allocator.settings.critical_life = value
+    # В интерфейсе редактируется итоговый КМ. Внутри сохраняем его
+    # постоянную часть без активных временных обязательств.
+    allocator.settings.base_critical_life = max(
+        Decimal("0"), value - allocator.settings.automatic_critical_life,
+    )
+    allocator.settings.recalculate_critical_life()
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
     await message.answer(f"✅ Обязательная жизнь обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))

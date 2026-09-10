@@ -1048,6 +1048,26 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(allocator.state.period_life_topups["Налоги"], Decimal("450"))
         self.assertEqual(sum(allocations.values()), Decimal("1000"))
 
+    def test_dynamic_tax_amount_returns_critical_life_to_base(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("90450"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            life_categories={"Налоги": Decimal("450")},
+            planned_taxes={"Налог на имущество · Хата": Decimal("450")},
+        )
+        self.assertEqual(settings.base_critical_life, Decimal("90000"))
+        self.assertEqual(settings.critical_life, Decimal("90450"))
+        settings.set_automatic_life_obligation(
+            "tax:Налог на имущество · Хата", Decimal("0"),
+        )
+        settings.planned_taxes.clear()
+        settings.life_categories.pop("Налоги", None)
+        settings.recalculate_critical_life()
+        self.assertEqual(settings.critical_life, Decimal("90000"))
+
     def test_income_operation_keeps_user_note(self):
         settings = UserSettings(
             has_debts=False,

@@ -25,6 +25,26 @@ from charts import make_chart, send_chart_report
 router = Router()
 ZERO = Decimal("0")
 
+
+def tax_obligation_key(tax_type: str, object_name: str) -> str:
+    return f"{tax_type} · {object_name}"
+
+
+def set_tax_monthly_target(allocator, key: str, monthly: Decimal) -> None:
+    """Synchronise a time-bound tax with the hidden dynamic part of KМ."""
+    monthly = max(ZERO, Decimal(str(monthly)))
+    if monthly > ZERO:
+        allocator.settings.planned_taxes[key] = monthly
+    else:
+        allocator.settings.planned_taxes.pop(key, None)
+    allocator.settings.set_automatic_life_obligation(f"tax:{key}", monthly)
+    total = sum(allocator.settings.planned_taxes.values(), ZERO)
+    if total > ZERO:
+        allocator.settings.ensure_life_category_id("Налоги")
+        allocator.settings.life_categories["Налоги"] = total
+    else:
+        allocator.settings.life_categories.pop("Налоги", None)
+
 TAX_GROUPS = (
     "Налог на доход",
     "Налог на имущество",
@@ -201,17 +221,10 @@ def apply_planned_tax_allocation(telegram_id: int, allocator, amount: Decimal) -
         if not completed:
             continue
 
-        key = f"{item['tax_type']} · {item['object_name']}"
-        allocator.settings.planned_taxes.pop(key, None)
-        current = allocator.settings.life_categories.get("Налоги", ZERO)
-        next_target = max(ZERO, current - item["monthly_amount"])
-        if next_target > ZERO:
-            allocator.settings.life_categories["Налоги"] = next_target
-        else:
-            allocator.settings.life_categories.pop("Налоги", None)
-        allocator.settings.critical_life = max(
-            sum(allocator.settings.life_categories.values(), ZERO),
-            allocator.settings.critical_life - item["monthly_amount"],
+        set_tax_monthly_target(
+            allocator,
+            tax_obligation_key(item['tax_type'], item['object_name']),
+            ZERO,
         )
         db.update_tax_obligation_monthly(telegram_id, item["id"], ZERO)
 
@@ -220,7 +233,6 @@ def refresh_planned_tax_targets(telegram_id: int, allocator, today: date | None 
     """Пересчитывает налоговый взнос по остатку до конкретной даты."""
     today = today or date.today()
     obligations = db.load_tax_obligations(telegram_id)
-    delta_total = ZERO
     for item in obligations:
         if not item.get("due_date"):
             continue
@@ -230,21 +242,12 @@ def refresh_planned_tax_targets(telegram_id: int, allocator, today: date | None 
         monthly = (remaining / Decimal(months)).quantize(
             Decimal("0.01"), rounding=ROUND_CEILING
         )
-        delta = monthly - item["monthly_amount"]
-        if delta == ZERO:
-            continue
-        delta_total += delta
-        if persist:
+        if persist and monthly != item["monthly_amount"]:
             db.update_tax_obligation_monthly(telegram_id, item["id"], monthly)
-        key = f"{item['tax_type']} · {item['object_name']}"
-        allocator.settings.planned_taxes[key] = monthly
-    if delta_total != ZERO:
-        allocator.settings.life_categories["Налоги"] = max(
-            ZERO, allocator.settings.life_categories.get("Налоги", ZERO) + delta_total
-        )
-        allocator.settings.critical_life = max(
-            sum(allocator.settings.life_categories.values(), ZERO),
-            allocator.settings.critical_life + delta_total,
+        set_tax_monthly_target(
+            allocator,
+            tax_obligation_key(item['tax_type'], item['object_name']),
+            monthly,
         )
 
 
@@ -447,17 +450,10 @@ async def tax_payment_amount(message: Message, state: FSMContext):
         if item is not None:
             allocator = db.load_allocator(message.from_user.id)
             if allocator is not None and item["monthly_amount"] > ZERO:
-                key = f"{item['tax_type']} · {item['object_name']}"
-                allocator.settings.planned_taxes.pop(key, None)
-                current = allocator.settings.life_categories.get("Налоги", ZERO)
-                remaining = max(ZERO, current - item["monthly_amount"])
-                if remaining > ZERO:
-                    allocator.settings.life_categories["Налоги"] = remaining
-                else:
-                    allocator.settings.life_categories.pop("Налоги", None)
-                allocator.settings.critical_life = max(
-                    sum(allocator.settings.life_categories.values(), ZERO),
-                    allocator.settings.critical_life - item["monthly_amount"],
+                set_tax_monthly_target(
+                    allocator,
+                    tax_obligation_key(item['tax_type'], item['object_name']),
+                    ZERO,
                 )
                 db.save_allocator(message.from_user.id, allocator)
             db.deactivate_tax_obligation(message.from_user.id, int(obligation_id))
@@ -523,13 +519,11 @@ async def save_next_tax_amount(message: Message, state: FSMContext):
     )
     allocator = db.load_allocator(message.from_user.id)
     if allocator is not None:
-        key = f"{data['next_tax_type']} · {data['next_tax_object']}"
-        allocator.settings.planned_taxes[key] = monthly
-        allocator.settings.ensure_life_category_id("Налоги")
-        allocator.settings.life_categories["Налоги"] = (
-            allocator.settings.life_categories.get("Налоги", ZERO) + monthly
+        set_tax_monthly_target(
+            allocator,
+            tax_obligation_key(data['next_tax_type'], data['next_tax_object']),
+            monthly,
         )
-        allocator.settings.critical_life += monthly
         db.save_allocator(message.from_user.id, allocator)
     await state.clear()
     await message.answer(
@@ -733,13 +727,8 @@ async def save_tax_obligation(
     if allocator is not None:
         pillow_before = allocator.settings.force_majeure_limit
         stabilizer_before = allocator.settings.stabilizer_full_limit
-        key = f"{tax_type} · {object_name}"
-        allocator.settings.planned_taxes[key] = monthly
-        allocator.settings.ensure_life_category_id("Налоги")
-        allocator.settings.life_categories["Налоги"] = (
-            allocator.settings.life_categories.get("Налоги", ZERO) + monthly
-        )
-        allocator.settings.critical_life += monthly
+        key = tax_obligation_key(tax_type, object_name)
+        set_tax_monthly_target(allocator, key, monthly)
         pillow_delta = allocator.settings.force_majeure_limit - pillow_before
         stabilizer_delta = allocator.settings.stabilizer_full_limit - stabilizer_before
         effects = [f"➤ Критический минимум — +{money(monthly)}"]
@@ -840,17 +829,10 @@ async def tax_obligation_delete(callback: CallbackQuery):
         return
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is not None:
-        key = f"{item['tax_type']} · {item['object_name']}"
-        allocator.settings.planned_taxes.pop(key, None)
-        current = allocator.settings.life_categories.get("Налоги", ZERO)
-        remaining = max(ZERO, current - item["monthly_amount"])
-        if remaining > ZERO:
-            allocator.settings.life_categories["Налоги"] = remaining
-        else:
-            allocator.settings.life_categories.pop("Налоги", None)
-        allocator.settings.critical_life = max(
-            sum(allocator.settings.life_categories.values(), ZERO),
-            allocator.settings.critical_life - item["monthly_amount"],
+        set_tax_monthly_target(
+            allocator,
+            tax_obligation_key(item['tax_type'], item['object_name']),
+            ZERO,
         )
         db.save_allocator(callback.from_user.id, allocator)
     db.deactivate_tax_obligation(callback.from_user.id, obligation_id)

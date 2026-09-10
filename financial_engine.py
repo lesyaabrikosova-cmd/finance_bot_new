@@ -595,6 +595,11 @@ class UserSettings:
     household_reserve: Decimal
     average_income: Decimal
 
+    # Техническая основа КМ. В интерфейсе пользователь видит только
+    # актуальный critical_life, уже с временными обязательствами.
+    base_critical_life: Optional[Decimal] = None
+    automatic_life_obligations: Dict[str, Decimal] = field(default_factory=dict)
+
     # Канонический технический ID. employment_type оставлен для чтения
     # профилей, созданных до появления трёх финансовых маршрутов.
     profile_type: str = ""
@@ -701,7 +706,7 @@ class UserSettings:
             self.employment_type,
             self.income_rhythm,
         )
-        self.critical_life = D(self.critical_life)
+        stored_critical_life = D(self.critical_life)
         self.household_reserve = D(self.household_reserve)
         self.average_income = D(self.average_income)
         self.income_gap_months = max(ONE, D(self.income_gap_months))
@@ -757,6 +762,21 @@ class UserSettings:
             name: D(amount)
             for name, amount in self.planned_taxes.items()
         }
+        self.automatic_life_obligations = {
+            str(name): max(ZERO, D(amount))
+            for name, amount in self.automatic_life_obligations.items()
+            if str(name).strip()
+        }
+        for name, amount in self.planned_taxes.items():
+            self.automatic_life_obligations.setdefault(f"tax:{name}", amount)
+        self._base_critical_life_inferred = self.base_critical_life is None
+        self.base_critical_life = max(
+            ZERO,
+            D(self.base_critical_life)
+            if self.base_critical_life is not None
+            else stored_critical_life - sum(self.automatic_life_obligations.values(), ZERO),
+        )
+        self.recalculate_critical_life()
 
         self.minimum_reserve_months = D(
             self.minimum_reserve_months
@@ -803,6 +823,34 @@ class UserSettings:
     # ========================================================
     # ПРОИЗВОДНЫЕ ПЕРЕМЕННЫЕ
     # ========================================================
+
+    @property
+    def automatic_critical_life(self) -> Decimal:
+        return sum(self.automatic_life_obligations.values(), ZERO)
+
+    def recalculate_critical_life(self) -> Decimal:
+        """Keep the displayed KМ in sync with temporary obligations."""
+        self.critical_life = money(
+            D(self.base_critical_life) + self.automatic_critical_life
+        )
+        return self.critical_life
+
+    def set_automatic_life_obligation(self, key: str, amount: Decimal) -> None:
+        amount = max(ZERO, D(amount))
+        if amount > ZERO:
+            self.automatic_life_obligations[str(key)] = amount
+        else:
+            self.automatic_life_obligations.pop(str(key), None)
+        self.recalculate_critical_life()
+
+    def remove_automatic_life_obligation(self, key: str) -> None:
+        self.automatic_life_obligations.pop(str(key), None)
+        self.recalculate_critical_life()
+
+    def ensure_life_category_id(self, name: str) -> str:
+        if name not in self.life_category_ids:
+            self.life_category_ids[name] = uuid4().hex
+        return self.life_category_ids[name]
 
     @property
     def household_life(self) -> Decimal:
