@@ -1612,9 +1612,11 @@ class FinancialAllocator:
                     raise ValueError("Баланс цели уже изменился, поэтому удалить этот доход безопасно нельзя.")
                 self.state.goal_balances[name] = current - amount
             current = D(self.state.period_allocations.get(key, ZERO))
-            if amount > current:
-                raise ValueError("Итоги периода уже изменились, поэтому удалить этот доход безопасно нельзя.")
-            updated = current - amount
+            # Сводка периода — производная величина. После переименования
+            # конверта старый ключ может отсутствовать, хотя сами деньги
+            # уже корректно находятся в новом ключе. Это не повод отменять
+            # безопасный откат реальных балансов.
+            updated = max(ZERO, current - amount)
             if updated > ZERO:
                 self.state.period_allocations[key] = updated
             else:

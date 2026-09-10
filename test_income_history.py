@@ -71,3 +71,20 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(allocator.state.life_balance, before.life_balance)
         self.assertEqual(allocator.state.pillow_balance, before.pillow_balance)
         self.assertEqual(allocator.state.investments, before.investments)
+
+    def test_legacy_rollback_does_not_fail_on_a_renamed_period_key(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            life_categories={"Жизнь": Decimal("100")},
+        ))
+        allocator.process_income(Decimal("1000"), "Подарок", tax_override=Decimal("0"))
+        operation = deepcopy(allocator.state.operation_log[-1])
+        operation.pop("state_before")
+        operation.pop("credits_before")
+        allocator.state.period_allocations = {}
+        allocator.rollback_income_operation(operation)
+        self.assertEqual(allocator.state.period_income, Decimal("0"))
