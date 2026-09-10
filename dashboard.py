@@ -1083,7 +1083,9 @@ async def send_balances(
         subtitle=f"Пополнения конвертов · {period_label}",
         colors=colors, preserve_order=True, center_amount=income,
         fallback_text="\n".join(lines),
-        reply_markup=main_menu_keyboard(telegram_id),
+        reply_markup=keyboard([
+            [("← В главное меню", "menu:back")],
+        ]),
     )
 
 
