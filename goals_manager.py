@@ -658,7 +658,9 @@ async def save_edited_name(message: Message, state: FSMContext):
     goal = allocator.settings.goals[index]
     old_name = goal.name
     goal.name = name
-    db.record_envelope_rename(message.from_user.id, allocator, 'Цели:', old_name, name)
+    db.record_envelope_rename(
+        message.from_user.id, allocator, 'Цели:', old_name, name, goal.uid,
+    )
     if old_name in allocator.state.goal_balances:
         allocator.state.goal_balances[name] = (
             allocator.state.goal_balances.get(name, Decimal("0"))

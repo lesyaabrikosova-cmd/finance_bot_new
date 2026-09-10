@@ -1929,14 +1929,17 @@ class Database:
     # ЗАГРУЗКА ОПЕРАЦИЙ
     # ========================================================
 
-    def record_envelope_rename(self, telegram_id, allocator, prefix, old, new):
-        """Keep historical names intact; resolve them when reports read operations."""
+    def record_envelope_rename(self, telegram_id, allocator, prefix, old, new, entity_id=""):
+        """Record a changed label while retaining the envelope's immutable ID."""
         old_key, new_key = prefix + old, prefix + new
         flows = allocator.state.period_allocations
         if old_key in flows:
             flows[new_key] = flows.get(new_key, Decimal('0')) + flows.pop(old_key)
-        self.save_operation(telegram_id, 'envelope_rename',
-                            {'old': old_key, 'new': new_key})
+        self.save_operation(
+            telegram_id,
+            'envelope_rename',
+            {'old': old_key, 'new': new_key, 'entity_id': str(entity_id or '')},
+        )
 
     def normalize_envelope_names(self, telegram_id: int, allocator: FinancialAllocator) -> None:
         """Merge stale envelope aliases into their newest names everywhere in state.
@@ -1984,6 +1987,25 @@ class Database:
             allocator.state.goal_balances,
             "Цели:",
         )
+
+        # A label that is no longer present in the profile cannot become a
+        # separate sector in any report. New versions use stable IDs; this
+        # filter also repairs old state that was written with only labels.
+        settings = getattr(allocator, "settings", None)
+        if settings is not None:
+            valid_life = set(getattr(settings, "life_categories", {})) | {"Зарплата"}
+            allocator.state.period_life_topups = {
+                name: amount
+                for name, amount in allocator.state.period_life_topups.items()
+                if name in valid_life
+            }
+            valid_goals = {goal.name for goal in getattr(settings, "goals", [])}
+            if valid_goals:
+                allocator.state.goal_balances = {
+                    name: amount
+                    for name, amount in allocator.state.goal_balances.items()
+                    if name in valid_goals
+                }
 
     def load_operations(
         self,

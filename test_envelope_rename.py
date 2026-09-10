@@ -17,6 +17,29 @@ class RenameTests(unittest.TestCase):
         values, _ = period_balance_chart(a, {'КЖ:Недвижимость': D(100)})
         self.assertEqual(values, {'КМ · Квартира': D(100)})
 
+    def test_chart_uses_only_current_category_and_goal_ids(self):
+        current_goal = SimpleNamespace(
+            name='Путешествие', uid='goal-1', is_chest=False,
+        )
+        settings = SimpleNamespace(
+            life_categories={'Квартира': D(100)},
+            life_category_ids={'Квартира': 'life-1'},
+            goals=[current_goal],
+        )
+        state = SimpleNamespace(
+            period_tax=D(0),
+            period_life_topups={'Недвижимость': D(100), 'Квартира': D(50)},
+        )
+        allocator = SimpleNamespace(settings=settings, state=state)
+        values, _ = period_balance_chart(
+            allocator,
+            {'Цели:Отпуск': D(100), 'Цели:Путешествие': D(50)},
+        )
+        self.assertEqual(values['КМ · Квартира'], D(50))
+        self.assertNotIn('КМ · Недвижимость', values)
+        self.assertEqual(values['Цели и Сундуки · Путешествие'], D(50))
+        self.assertNotIn('Цели и Сундуки · Отпуск', values)
+
     def test_chained_renames_preserve_period_and_history(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Database(os.path.join(directory, 'test.db'))

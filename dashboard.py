@@ -761,23 +761,46 @@ def period_balance_chart(allocator, allocations):
         if key.startswith('Рабочие обязательства:'):
             add(key.replace(':', ' · '), value, '#B36C75')
 
-    life = dict(allocator.state.period_life_topups)
-    for key, value in allocations.items():
-        if key.startswith('КЖ:') and not allocator.state.period_life_topups:
-            life[key[3:]] = value
+    settings = getattr(allocator, 'settings', None)
+    configured_life = getattr(settings, 'life_categories', None)
+    category_ids = getattr(settings, 'life_category_ids', {}) or {}
+    # Состояние старых версий могло содержать прежнюю подпись категории.
+    # В отчёте допустимы только действующие категории профиля: их постоянный
+    # ID переживает переименование, а имя остаётся лишь подписью.
+    if configured_life is not None:
+        life = {
+            name: D(allocator.state.period_life_topups.get(name, 0))
+            for name in configured_life
+        }
+        if 'Зарплата' not in configured_life:
+            life['Зарплата'] = D(allocator.state.period_life_topups.get('Зарплата', 0))
+    else:
+        life = dict(allocator.state.period_life_topups)
+        for key, value in allocations.items():
+            if key.startswith('КЖ:') and not allocator.state.period_life_topups:
+                life[key[3:]] = value
     used_life_colors = set()
     for name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
-        add(f'КМ · {name}', value, shade(name, life_colors, used_life_colors))
+        add(
+            f'КМ · {name}', value,
+            shade(category_ids.get(name, name), life_colors, used_life_colors),
+        )
     add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#24734A')
-    goal_map = {goal.name: goal for goal in getattr(getattr(allocator, 'settings', None), 'goals', [])}
-    goal_items = [(key[5:], value) for key, value in allocations.items() if key.startswith('Цели:')]
+    goal_map = {goal.name: goal for goal in getattr(settings, 'goals', [])}
+    goal_items = [
+        (key[5:], value)
+        for key, value in allocations.items()
+        if key.startswith('Цели:')
+        and (not goal_map or key[5:] in goal_map)
+    ]
     used_goal_colors, used_chest_colors = set(), set()
     for name, value in sorted(goal_items, key=lambda item: D(item[1]), reverse=True):
         goal = goal_map.get(name)
         display = goal_display_name(name, bool(goal and goal.is_chest))
         palette = chest_colors if goal and goal.is_chest else goal_colors
         used = used_chest_colors if goal and goal.is_chest else used_goal_colors
-        add(f'Цели и Сундуки · {display}', value, shade(name, palette, used))
+        identity = getattr(goal, 'uid', '') or name
+        add(f'Цели и Сундуки · {display}', value, shade(identity, palette, used))
     return values, colors
 
 
