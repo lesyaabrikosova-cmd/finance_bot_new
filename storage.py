@@ -383,6 +383,7 @@ class Database:
                 use_contract_obligations_fund INTEGER NOT NULL DEFAULT 0,
 
                 life_categories TEXT NOT NULL,
+                life_category_ids TEXT NOT NULL DEFAULT '{}',
 
                 debt_strategy TEXT NOT NULL,
 
@@ -408,6 +409,7 @@ class Database:
                 telegram_id INTEGER NOT NULL,
 
                 name TEXT NOT NULL,
+                uid TEXT NOT NULL DEFAULT '',
                 percentage TEXT NOT NULL,
                 balance TEXT NOT NULL,
                 position_type TEXT NOT NULL DEFAULT 'goal',
@@ -703,6 +705,11 @@ class Database:
                 "ALTER TABLE settings ADD COLUMN use_contract_obligations_fund "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        if "life_category_ids" not in settings_columns:
+            cursor.execute(
+                "ALTER TABLE settings ADD COLUMN life_category_ids "
+                "TEXT NOT NULL DEFAULT '{}'"
+            )
 
         goal_columns = {
             row["name"]
@@ -726,6 +733,7 @@ class Database:
             "completed_at": "TEXT",
             "archived_at": "TEXT",
             "previous_percentage": "TEXT",
+            "uid": "TEXT NOT NULL DEFAULT ''",
         }
         for column_name, column_sql in goal_migrations.items():
             if column_name not in goal_columns:
@@ -887,6 +895,7 @@ class Database:
                 use_contract_obligations_fund,
 
                 life_categories,
+                life_category_ids,
 
                 debt_strategy,
 
@@ -904,7 +913,7 @@ class Database:
                 ?, ?,
                 ?,
                 ?,
-                ?, ?
+                ?, ?, ?
             )
 
             ON CONFLICT(telegram_id)
@@ -966,6 +975,9 @@ class Database:
 
                 life_categories =
                     excluded.life_categories,
+
+                life_category_ids =
+                    excluded.life_category_ids,
 
                 debt_strategy =
                     excluded.debt_strategy,
@@ -1044,6 +1056,10 @@ class Database:
                     settings.life_categories
                 ),
 
+                serialize_json(
+                    settings.life_category_ids
+                ),
+
                 settings.debt_strategy,
 
                 int(
@@ -1075,6 +1091,7 @@ class Database:
                 INSERT INTO goals (
                     telegram_id,
                     name,
+                    uid,
                     percentage,
                     balance,
                     position_type,
@@ -1093,12 +1110,14 @@ class Database:
                     previous_percentage
                 )
 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     telegram_id,
 
                     goal.name,
+
+                    goal.uid,
 
                     decimal_to_string(
                         goal.percentage
@@ -1253,6 +1272,8 @@ class Database:
             goals.append(
                 Goal(
                     name=goal_row["name"],
+
+                    uid=goal_row["uid"],
 
                     percentage=
                         string_to_decimal(
@@ -1464,6 +1485,11 @@ class Database:
             life_categories=
                 deserialize_json(
                     row["life_categories"]
+                ),
+
+            life_category_ids=
+                deserialize_json(
+                    row["life_category_ids"]
                 ),
 
             goals=goals,

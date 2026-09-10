@@ -1177,6 +1177,7 @@ async def save_life_categories(message: Message, state: FSMContext):
             await message.answer("Такое название недоступно. Введите другое название.")
             return
         allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
+        allocator.settings.life_category_ids[new] = allocator.settings.life_category_ids.pop(old)
         if old in allocator.state.period_life_topups:
             allocator.state.period_life_topups[new] = (
                 allocator.state.period_life_topups.get(new, Decimal("0"))
@@ -1201,6 +1202,7 @@ async def save_life_categories(message: Message, state: FSMContext):
             await message.answer("Не удалось переименовать категорию. Проверьте старое и новое название.")
             return
         allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
+        allocator.settings.life_category_ids[new] = allocator.settings.life_category_ids.pop(old)
         if old in allocator.state.period_life_topups:
             allocator.state.period_life_topups[new] = (
                 allocator.state.period_life_topups.get(new, Decimal("0"))

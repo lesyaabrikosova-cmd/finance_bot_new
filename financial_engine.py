@@ -6,6 +6,7 @@ from math import log
 from typing import Dict, List, Optional, Tuple
 from datetime import date, datetime, timedelta
 from calendar import monthrange
+from uuid import uuid4
 
 
 # ============================================================
@@ -462,8 +463,10 @@ class Goal:
     completed_at: Optional[str] = None
     archived_at: Optional[str] = None
     previous_percentage: Optional[Decimal] = None
+    uid: str = ""
 
     def __post_init__(self):
+        self.uid = str(self.uid or uuid4().hex)
         self.name = str(self.name).strip()
         self.percentage = D(self.percentage)
         self.balance = max(ZERO, D(self.balance))
@@ -659,6 +662,8 @@ class UserSettings:
     # ----------------------------
 
     life_categories: Dict[str, Decimal] = field(default_factory=dict)
+    # Постоянная ссылка на категорию. Имя остаётся подписью интерфейса.
+    life_category_ids: Dict[str, str] = field(default_factory=dict)
     household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
     # Подарки вводятся в меню Жизни только как история будущей Цели.
     # Они не входят в БР и УЖ.
@@ -774,6 +779,15 @@ class UserSettings:
         self.life_categories = {
             name: D(amount)
             for name, amount in self.life_categories.items()
+        }
+        supplied_ids = {
+            str(name): str(uid)
+            for name, uid in self.life_category_ids.items()
+            if str(name) in self.life_categories and str(uid).strip()
+        }
+        self.life_category_ids = {
+            name: supplied_ids.get(name, uuid4().hex)
+            for name in self.life_categories
         }
         self.household_reserve_categories = {
             name: D(amount)
