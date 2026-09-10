@@ -56,6 +56,34 @@ class RenameTests(unittest.TestCase):
             self.assertEqual(incomes[1]['payload']['allocations'], {'Цели:В': '100'})
             db.connection.close()
 
+    def test_recovery_link_merges_legacy_period_income(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(os.path.join(directory, 'test.db'))
+            db.save_operation(7, 'income_distribution', {
+                'allocations': {'КЖ:Недвижимость': '25000'},
+            })
+            db.save_operation(7, 'income_distribution', {
+                'allocations': {'КЖ:Квартира': '5000'},
+            })
+            allocator = SimpleNamespace(state=SimpleNamespace(
+                period_allocations={
+                    'КЖ:Недвижимость': D(25000),
+                    'КЖ:Квартира': D(5000),
+                },
+            ))
+            db.record_envelope_rename(
+                7, allocator, 'КЖ:', 'Недвижимость', 'Квартира', 'life-1',
+            )
+            operations = db.load_operations(7)
+            total = sum(
+                D(operation['payload']['allocations'].get('КЖ:Квартира', 0))
+                for operation in operations
+                if operation['type'] == 'income_distribution'
+            )
+            self.assertEqual(total, D(30000))
+            self.assertEqual(allocator.state.period_allocations, {'КЖ:Квартира': D(30000)})
+            db.connection.close()
+
     def test_normalization_merges_old_and_new_state_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Database(os.path.join(directory, 'test.db'))

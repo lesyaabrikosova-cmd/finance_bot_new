@@ -1091,12 +1091,83 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         for name, amount in allocator.settings.life_categories.items()
     ) or "Отдельных категорий сейчас нет."
     rows = [[(name, f"settings:life_open:{name}")] for name in allocator.settings.life_categories]
+    current_names = set(allocator.settings.life_categories) | {"Зарплата"}
+    legacy_names = [
+        name for name, amount in allocator.state.period_life_topups.items()
+        if name not in current_names and Decimal(str(amount)) > 0
+    ]
+    if legacy_names:
+        rows.append([("Связать прежние суммы", "settings:life_repair")])
     await callback.message.answer(
         "<b>ОТДЕЛЬНЫЕ КОНВЕРТЫ КРИТИЧЕСКОГО МИНИМУМА</b>\n\n"
         f"{current}\n\n"
         "Выберите категорию, чтобы изменить её название или сумму.\n\n"
         "Не распределённая между категориями часть Критического минимума остаётся в конверте «Зарплата».",
         reply_markup=keyboard(rows + [[("Назад", "settings:open")]])
+    )
+
+
+@router.callback_query(F.data == "settings:life_repair")
+async def choose_legacy_life_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    current_names = set(allocator.settings.life_categories) | {"Зарплата"}
+    legacy = [
+        (name, Decimal(str(amount)))
+        for name, amount in allocator.state.period_life_topups.items()
+        if name not in current_names and Decimal(str(amount)) > 0
+    ]
+    if not legacy:
+        await edit_life_categories(callback, state)
+        return
+    rows = [[(f"{name} — {rub(amount)}", f"settings:life_repair_old:{name}")]
+            for name, amount in legacy]
+    await callback.message.answer(
+        "<b>ПРЕЖНИЕ КАТЕГОРИИ</b>\n\n"
+        "Выберите старое название. Затем укажите его новое название — "
+        "Аллокатор объединит всю сумму за период и историю доходов.",
+        reply_markup=keyboard(rows + [[("Назад", "settings:life_categories")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("settings:life_repair_old:"))
+async def choose_current_life_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    old = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    await state.update_data(legacy_life_name=old)
+    rows = [[(name, f"settings:life_repair_apply:{name}")]
+            for name in allocator.settings.life_categories]
+    if "Зарплата" not in allocator.settings.life_categories:
+        rows.append([("Зарплата", "settings:life_repair_apply:Зарплата")])
+    await callback.message.answer(
+        f"Старое название: <b>{escape(old)}</b>\n\n"
+        "Выберите текущую категорию, к которой относится эта сумма.",
+        reply_markup=keyboard(rows + [[("Назад", "settings:life_repair")]]),
+    )
+
+
+@router.callback_query(F.data.startswith("settings:life_repair_apply:"))
+async def apply_legacy_life_category(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    old = data.get("legacy_life_name")
+    new = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    if not old or new not in set(allocator.settings.life_categories) | {"Зарплата"}:
+        await callback.message.answer("Не удалось связать категории. Откройте список заново.")
+        return
+    amount = Decimal(str(allocator.state.period_life_topups.pop(old, Decimal("0"))))
+    allocator.state.period_life_topups[new] = (
+        Decimal(str(allocator.state.period_life_topups.get(new, 0))) + amount
+    )
+    entity_id = allocator.settings.life_category_ids.get(new, "")
+    db.record_envelope_rename(callback.from_user.id, allocator, "КЖ:", old, new, entity_id)
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await callback.message.answer(
+        f"Сумма категории «{escape(old)}» добавлена в «{escape(new)}».",
+        reply_markup=keyboard([[("К категориям", "settings:life_categories")]]),
     )
 
 @router.callback_query(F.data.startswith("settings:life_open:"))

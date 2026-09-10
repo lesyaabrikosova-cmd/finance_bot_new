@@ -1988,24 +1988,10 @@ class Database:
             "Цели:",
         )
 
-        # A label that is no longer present in the profile cannot become a
-        # separate sector in any report. New versions use stable IDs; this
-        # filter also repairs old state that was written with only labels.
-        settings = getattr(allocator, "settings", None)
-        if settings is not None:
-            valid_life = set(getattr(settings, "life_categories", {})) | {"Зарплата"}
-            allocator.state.period_life_topups = {
-                name: amount
-                for name, amount in allocator.state.period_life_topups.items()
-                if name in valid_life
-            }
-            valid_goals = {goal.name for goal in getattr(settings, "goals", [])}
-            if valid_goals:
-                allocator.state.goal_balances = {
-                    name: amount
-                    for name, amount in allocator.state.goal_balances.items()
-                    if name in valid_goals
-                }
+        # Неизвестные старые подписи здесь не удаляем: данные до миграции
+        # могут ещё нуждаться в однократном связывании с новой категорией.
+        # Отчёты выводят только актуальные ID, поэтому эти записи не создают
+        # отдельного сектора до восстановления.
 
     def load_operations(
         self,
