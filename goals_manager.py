@@ -686,10 +686,11 @@ async def view_position(callback: CallbackQuery):
         actions.append([("Перенести в архив", f"goalmanage:archive:{index}")])
     if goal.status == "archived":
         actions.append([("Вернуть из архива", f"goalmanage:restore:{index}")])
-    actions.extend([
-        [("Удалить", f"goalmanage:delete:ask:{index}")],
-        [("← Назад", "goals:manage")],
-    ])
+    if not goal.is_system_chest:
+        actions.append([("Удалить", f"goalmanage:delete:ask:{index}")])
+    else:
+        actions.append([("ℹ️ Постоянный Сундук", f"goalmanage:system_chest:{index}")])
+    actions.append([("← Назад", "goals:manage")])
     await callback.message.answer(
         f"<b>{icon(goal)} {escape(goal.name.upper())}</b>\n\n"
         f"Доля — <b>{goal.percentage}%</b>\n"
@@ -921,12 +922,27 @@ async def ask_delete_position(callback: CallbackQuery):
     index = int(callback.data.rsplit(":", 1)[1])
     allocator = db.load_allocator(callback.from_user.id)
     goal = allocator.settings.goals[index]
+    if goal.is_system_chest:
+        await callback.message.answer(
+            "Этот Сундук нельзя удалить: он принимает свободные деньги, когда "
+            "другие Цели заполнены. Его можно переименовать или изменить долю."
+        )
+        return
     await callback.message.answer(
         f"Удалить {icon(goal)} <b>{escape(display_name(goal))}</b>? Это действие нельзя отменить.",
         reply_markup=keyboard([
             [("Удалить", f"goalmanage:delete:yes:{index}")],
             [("✖️ Отмена", "goals:manage")],
         ]),
+    )
+
+
+@router.callback_query(F.data.startswith("goalmanage:system_chest:"))
+async def explain_system_chest(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "Этот Сундук нельзя удалить: он всегда остаётся маршрутом для свободных "
+        "денег. Его можно переименовать и настроить его долю."
     )
 
 
@@ -937,6 +953,11 @@ async def delete_position(callback: CallbackQuery, state: FSMContext):
     index = int(callback.data.rsplit(":", 1)[1])
     try:
         goal = allocator.settings.goals[index]
+        if goal.is_system_chest:
+            await callback.message.answer(
+                "Этот Сундук нельзя удалить. Его можно переименовать."
+            )
+            return
         if allocator.is_last_active_chest(goal):
             await callback.message.answer("Этот Сундук пока единственный активный. Сначала добавьте или возобновите другой — он будет принимать свободные деньги.")
             return

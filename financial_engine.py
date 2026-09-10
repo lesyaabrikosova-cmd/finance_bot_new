@@ -464,9 +464,11 @@ class Goal:
     archived_at: Optional[str] = None
     previous_percentage: Optional[Decimal] = None
     uid: str = ""
+    is_system_chest: bool = False
 
     def __post_init__(self):
         self.uid = str(self.uid or uuid4().hex)
+        self.is_system_chest = bool(self.is_system_chest)
         self.name = str(self.name).strip()
         self.percentage = D(self.percentage)
         self.balance = max(ZERO, D(self.balance))
@@ -1647,9 +1649,20 @@ class FinancialAllocator:
     # ========================================================
 
     def ensure_active_chest(self) -> Goal:
-        """Безопасная миграция старых профилей без изменения существующих долей."""
+        """Keep one permanent chest that guarantees a destination for overflow."""
+        system_chest = next(
+            (goal for goal in self.settings.goals if goal.is_system_chest),
+            None,
+        )
+        if system_chest is not None:
+            system_chest.position_type = "chest"
+            system_chest.status = "active"
+            return system_chest
         chests = [g for g in self.settings.active_goals if g.is_chest]
         if chests:
+            # У старых профилей роль ещё не была записана. Первый действующий
+            # Сундук становится постоянным, не меняя его имя, баланс и долю.
+            chests[0].is_system_chest = True
             return chests[0]
         names = {g.name.casefold() for g in self.settings.goals}
         names.update(name.casefold() for name in self.state.goal_balances)
@@ -1657,8 +1670,11 @@ class FinancialAllocator:
         name, suffix = base, 2
         while name.casefold() in names:
             name, suffix = f"{base} {suffix}", suffix + 1
-        chest = Goal(name, ZERO if self.settings.active_goals else HUNDRED,
-                     position_type="chest", order_index=len(self.settings.goals))
+        chest = Goal(
+            name, ZERO if self.settings.active_goals else HUNDRED,
+            position_type="chest", order_index=len(self.settings.goals),
+            is_system_chest=True,
+        )
         self.settings.goals.append(chest)
         self.state.goal_balances[name] = ZERO
         return chest

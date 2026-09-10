@@ -410,6 +410,7 @@ class Database:
 
                 name TEXT NOT NULL,
                 uid TEXT NOT NULL DEFAULT '',
+                is_system_chest INTEGER NOT NULL DEFAULT 0,
                 percentage TEXT NOT NULL,
                 balance TEXT NOT NULL,
                 position_type TEXT NOT NULL DEFAULT 'goal',
@@ -734,6 +735,7 @@ class Database:
             "archived_at": "TEXT",
             "previous_percentage": "TEXT",
             "uid": "TEXT NOT NULL DEFAULT ''",
+            "is_system_chest": "INTEGER NOT NULL DEFAULT 0",
         }
         for column_name, column_sql in goal_migrations.items():
             if column_name not in goal_columns:
@@ -1092,6 +1094,7 @@ class Database:
                     telegram_id,
                     name,
                     uid,
+                    is_system_chest,
                     percentage,
                     balance,
                     position_type,
@@ -1110,7 +1113,7 @@ class Database:
                     previous_percentage
                 )
 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     telegram_id,
@@ -1118,6 +1121,8 @@ class Database:
                     goal.name,
 
                     goal.uid,
+
+                    int(goal.is_system_chest),
 
                     decimal_to_string(
                         goal.percentage
@@ -1274,6 +1279,8 @@ class Database:
                     name=goal_row["name"],
 
                     uid=goal_row["uid"],
+
+                    is_system_chest=bool(goal_row["is_system_chest"]),
 
                     percentage=
                         string_to_decimal(
