@@ -1183,6 +1183,11 @@ async def send_income_analysis(
     message: Message,
     telegram_id: int,
 ):
+    analysis_keyboard = keyboard([
+        [("История доходов", "incomehistory:open")],
+        [("← В главное меню", "menu:back")],
+    ])
+
     allocator = db.load_allocator(
         telegram_id
     )
@@ -1272,40 +1277,16 @@ async def send_income_analysis(
             message, {}, "АНАЛИЗ ДОХОДОВ",
             "В текущем расчётном периоде "
             "пока нет поступлений.",
-            reply_markup=main_menu_keyboard(telegram_id),
+            reply_markup=analysis_keyboard,
         )
 
         return
 
-    # ========================================================
-    # СОРТИРУЕМ ПО СУММЕ
-    # ========================================================
-
-    ordered = sorted(
-        totals.items(),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-
-    lines = [
-        f"💲 Доход итого: "
-        f"<b>{rub(total_income)}</b>",
-        "",
-    ]
-
-    for income_type, amount in ordered:
-
-        lines.append(
-            f"{escape(income_type)} — "
-            f"<b>{rub(amount)}</b> "
-            f"({pct(amount, total_income)})"
-        )
-
     await send_chart_report(
-        message, totals, "АНАЛИЗ ДОХОДОВ", "\n".join(lines),
+        message, totals, "АНАЛИЗ ДОХОДОВ", "",
         subtitle="Источники дохода · текущий расчётный период",
         center_amount=total_income,
-        reply_markup=main_menu_keyboard(telegram_id),
+        reply_markup=analysis_keyboard,
     )
 
 
