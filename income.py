@@ -79,6 +79,7 @@ class IncomeStates(StatesGroup):
     tax_edit = State()
     tax_custom_percent = State()
     tax_custom_amount = State()
+    note = State()
 
 
 # ============================================================
@@ -687,6 +688,12 @@ async def show_income_confirmation(
 
         f"{income_date.strftime('%d.%m.%Y')}\n"
         f"{escape(income_type)} — {rub(amount)}\n"
+        + (
+            f"📝 Заметка — {escape(str(data['income_note']))}\n"
+            if data.get("income_note")
+            else ""
+        )
+        +
         "————————————\n"
         f"{tax_display_line(tax, tax_percent)}\n"
         "————————————\n"
@@ -695,17 +702,80 @@ async def show_income_confirmation(
         reply_markup=keyboard([
             [
                 (
-                    "✖️ Отмена",
+                    "✗ Отмена",
                     "income:cancel",
                 ),
                 (
-                    "✔️ Распределить",
+                    "✓ Распределить",
                     "income:confirm",
                 ),
             ],
-            [("✎ Редактировать налог", "income:edit_tax")],
+            [
+                ("✎ Налог", "income:edit_tax"),
+                (
+                    "✎ Заметка" if data.get("income_note") else "+ Заметка",
+                    "income:note",
+                ),
+            ],
         ]),
     )
+
+
+# ============================================================
+# ЗАМЕТКА К ПОСТУПЛЕНИЮ
+# ============================================================
+
+
+@router.callback_query(
+    IncomeStates.confirmation,
+    F.data == "income:note",
+)
+async def ask_income_note(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    """Ask for a short private marker before the income is committed."""
+    await callback.answer()
+    await state.set_state(IncomeStates.note)
+
+    await callback.message.answer(
+        "<b>ЗАМЕТКА К ПОСТУПЛЕНИЮ</b>\n\n"
+        "Напишите короткую пометку, по которой вы потом узнаете "
+        "это поступление. Например: <i>Урок с Машей</i>.\n\n"
+        "Не более 60 символов.",
+        reply_markup=keyboard([
+            [("← Назад", "income:note_back"), ("✗ Отмена", "income:cancel")],
+        ]),
+    )
+
+
+@router.message(IncomeStates.note)
+async def save_income_note(
+    message: Message,
+    state: FSMContext,
+):
+    note = " ".join((message.text or "").split())
+    if not note:
+        await message.answer("Введите короткую заметку или нажмите «← Назад».")
+        return
+    if len(note) > 60:
+        await message.answer("Заметка должна быть не длиннее 60 символов.")
+        return
+
+    await state.update_data(income_note=note)
+    await show_income_confirmation(message, state, message.from_user.id)
+
+
+@router.callback_query(
+    IncomeStates.note,
+    F.data == "income:note_back",
+)
+async def income_note_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+    await show_income_confirmation(callback.message, state, callback.from_user.id)
 
 
 # ============================================================
@@ -1202,6 +1272,7 @@ async def confirm_income(
             income_type=income_type,
             income_date=income_date,
             tax_override=tax_override,
+            note=data.get("income_note"),
         )
         # Выбор относится только к этому поступлению и не становится скрытой
         # постоянной настройкой следующего распределения.

@@ -3369,6 +3369,7 @@ class FinancialAllocator:
         income_date: Optional[date] = None,
         reset_period: bool = False,
         tax_override: Optional[Decimal] = None,
+        note: Optional[str] = None,
     ) -> DistributionResult:
 
         income = D(income)
@@ -3680,6 +3681,7 @@ class FinancialAllocator:
             "tax_overridden": (
                 tax_override is not None
             ),
+            "note": note,
             "regular_income_part": regular_net,
             "super_income_part": super_net,
             "planned_tax_details": planned_tax_details,

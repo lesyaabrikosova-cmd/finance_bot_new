@@ -1031,6 +1031,26 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(details["Налог на имущество · Двушка"], Decimal("640.00"))
         self.assertEqual(details["Транспортный налог · Автомобиль"], Decimal("160.00"))
 
+    def test_income_operation_keeps_user_note(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("1000"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            life_categories={"Жизнь": Decimal("1000")},
+        )
+        allocator = FinancialAllocator(settings)
+        allocator.process_income(
+            Decimal("1000"),
+            "Частный урок",
+            note="Урок с Машей",
+        )
+        self.assertEqual(
+            allocator.state.operation_log[-1]["note"],
+            "Урок с Машей",
+        )
+
     def test_completed_tax_goal_stops_future_monthly_target(self):
         telegram_id = 880001
         settings = UserSettings(
