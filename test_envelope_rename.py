@@ -28,3 +28,22 @@ class RenameTests(unittest.TestCase):
             income = next(o for o in db.load_operations(42) if o['type'] == 'income_distribution')
             self.assertEqual(income['payload']['allocations'], {'Цели:В': '100'})
             db.connection.close()
+
+    def test_normalization_merges_old_and_new_state_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Database(os.path.join(directory, 'test.db'))
+            db.save_operation(42, 'envelope_rename', {'old': 'КЖ:Недвижимость', 'new': 'КЖ:Квартира'})
+            db.save_operation(42, 'envelope_rename', {'old': 'Цели:Отпуск', 'new': 'Цели:Путешествие'})
+            allocator = SimpleNamespace(state=SimpleNamespace(
+                period_allocations={
+                    'КЖ:Недвижимость': D(100),
+                    'КЖ:Квартира': D(50),
+                },
+                period_life_topups={'Недвижимость': D(100), 'Квартира': D(50)},
+                goal_balances={'Отпуск': D(200), 'Путешествие': D(30)},
+            ))
+            db.normalize_envelope_names(42, allocator)
+            self.assertEqual(allocator.state.period_allocations, {'КЖ:Квартира': D(150)})
+            self.assertEqual(allocator.state.period_life_topups, {'Квартира': D(150)})
+            self.assertEqual(allocator.state.goal_balances, {'Путешествие': D(230)})
+            db.connection.close()

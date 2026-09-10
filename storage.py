@@ -1912,6 +1912,53 @@ class Database:
         self.save_operation(telegram_id, 'envelope_rename',
                             {'old': old_key, 'new': new_key})
 
+    def normalize_envelope_names(self, telegram_id: int, allocator: FinancialAllocator) -> None:
+        """Merge stale envelope aliases into their newest names everywhere in state.
+
+        A renamed category can exist in older income records, in current-period
+        aggregates and in goal balances. Reports must never treat those aliases
+        as separate envelopes.
+        """
+        rows = self.connection.execute(
+            "SELECT payload FROM operation_log WHERE telegram_id = ? "
+            "AND operation_type = 'envelope_rename' ORDER BY id",
+            (telegram_id,),
+        ).fetchall()
+        redirects = {}
+        for row in rows:
+            payload = deserialize_json(row["payload"])
+            old, new = payload.get("old"), payload.get("new")
+            if isinstance(old, str) and isinstance(new, str) and old != new:
+                redirects[old] = new
+
+        def current_name(name: str) -> str:
+            seen = set()
+            while name in redirects and name not in seen:
+                seen.add(name)
+                name = redirects[name]
+            return name
+
+        def merge(items: dict[str, Decimal], prefix: str = "") -> dict[str, Decimal]:
+            result = {}
+            for name, amount in items.items():
+                full_name = prefix + str(name)
+                resolved = current_name(full_name)
+                final_name = resolved[len(prefix):] if prefix and resolved.startswith(prefix) else resolved
+                result[final_name] = result.get(final_name, Decimal("0")) + Decimal(str(amount))
+            return result
+
+        allocator.state.period_allocations = merge(
+            allocator.state.period_allocations,
+        )
+        allocator.state.period_life_topups = merge(
+            allocator.state.period_life_topups,
+            "КЖ:",
+        )
+        allocator.state.goal_balances = merge(
+            allocator.state.goal_balances,
+            "Цели:",
+        )
+
     def load_operations(
         self,
         telegram_id: int,
@@ -2058,6 +2105,8 @@ class Database:
             settings=settings,
             state=state,
         )
+
+        self.normalize_envelope_names(telegram_id, allocator)
 
         return allocator
 
