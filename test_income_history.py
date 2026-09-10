@@ -46,7 +46,7 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
 
     def test_card_and_distribution_keep_note_and_group_order(self):
         item = operation()
-        self.assertIn("📝 Заметка — Урок с Машей", income_operation_card_text(item))
+        self.assertIn("————————————\n📝 Урок с Машей\n————————————", income_operation_card_text(item))
         allocator = SimpleNamespace(settings=SimpleNamespace(goals=[]))
         text = income_distribution_text(item, allocator)
         self.assertIn("<blockquote>", text)

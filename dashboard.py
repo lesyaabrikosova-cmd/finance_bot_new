@@ -1274,12 +1274,16 @@ def income_operation_card_text(operation: dict) -> str:
     tax = D(payload.get("tax", 0))
     income_type = escape(str(payload.get("income_type", "Без типа")))
     note = payload.get("note")
-    note_line = f"\n📝 Заметка — {escape(str(note))}" if note else ""
+    note_block = (
+        f"\n————————————\n📝 {escape(str(note))}"
+        if note
+        else ""
+    )
     return (
         "<b>ДОХОД</b>\n\n"
         f"{income_history_date(operation)}\n"
         f"{income_type} — {rub_plain(income)}"
-        f"{note_line}\n"
+        f"{note_block}\n"
         "————————————\n"
         f"🏛️ Налог — {rub_plain(tax)}\n"
         f"К распределению — {rub_plain(income - tax)}"
