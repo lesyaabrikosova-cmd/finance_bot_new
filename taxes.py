@@ -315,6 +315,14 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
     rows = [[("Подробнее" if not detailed else "Кратко", "taxes:details" if not detailed else "taxes:summary")]]
     rows.append([("Добавить налог", "taxes:add"), ("Изменить налоги", "taxes:edit")])
     rows.append([("Отметить оплату", "taxes:payment")])
+    cancelled = [
+        item for item in db.load_tax_obligations(telegram_id, active_only=False)
+        if not item["active"]
+        and item["saved_before"] < item["target_amount"]
+        and item["monthly_amount"] > ZERO
+    ]
+    if cancelled:
+        rows.append([("Восстановить КМ", "taxes:km_repair")])
     if allocator.settings.track_tax_payments:
         rows.append([("Не учитывать оплаты", "taxes:tracking:off")])
     else:
@@ -331,6 +339,60 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         "НАЛОГИ", text, reply_markup=keyboard(rows),
         subtitle=f"Фактически отложено ботом за {year} год", colors=TAX_COLORS,
         center_amount=annual_total,
+    )
+
+
+@router.callback_query(F.data == "taxes:km_repair")
+async def ask_critical_life_repair(callback: CallbackQuery):
+    await callback.answer()
+    cancelled = [
+        item for item in db.load_tax_obligations(callback.from_user.id, active_only=False)
+        if not item["active"]
+        and item["saved_before"] < item["target_amount"]
+        and item["monthly_amount"] > ZERO
+    ]
+    correction = sum((item["monthly_amount"] for item in cancelled), ZERO)
+    if correction <= ZERO:
+        await show_taxes(callback.message, callback.from_user.id)
+        return
+    await callback.message.answer(
+        "<b>ВОССТАНОВИТЬ КРИТИЧЕСКИЙ МИНИМУМ?</b>\n\n"
+        f"Найдены отменённые налоговые планы на <b>{money(correction)}</b> в месяц. "
+        "Их взносы могли остаться внутри КМ из старой версии расчёта.\n\n"
+        f"КМ уменьшится на <b>{money(correction)}</b>.",
+        reply_markup=keyboard([
+            [("✔️ Восстановить КМ", "taxes:km_repair:confirm")],
+            [("✖️ Отмена", "menu:taxes")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "taxes:km_repair:confirm")
+async def apply_critical_life_repair(callback: CallbackQuery):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    cancelled = [
+        item for item in db.load_tax_obligations(callback.from_user.id, active_only=False)
+        if not item["active"]
+        and item["saved_before"] < item["target_amount"]
+        and item["monthly_amount"] > ZERO
+    ]
+    correction = sum((item["monthly_amount"] for item in cancelled), ZERO)
+    if correction <= ZERO:
+        await show_taxes(callback.message, callback.from_user.id)
+        return
+    allocator.settings.base_critical_life = max(
+        ZERO, allocator.settings.base_critical_life - correction,
+    )
+    allocator.settings.recalculate_critical_life()
+    for item in cancelled:
+        db.update_tax_obligation_monthly(callback.from_user.id, item["id"], ZERO)
+    db.save_allocator(callback.from_user.id, allocator)
+    await callback.message.answer(
+        f"Критический минимум уменьшен на <b>{money(correction)}</b>.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 

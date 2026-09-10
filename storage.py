@@ -2162,6 +2162,17 @@ class Database:
         }
         settings.track_tax_payments = track_payments
 
+        # load_settings создаёт UserSettings до tax_configuration. Поэтому
+        # для старого профиля отделяем налоговые взносы здесь, после загрузки
+        # реальных обязательств, а не позволяем им попасть в постоянный КМ.
+        tax_total = sum(settings.planned_taxes.values(), Decimal("0"))
+        if getattr(settings, "_base_critical_life_inferred", False):
+            settings.base_critical_life = max(
+                Decimal("0"), settings.base_critical_life - tax_total,
+            )
+        for name, amount in settings.planned_taxes.items():
+            settings.set_automatic_life_obligation(f"tax:{name}", amount)
+
         # Старые профили хранили временные платежи прямо внутри КМ. Один раз
         # отделяем их от скрытой постоянной основы и дальше пересчитываем КМ
         # только из активных обязательств.
