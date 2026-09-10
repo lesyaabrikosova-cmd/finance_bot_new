@@ -8,6 +8,7 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, FSInputFile
 
 from financial_engine import (
@@ -23,6 +24,10 @@ from charts import send_chart_report
 
 
 router = Router()
+
+
+class IncomeHistoryStates(StatesGroup):
+    note = State()
 
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -1178,6 +1183,306 @@ async def menu_about(
 # ============================================================
 # АНАЛИЗ ДОХОДОВ
 # ============================================================
+
+INCOME_HISTORY_PAGE_SIZE = 8
+
+
+def income_history_operations(telegram_id: int) -> list[dict]:
+    """Return recorded income operations, newest first, for one user only."""
+    return [
+        operation
+        for operation in db.load_operations(telegram_id, limit=1000)
+        if operation.get("type") == "income_distribution"
+    ]
+
+
+def income_history_date(operation: dict) -> str:
+    payload = operation.get("payload") or {}
+    raw_date = payload.get("date") or operation.get("created_at")
+    try:
+        return date.fromisoformat(str(raw_date)[:10]).strftime("%d.%m.%Y")
+    except (TypeError, ValueError):
+        return "Без даты"
+
+
+def income_history_button_label(operation: dict) -> str:
+    payload = operation.get("payload") or {}
+    income_type = " ".join(str(payload.get("income_type", "Без типа")).split())
+    if len(income_type) > 24:
+        income_type = income_type[:23] + "…"
+    return (
+        f"{income_history_date(operation)[:5]} · {income_type} · "
+        f"{rub_plain(payload.get('income', 0))}"
+    )
+
+
+def find_income_history_operation(telegram_id: int, operation_id: int) -> dict | None:
+    return next(
+        (
+            operation
+            for operation in income_history_operations(telegram_id)
+            if operation.get("id") == operation_id
+        ),
+        None,
+    )
+
+
+async def send_income_history(message: Message, telegram_id: int, page: int = 0):
+    operations = income_history_operations(telegram_id)
+    last_page = max(0, (len(operations) - 1) // INCOME_HISTORY_PAGE_SIZE)
+    page = max(0, min(page, last_page))
+    page_operations = operations[
+        page * INCOME_HISTORY_PAGE_SIZE:(page + 1) * INCOME_HISTORY_PAGE_SIZE
+    ]
+
+    if not operations:
+        await message.answer(
+            "<b>ИСТОРИЯ ДОХОДОВ</b>\n\n"
+            "Вы ещё не добавили ни одного дохода.",
+            reply_markup=keyboard([
+                [("← К анализу доходов", "menu:income_analysis")],
+                [("← В главное меню", "menu:back")],
+            ]),
+        )
+        return
+
+    rows = [
+        [(income_history_button_label(operation), f"incomehistory:detail:{operation['id']}")]
+        for operation in page_operations
+    ]
+    if last_page:
+        navigation = []
+        if page > 0:
+            navigation.append(("← Новее", f"incomehistory:page:{page - 1}"))
+        if page < last_page:
+            navigation.append(("Старше →", f"incomehistory:page:{page + 1}"))
+        rows.append(navigation)
+    rows.extend([
+        [("← К анализу доходов", "menu:income_analysis")],
+        [("← В главное меню", "menu:back")],
+    ])
+    await message.answer(
+        "<b>ИСТОРИЯ ДОХОДОВ</b>",
+        reply_markup=keyboard(rows),
+    )
+
+
+def income_operation_card_text(operation: dict) -> str:
+    payload = operation.get("payload") or {}
+    income = D(payload.get("income", 0))
+    tax = D(payload.get("tax", 0))
+    income_type = escape(str(payload.get("income_type", "Без типа")))
+    note = payload.get("note")
+    note_line = f"\n📝 Заметка — {escape(str(note))}" if note else ""
+    return (
+        "<b>ДОХОД</b>\n\n"
+        f"{income_history_date(operation)}\n"
+        f"{income_type} — {rub_plain(income)}"
+        f"{note_line}\n"
+        "————————————\n"
+        f"🏛️ Налог — {rub_plain(tax)}\n"
+        f"К распределению — {rub_plain(income - tax)}"
+    )
+
+
+async def send_income_history_detail(
+    message: Message,
+    telegram_id: int,
+    operation_id: int,
+) -> bool:
+    operation = find_income_history_operation(telegram_id, operation_id)
+    if operation is None:
+        await message.answer("Это поступление уже недоступно в истории.")
+        return False
+    has_note = bool((operation.get("payload") or {}).get("note"))
+    await message.answer(
+        income_operation_card_text(operation),
+        reply_markup=keyboard([
+            [
+                (
+                    "✎ Заметка" if has_note else "+ Заметка",
+                    f"incomehistory:note:{operation_id}",
+                )
+            ],
+            [("Показать распределение", f"incomehistory:distribution:{operation_id}")],
+            [("← К истории", "incomehistory:open")],
+            [("← В главное меню", "menu:back")],
+        ]),
+    )
+    return True
+
+
+def income_distribution_text(operation: dict, allocator) -> str:
+    payload = operation.get("payload") or {}
+    allocations = {
+        str(key): D(value)
+        for key, value in (payload.get("allocations") or {}).items()
+    }
+    groups: list[list[str]] = [[], [], [], [], [], []]
+
+    def add(group: int, emoji: str, name: str, amount) -> None:
+        amount = D(amount)
+        if amount > 0:
+            groups[group].append(f"{emoji} <b>{escape(name)}</b> — {rub_plain(amount)}")
+
+    add(0, "🏛️", "Налог", payload.get("tax", 0))
+    add(1, "🏦", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", 0))
+    add(1, "🛡️", "Подушка", allocations.get("Подушка", 0))
+    add(1, "🛟", "Стабилизатор", allocations.get("Стабилизатор дохода", 0))
+    add(1, "📈", "Инвестиции", allocations.get("Инвестиции", 0))
+    add(2, "💳", "Минимальные платежи", allocations.get("Мин. платеж", 0))
+    add(2, "💳", "Досрочное погашение", allocations.get("Досрочное", 0))
+
+    for key, amount in allocations.items():
+        if key.startswith("Рабочие обязательства:"):
+            _, *parts = key.split(":", 2)
+            label = " → ".join(reversed(parts)) if len(parts) == 2 else key[21:]
+            add(2, "💳", label, amount)
+
+    life_items = [
+        (key[3:], amount)
+        for key, amount in allocations.items()
+        if key.startswith("КЖ:")
+    ]
+    for name, amount in sorted(life_items, key=lambda item: item[1], reverse=True):
+        add(3, "❤️", name, amount)
+
+    add(4, "💚", "Бытовой резерв", allocations.get("Бытовой резерв", 0))
+    goal_map = {goal.name: goal for goal in allocator.settings.goals}
+    goal_items = [
+        (key[5:], amount)
+        for key, amount in allocations.items()
+        if key.startswith("Цели:")
+    ]
+    for name, amount in sorted(goal_items, key=lambda item: item[1], reverse=True):
+        goal = goal_map.get(name)
+        add(5, "🧳" if goal and goal.is_chest else "⭐️", goal_display_name(name, bool(goal and goal.is_chest)), amount)
+
+    quote = "\n\n".join("\n".join(group) for group in groups if group)
+    return (
+        "<b>РАСПРЕДЕЛЕНИЕ ДОХОДА</b>\n\n"
+        f"{income_history_date(operation)}\n"
+        f"{escape(str(payload.get('income_type', 'Без типа')))} — {rub_plain(payload.get('income', 0))}\n\n"
+        "<blockquote>"
+        f"{quote or 'Распределений не найдено.'}"
+        "</blockquote>"
+    )
+
+
+@router.callback_query(F.data == "incomehistory:open")
+async def open_income_history(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await send_income_history(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("incomehistory:page:"))
+async def income_history_page(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        page = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        await callback.message.answer("Не удалось открыть эту страницу истории.")
+        return
+    await state.clear()
+    await send_income_history(callback.message, callback.from_user.id, page)
+
+
+@router.callback_query(F.data.startswith("incomehistory:detail:"))
+async def income_history_detail(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    await state.clear()
+    await send_income_history_detail(
+        callback.message,
+        callback.from_user.id,
+        operation_id,
+    )
+
+
+@router.callback_query(F.data.startswith("incomehistory:note:"))
+async def ask_history_income_note(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    if find_income_history_operation(callback.from_user.id, operation_id) is None:
+        await callback.message.answer("Это поступление уже недоступно в истории.")
+        return
+    await state.update_data(history_note_operation_id=operation_id)
+    await state.set_state(IncomeHistoryStates.note)
+    await callback.message.answer(
+        "<b>ЗАМЕТКА К ПОСТУПЛЕНИЮ</b>\n\n"
+        "Введите новую короткую заметку. Не более 60 символов.",
+        reply_markup=keyboard([
+            [
+                ("← Назад", f"incomehistory:note_back:{operation_id}"),
+                ("✗ Отмена", f"incomehistory:note_cancel:{operation_id}"),
+            ],
+        ]),
+    )
+
+
+@router.message(IncomeHistoryStates.note)
+async def save_history_income_note(message: Message, state: FSMContext):
+    note = " ".join((message.text or "").split())
+    if not note:
+        await message.answer("Введите короткую заметку или нажмите «← Назад».")
+        return
+    if len(note) > 60:
+        await message.answer("Заметка должна быть не длиннее 60 символов.")
+        return
+    data = await state.get_data()
+    operation_id = data.get("history_note_operation_id")
+    if not isinstance(operation_id, int) or not db.update_income_note(
+        message.from_user.id,
+        operation_id,
+        note,
+    ):
+        await state.clear()
+        await message.answer("Не удалось сохранить заметку. Попробуйте открыть доход снова.")
+        return
+    await state.clear()
+    await send_income_history_detail(message, message.from_user.id, operation_id)
+
+
+@router.callback_query(F.data.startswith("incomehistory:note_back:"))
+@router.callback_query(F.data.startswith("incomehistory:note_cancel:"))
+async def history_income_note_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    await state.clear()
+    await send_income_history_detail(callback.message, callback.from_user.id, operation_id)
+
+
+@router.callback_query(F.data.startswith("incomehistory:distribution:"))
+async def income_history_distribution(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    operation = find_income_history_operation(callback.from_user.id, operation_id)
+    allocator = db.load_allocator(callback.from_user.id)
+    if operation is None or allocator is None:
+        await callback.message.answer("Не удалось открыть распределение этого поступления.")
+        return
+    await state.clear()
+    await callback.message.answer(
+        income_distribution_text(operation, allocator),
+        reply_markup=keyboard([
+            [("← К доходу", f"incomehistory:detail:{operation_id}")],
+            [("← К истории", "incomehistory:open")],
+            [("← В главное меню", "menu:back")],
+        ]),
+    )
 
 async def send_income_analysis(
     message: Message,

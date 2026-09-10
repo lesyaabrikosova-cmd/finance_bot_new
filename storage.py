@@ -1977,6 +1977,35 @@ class Database:
                                            + Decimal(str(allocations.pop(old))))
         return result
 
+    def update_income_note(
+        self,
+        telegram_id: int,
+        operation_id: int,
+        note: str,
+    ) -> bool:
+        """Update only a user's note; financial data stays immutable."""
+        row = self.connection.execute(
+            """
+            SELECT payload
+            FROM operation_log
+            WHERE id = ?
+              AND telegram_id = ?
+              AND operation_type = 'income_distribution'
+            """,
+            (operation_id, telegram_id),
+        ).fetchone()
+        if row is None:
+            return False
+
+        payload = deserialize_json(row["payload"])
+        payload["note"] = note
+        self.connection.execute(
+            "UPDATE operation_log SET payload = ? WHERE id = ? AND telegram_id = ?",
+            (serialize_json(payload), operation_id, telegram_id),
+        )
+        self.connection.commit()
+        return True
+
     # ========================================================
     # ЗАГРУЗКА ВСЕГО АЛЛОКАТОРА
     # ========================================================
