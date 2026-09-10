@@ -315,12 +315,18 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
     rows = [[("Подробнее" if not detailed else "Кратко", "taxes:details" if not detailed else "taxes:summary")]]
     rows.append([("Добавить налог", "taxes:add"), ("Изменить налоги", "taxes:edit")])
     rows.append([("Отметить оплату", "taxes:payment")])
-    cancelled = [
-        item for item in db.load_tax_obligations(telegram_id, active_only=False)
-        if not item["active"]
-        and item["saved_before"] < item["target_amount"]
-        and item["monthly_amount"] > ZERO
-    ]
+    # Это разовая миграция для профилей, созданных до разделения КМ на
+    # постоянную основу и временные обязательства. После ручного изменения
+    # КМ база уже сохранена отдельно, поэтому старые отменённые планы нельзя
+    # вычитать повторно.
+    cancelled = []
+    if getattr(allocator.settings, "_base_critical_life_inferred", False):
+        cancelled = [
+            item for item in db.load_tax_obligations(telegram_id, active_only=False)
+            if not item["active"]
+            and item["saved_before"] < item["target_amount"]
+            and item["monthly_amount"] > ZERO
+        ]
     if cancelled:
         rows.append([("Восстановить КМ", "taxes:km_repair")])
     if allocator.settings.track_tax_payments:
@@ -345,6 +351,12 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
 @router.callback_query(F.data == "taxes:km_repair")
 async def ask_critical_life_repair(callback: CallbackQuery):
     await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or not getattr(
+        allocator.settings, "_base_critical_life_inferred", False,
+    ):
+        await show_taxes(callback.message, callback.from_user.id)
+        return
     cancelled = [
         item for item in db.load_tax_obligations(callback.from_user.id, active_only=False)
         if not item["active"]
@@ -371,7 +383,10 @@ async def ask_critical_life_repair(callback: CallbackQuery):
 async def apply_critical_life_repair(callback: CallbackQuery):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    if allocator is None:
+    if allocator is None or not getattr(
+        allocator.settings, "_base_critical_life_inferred", False,
+    ):
+        await show_taxes(callback.message, callback.from_user.id)
         return
     cancelled = [
         item for item in db.load_tax_obligations(callback.from_user.id, active_only=False)
