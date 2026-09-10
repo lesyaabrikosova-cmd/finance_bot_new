@@ -525,6 +525,7 @@ async def save_next_tax_amount(message: Message, state: FSMContext):
     if allocator is not None:
         key = f"{data['next_tax_type']} · {data['next_tax_object']}"
         allocator.settings.planned_taxes[key] = monthly
+        allocator.settings.ensure_life_category_id("Налоги")
         allocator.settings.life_categories["Налоги"] = (
             allocator.settings.life_categories.get("Налоги", ZERO) + monthly
         )
@@ -731,6 +732,7 @@ async def save_tax_obligation(
     if allocator is not None:
         key = f"{tax_type} · {object_name}"
         allocator.settings.planned_taxes[key] = monthly
+        allocator.settings.ensure_life_category_id("Налоги")
         allocator.settings.life_categories["Налоги"] = (
             allocator.settings.life_categories.get("Налоги", ZERO) + monthly
         )

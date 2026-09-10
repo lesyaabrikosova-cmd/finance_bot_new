@@ -112,29 +112,34 @@ async def save_custom_forecast_months(message: Message, state: FSMContext):
 
 
 def forecast_allocation_text(source, allocations, plain: bool = False):
-    groups = [[], [], [], [], []]
+    groups = [[], [], [], [], [], []]
     known = set()
     def add(group, key, label):
         known.add(key)
         amount = Decimal(allocations.get(key, 0))
         if amount > 0:
             groups[group].append(f"{label} — {fmt_money(amount) if plain else rub(amount)}")
-    for key, label in [("Подушка", "🛡️ Подушка"), ("Стабилизатор дохода", "🛟 Стабилизатор"),
-                       ("Инвестиции", "📈 Инвестиции"), ("Фонд Зарплаты", "🏦 Фонд Зарплаты")]:
-        add(0, key, label)
-    for key in allocations:
-        if key.startswith("КЖ:"):
-            add(1, key, f"❤️ {escape(key[3:])}")
-    add(2, "Бытовой резерв", "💚 Бытовой резерв")
+    add(0, "КЖ:Налоги", "🏛️ Налоги")
+    for key, label in [("Фонд Зарплаты", "🏦 Фонд Зарплаты"), ("Подушка", "🛡️ Подушка"),
+                       ("Стабилизатор дохода", "🛟 Стабилизатор"), ("Инвестиции", "📈 Инвестиции")]:
+        add(1, key, label)
+    life_items = [
+        key for key in allocations
+        if key.startswith("КЖ:") and key not in {"КЖ:Налоги", "КЖ:Зарплата"}
+    ]
+    for key in sorted(life_items, key=lambda item: Decimal(allocations[item]), reverse=True):
+        add(2, key, f"❤️ {escape(key[3:])}")
+    add(2, "КЖ:Зарплата", "❤️ Зарплата")
+    add(3, "Бытовой резерв", "💚 Бытовой резерв")
     goals = {g.name: g for g in source.settings.goals}
     for key in allocations:
         if key.startswith("Цели:"):
             name = key[5:]
             chest = bool(goals.get(name) and goals[name].is_chest)
-            add(3, key, ('🧳 ' if chest else '⭐️ ') + escape(goal_display_name(name, chest)))
+            add(4, key, ('🧳 ' if chest else '⭐️ ') + escape(goal_display_name(name, chest)))
     for key in allocations:
         if key not in known and not key.startswith("БР:"):
-            add(4, key, '💳 ' + escape(key.replace(':', ' · ')))
+            add(5, key, '💳 ' + escape(key.replace(':', ' · ')))
     return "\n\n".join("\n".join(group) for group in groups if group) or "Нет свободной суммы для распределения"
 
 

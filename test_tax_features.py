@@ -1031,6 +1031,23 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(details["Налог на имущество · Двушка"], Decimal("640.00"))
         self.assertEqual(details["Транспортный налог · Автомобиль"], Decimal("160.00"))
 
+    def test_planned_tax_is_funded_before_other_life_categories(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("1350"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("3000"),
+            life_categories={"Квартира": Decimal("900"), "Налоги": Decimal("450")},
+            planned_taxes={"Налог на имущество · Хата": Decimal("450")},
+        )
+        allocator = FinancialAllocator(settings)
+        allocations = {}
+        allocator._allocate_to_life(Decimal("1000"), allocations)
+        self.assertEqual(allocations["КЖ:Налоги"], Decimal("450"))
+        self.assertEqual(allocator.state.period_life_topups["Налоги"], Decimal("450"))
+        self.assertEqual(sum(allocations.values()), Decimal("1000"))
+
     def test_income_operation_keeps_user_note(self):
         settings = UserSettings(
             has_debts=False,

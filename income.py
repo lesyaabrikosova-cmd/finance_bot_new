@@ -1443,6 +1443,14 @@ async def send_distribution_report(
         "Налог",
         result.tax, 0,
     )
+    # Имущественный, транспортный и земельный налоги идут в один
+    # банковский конверт «Налоги» и всегда показываются первыми.
+    add_distribution_line(
+        "🏛️",
+        "Налоги",
+        allocations.get("КЖ:Налоги", ZERO),
+        0,
+    )
 
     if allocator.profile_id == "cyclic":
         add_distribution_line("🏦", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", ZERO), 1)
@@ -1463,7 +1471,8 @@ async def send_distribution_report(
                 label = key.split(":", 1)[1]
             add_distribution_line("💳", label, value, 2)
 
-    for name in sorted(settings.life_categories, key=lambda name: Decimal(str(allocations.get(f"КЖ:{name}", ZERO))), reverse=True):
+    life_names = [name for name in settings.life_categories if name != "Налоги" and name != "Зарплата"]
+    for name in sorted(life_names, key=lambda name: Decimal(str(allocations.get(f"КЖ:{name}", ZERO))), reverse=True):
 
         add_distribution_line(
             "❤️",
@@ -1474,19 +1483,13 @@ async def send_distribution_report(
             ), 3,
         )
 
-    if (
-        "Зарплата"
-        not in settings.life_categories
-    ):
-
-        add_distribution_line(
-            "❤️",
-            "Зарплата",
-            allocations.get(
-                "КЖ:Зарплата",
-                ZERO,
-            ), 3,
-        )
+    # «Зарплата» — остаток Критического минимума, поэтому всегда последняя.
+    add_distribution_line(
+        "❤️",
+        "Зарплата",
+        allocations.get("КЖ:Зарплата", ZERO),
+        3,
+    )
 
     add_distribution_line(
         "💚",

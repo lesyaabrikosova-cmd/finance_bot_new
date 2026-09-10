@@ -784,12 +784,20 @@ def period_balance_chart(allocator, allocations):
         for key, value in allocations.items():
             if key.startswith('КЖ:') and not allocator.state.period_life_topups:
                 life[key[3:]] = value
+    # Все налоговые обязательства — один фиолетовый банковский конверт.
+    planned_tax = life.pop('Налоги', Decimal(0))
+    if planned_tax > 0:
+        values['Налог'] = values.get('Налог', Decimal(0)) + planned_tax
+        colors['Налог'] = '#7656D8'
+    salary = life.pop('Зарплата', None)
     used_life_colors = set()
     for name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
         add(
             f'КМ · {name}', value,
             shade(category_ids.get(name, name), life_colors, used_life_colors),
         )
+    if salary is not None:
+        add('КМ · Зарплата', salary, shade(category_ids.get('Зарплата', 'Зарплата'), life_colors, used_life_colors))
     add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#24734A')
     goal_map = {goal.name: goal for goal in getattr(settings, 'goals', [])}
     goal_items = [
@@ -1396,6 +1404,7 @@ def income_distribution_text(operation: dict, allocator) -> str:
             groups[group].append(f"{emoji} <b>{escape(name)}</b> — {rub_plain(amount)}")
 
     add(0, "🏛️", "Налог", payload.get("tax", 0))
+    add(0, "🏛️", "Налоги", allocations.get("КЖ:Налоги", 0))
     add(1, "🏦", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", 0))
     add(1, "🛡️", "Подушка", allocations.get("Подушка", 0))
     add(1, "🛟", "Стабилизатор", allocations.get("Стабилизатор дохода", 0))
@@ -1412,10 +1421,11 @@ def income_distribution_text(operation: dict, allocator) -> str:
     life_items = [
         (key[3:], amount)
         for key, amount in allocations.items()
-        if key.startswith("КЖ:")
+        if key.startswith("КЖ:") and key not in {"КЖ:Налоги", "КЖ:Зарплата"}
     ]
     for name, amount in sorted(life_items, key=lambda item: item[1], reverse=True):
         add(3, "❤️", name, amount)
+    add(3, "❤️", "Зарплата", allocations.get("КЖ:Зарплата", 0))
 
     add(4, "💚", "Бытовой резерв", allocations.get("Бытовой резерв", 0))
     goal_map = {goal.name: goal for goal in allocator.settings.goals}

@@ -1762,6 +1762,12 @@ class FinancialAllocator:
             for name, amount in targets.items()
         }
 
+    def ensure_life_category_id(self, name: str) -> str:
+        """Return a stable ID for a category created after onboarding."""
+        if name not in self.life_category_ids:
+            self.life_category_ids[name] = uuid4().hex
+        return self.life_category_ids[name]
+
     def allocation_envelope_ids(self, allocations: Dict[str, Decimal]) -> Dict[str, str]:
         """Attach immutable IDs to user-editable destinations in an operation."""
         goals = {goal.name: goal.uid for goal in self.settings.goals}
@@ -3122,7 +3128,30 @@ class FinancialAllocator:
         if amount <= ZERO:
             return
 
+        # Налоги на имущество, транспорт и землю должны быть собраны к дате,
+        # а не получать случайную долю КМ. Сначала закрываем месячный взнос,
+        # затем распределяем оставшуюся сумму по обычным категориям жизни.
+        planned_tax_monthly = sum(self.settings.planned_taxes.values(), ZERO)
+        if planned_tax_monthly > ZERO and "Налоги" in self.life_category_targets():
+            already_saved = D(self.state.period_life_topups.get("Налоги", ZERO))
+            priority_tax = min(amount, max(ZERO, planned_tax_monthly - already_saved))
+            if priority_tax > ZERO:
+                self.state.period_life_topups["Налоги"] = already_saved + priority_tax
+                allocations["КЖ:Налоги"] = (
+                    allocations.get("КЖ:Налоги", ZERO) + priority_tax
+                )
+                self.state.life_balance += priority_tax
+                amount -= priority_tax
+        if amount <= ZERO:
+            return
+
         shares = self.life_category_shares()
+        # Плановый налог уже пополнен отдельным приоритетным шагом.
+        shares.pop("Налоги", None)
+        total_shares = sum(shares.values(), ZERO)
+        if total_shares <= ZERO:
+            return
+        shares = {name: share / total_shares for name, share in shares.items()}
         category_names = list(shares.keys())
         distributed = ZERO
         life_added = ZERO
