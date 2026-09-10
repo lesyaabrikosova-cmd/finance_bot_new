@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 from html import escape
@@ -1305,6 +1306,7 @@ async def send_income_history_detail(
                 )
             ],
             [("Показать распределение", f"incomehistory:distribution:{operation_id}")],
+            [("Удалить доход", f"incomehistory:delete:{operation_id}")],
             [("← К истории", "incomehistory:open")],
             [("← В главное меню", "menu:back")],
         ]),
@@ -1460,6 +1462,101 @@ async def history_income_note_back(callback: CallbackQuery, state: FSMContext):
         operation_id = 0
     await state.clear()
     await send_income_history_detail(callback.message, callback.from_user.id, operation_id)
+
+
+@router.callback_query(F.data.startswith("incomehistory:delete:"))
+async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    operation = find_income_history_operation(callback.from_user.id, operation_id)
+    if operation is None:
+        await callback.message.answer("Это поступление уже недоступно в истории.")
+        return
+    await state.clear()
+    payload = operation.get("payload") or {}
+    await callback.message.answer(
+        "<b>УДАЛИТЬ ДОХОД?</b>\n\n"
+        f"{income_history_date(operation)}\n"
+        f"{escape(str(payload.get('income_type', 'Без типа')))} — "
+        f"{rub_plain(payload.get('income', 0))}\n\n"
+        "Будут откатены налог, распределение по конвертам, цели, "
+        "резервы и итоги расчётного периода.\n\n"
+        "Удалить это поступление безвозвратно?",
+        reply_markup=keyboard([
+            [
+                ("✗ Отмена", f"incomehistory:delete_cancel:{operation_id}"),
+                ("Удалить доход", f"incomehistory:delete_confirm:{operation_id}"),
+            ],
+            [("← К доходу", f"incomehistory:detail:{operation_id}")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("incomehistory:delete_cancel:"))
+async def cancel_delete_income_history(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Удаление отменено")
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    await state.clear()
+    await send_income_history_detail(callback.message, callback.from_user.id, operation_id)
+
+
+@router.callback_query(F.data.startswith("incomehistory:delete_confirm:"))
+async def confirm_delete_income_history(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    operations = income_history_operations(callback.from_user.id)
+    operation = next((item for item in operations if item.get("id") == operation_id), None)
+    allocator = db.load_allocator(callback.from_user.id)
+    if operation is None or allocator is None:
+        await callback.message.answer("Это поступление уже недоступно в истории.")
+        return
+
+    # A snapshot gives an exact restoration for the newest income. For an
+    # earlier entry, the engine reverses only its recorded contribution and
+    # keeps all subsequent, unrelated operations in place.
+    restored = deepcopy(allocator)
+    payload = operation.get("payload") or {}
+    try:
+        restored.rollback_income_operation(
+            payload,
+            restore_snapshot=bool(operations and operations[0].get("id") == operation_id),
+        )
+    except ValueError as error:
+        await callback.message.answer(
+            "<b>ДОХОД НЕ УДАЛЁН</b>\n\n"
+            f"{escape(str(error))}\n\n"
+            "Бот сохранил все балансы без изменений.",
+            reply_markup=keyboard([
+                [("← К доходу", f"incomehistory:detail:{operation_id}")],
+                [("← К истории", "incomehistory:open")],
+            ]),
+        )
+        return
+
+    db.save_allocator(callback.from_user.id, restored)
+    if not db.delete_income_operation(callback.from_user.id, operation_id):
+        await callback.message.answer(
+            "Не удалось завершить удаление. Балансы не изменяйте и обратитесь в поддержку."
+        )
+        return
+    await state.clear()
+    await callback.message.answer(
+        "<b>ДОХОД УДАЛЁН</b>\n\n"
+        "Налог, распределение, балансы и итоги периода восстановлены.",
+        reply_markup=keyboard([
+            [("← К истории доходов", "incomehistory:open")],
+            [("← В главное меню", "menu:back")],
+        ]),
+    )
 
 
 @router.callback_query(F.data.startswith("incomehistory:distribution:"))

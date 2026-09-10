@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP, getcontext
 from math import log
 from typing import Dict, List, Optional, Tuple
@@ -1514,6 +1514,117 @@ class FinancialAllocator:
         self.ensure_active_chest()
         self._ensure_goal_balances()
         self._ensure_life_categories()
+
+    def _income_rollback_snapshot(self) -> dict:
+        """State immediately before an income, without growing a nested log."""
+        snapshot = asdict(self.state)
+        snapshot["operation_log"] = []
+        snapshot["distribution_history"] = []
+        return snapshot
+
+    def rollback_income_operation(
+        self,
+        operation: dict,
+        *,
+        restore_snapshot: bool = False,
+    ) -> None:
+        """Undo one saved income without touching another user's data.
+
+        The newest operations carry an exact pre-income snapshot. Older records
+        are reversed from their recorded allocations, which preserves the
+        accounting total while leaving unrelated later operations untouched.
+        """
+        if operation.get("type") != "income_distribution":
+            raise ValueError("Можно удалить только поступление дохода.")
+
+        if restore_snapshot and operation.get("state_before"):
+            snapshot = operation["state_before"]
+            old_credit_state = operation.get("credits_before") or {}
+            missing_credits = [
+                credit.name for credit in self.settings.credits
+                if credit.name not in old_credit_state
+            ]
+            if missing_credits:
+                raise ValueError("Настройки долгов изменились; удалить это поступление безопасно нельзя.")
+            self.state = AllocatorState(**snapshot)
+            for credit in self.settings.credits:
+                before = old_credit_state[credit.name]
+                credit.principal_balance = D(before["principal_balance"])
+                credit.status = str(before["status"])
+            return
+
+        allocations = {
+            str(key): D(value)
+            for key, value in (operation.get("allocations") or {}).items()
+        }
+        income, tax = D(operation.get("income", ZERO)), D(operation.get("tax", ZERO))
+        if income <= ZERO:
+            raise ValueError("В истории нет корректной суммы этого дохода.")
+        if self.state.period_income < income or self.state.period_tax < tax:
+            raise ValueError("Этот доход относится к уже закрытому периоду и не может быть удалён автоматически.")
+        early = allocations.get("Досрочное", ZERO)
+        if early > ZERO:
+            raise ValueError("Доход с досрочным погашением можно удалить только из новой записи с защищённым снимком.")
+
+        def subtract(attribute: str, amount: Decimal) -> None:
+            current = D(getattr(self.state, attribute))
+            if amount > current:
+                raise ValueError("Балансы уже изменились, поэтому удалить этот доход безопасно нельзя.")
+            setattr(self.state, attribute, current - amount)
+
+        pillow = allocations.get("Подушка", ZERO)
+        if pillow > self.state.pillow_balance:
+            raise ValueError("Баланс Подушки уже изменился, поэтому удалить этот доход безопасно нельзя.")
+        from_force_majeure = min(pillow, self.state.pillow_force_majeure)
+        self.state.pillow_force_majeure -= from_force_majeure
+        self.state.pillow_minimum -= pillow - from_force_majeure
+
+        subtract("intercontract_reserve", allocations.get("Фонд Зарплаты", ZERO))
+        subtract("pillow_stabilizer", allocations.get("Стабилизатор дохода", ZERO))
+        subtract("investments", allocations.get("Инвестиции", ZERO))
+        subtract("contract_obligations_reserve", sum(
+            (amount for key, amount in allocations.items() if key.startswith("Рабочие обязательства:")),
+            ZERO,
+        ))
+
+        life_total = sum(
+            (
+                amount
+                for key, amount in allocations.items()
+                if key.startswith("КЖ:") or key.startswith("БР:") or key == "Бытовой резерв"
+            ),
+            ZERO,
+        )
+        subtract("life_balance", life_total)
+        subtract("accumulated_minimum_payments", allocations.get("Мин. платеж", ZERO))
+
+        for key, amount in allocations.items():
+            if key.startswith("КЖ:"):
+                name = key[3:]
+                current = D(self.state.period_life_topups.get(name, ZERO))
+                if amount > current:
+                    raise ValueError("Категории жизни уже изменились, поэтому удалить этот доход безопасно нельзя.")
+                self.state.period_life_topups[name] = current - amount
+            if key.startswith("Цели:"):
+                name = key[5:]
+                current = D(self.state.goal_balances.get(name, ZERO))
+                if amount > current:
+                    raise ValueError("Баланс цели уже изменился, поэтому удалить этот доход безопасно нельзя.")
+                self.state.goal_balances[name] = current - amount
+            current = D(self.state.period_allocations.get(key, ZERO))
+            if amount > current:
+                raise ValueError("Итоги периода уже изменились, поэтому удалить этот доход безопасно нельзя.")
+            updated = current - amount
+            if updated > ZERO:
+                self.state.period_allocations[key] = updated
+            else:
+                self.state.period_allocations.pop(key, None)
+
+        self.state.period_income -= income
+        self.state.period_tax -= tax
+        if self.settings.income_rhythm == "cyclic":
+            subtract("cycle_income", income)
+        self.state.reconcile_fund_salary_currencies()
 
     # ========================================================
     # ИНИЦИАЛИЗАЦИЯ
@@ -3388,6 +3499,15 @@ class FinancialAllocator:
 
         self._ensure_life_categories()
 
+        state_before = self._income_rollback_snapshot()
+        credits_before = {
+            credit.name: {
+                "principal_balance": credit.principal_balance,
+                "status": credit.status,
+            }
+            for credit in self.settings.credits
+        }
+
         mode_before = self.active_mode()
         pillow_before = self.state.pillow_minimum + self.state.pillow_force_majeure
         fund_salary_before = self.state.intercontract_reserve
@@ -3682,6 +3802,8 @@ class FinancialAllocator:
                 tax_override is not None
             ),
             "note": note,
+            "state_before": state_before,
+            "credits_before": credits_before,
             "regular_income_part": regular_net,
             "super_income_part": super_net,
             "planned_tax_details": planned_tax_details,

@@ -2006,6 +2006,24 @@ class Database:
         self.connection.commit()
         return True
 
+    def delete_income_operation(
+        self,
+        telegram_id: int,
+        operation_id: int,
+    ) -> bool:
+        """Delete one owned income record after its balances have been rolled back."""
+        cursor = self.connection.execute(
+            """
+            DELETE FROM operation_log
+            WHERE id = ?
+              AND telegram_id = ?
+              AND operation_type = 'income_distribution'
+            """,
+            (operation_id, telegram_id),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
     # ========================================================
     # ЗАГРУЗКА ВСЕГО АЛЛОКАТОРА
     # ========================================================
