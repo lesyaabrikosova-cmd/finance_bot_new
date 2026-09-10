@@ -1178,7 +1178,10 @@ async def save_life_categories(message: Message, state: FSMContext):
             return
         allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
         if old in allocator.state.period_life_topups:
-            allocator.state.period_life_topups[new] = allocator.state.period_life_topups.pop(old)
+            allocator.state.period_life_topups[new] = (
+                allocator.state.period_life_topups.get(new, Decimal("0"))
+                + allocator.state.period_life_topups.pop(old)
+            )
         db.record_envelope_rename(message.from_user.id, allocator, 'КЖ:', old, new)
         db.save_allocator(message.from_user.id, allocator)
         await state.clear()
@@ -1199,7 +1202,10 @@ async def save_life_categories(message: Message, state: FSMContext):
             return
         allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
         if old in allocator.state.period_life_topups:
-            allocator.state.period_life_topups[new] = allocator.state.period_life_topups.pop(old)
+            allocator.state.period_life_topups[new] = (
+                allocator.state.period_life_topups.get(new, Decimal("0"))
+                + allocator.state.period_life_topups.pop(old)
+            )
         db.record_envelope_rename(message.from_user.id, allocator, 'КЖ:', old, new)
         db.save_allocator(message.from_user.id, allocator)
         await state.clear()

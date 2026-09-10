@@ -2015,8 +2015,6 @@ class Database:
             if not isinstance(allocations, dict):
                 continue
             for rename in renames:
-                if rename['id'] <= operation['id']:
-                    continue
                 names = deserialize_json(rename['payload'])
                 old, new = names['old'], names['new']
                 if old in allocations:

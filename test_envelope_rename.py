@@ -24,9 +24,13 @@ class RenameTests(unittest.TestCase):
             a = SimpleNamespace(state=SimpleNamespace(period_allocations={'Цели:А': D(100)}))
             db.record_envelope_rename(42, a, 'Цели:', 'А', 'Б')
             db.record_envelope_rename(42, a, 'Цели:', 'Б', 'В')
+            # A stale write after the rename must still use the current name
+            # when it is read for reports.
+            db.save_operation(42, 'income_distribution', {'allocations': {'Цели:А': '50'}})
             self.assertEqual(a.state.period_allocations, {'Цели:В': D(100)})
-            income = next(o for o in db.load_operations(42) if o['type'] == 'income_distribution')
-            self.assertEqual(income['payload']['allocations'], {'Цели:В': '100'})
+            incomes = [o for o in db.load_operations(42) if o['type'] == 'income_distribution']
+            self.assertEqual(incomes[0]['payload']['allocations'], {'Цели:В': '50'})
+            self.assertEqual(incomes[1]['payload']['allocations'], {'Цели:В': '100'})
             db.connection.close()
 
     def test_normalization_merges_old_and_new_state_aliases(self):
