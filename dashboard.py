@@ -1197,6 +1197,38 @@ def income_history_operations(telegram_id: int) -> list[dict]:
     ]
 
 
+def rebuild_period_analytics_from_history(allocator, telegram_id: int) -> None:
+    """Make chart data match the remaining income ledger after a deletion."""
+    period_income = Decimal("0")
+    period_tax = Decimal("0")
+    allocations: dict[str, Decimal] = {}
+    life_topups = {
+        name: Decimal("0")
+        for name in allocator.settings.life_categories
+    }
+    life_topups.setdefault("Зарплата", Decimal("0"))
+
+    for operation in db.load_operations(telegram_id, limit=1000):
+        if operation.get("type") == "period_reset":
+            break
+        if operation.get("type") != "income_distribution":
+            continue
+        payload = operation.get("payload") or {}
+        period_income += D(payload.get("income", 0))
+        period_tax += D(payload.get("tax", 0))
+        for key, amount in (payload.get("allocations") or {}).items():
+            value = D(amount)
+            allocations[key] = allocations.get(key, Decimal("0")) + value
+            if str(key).startswith("КЖ:"):
+                name = str(key)[3:]
+                life_topups[name] = life_topups.get(name, Decimal("0")) + value
+
+    allocator.state.period_income = period_income
+    allocator.state.period_tax = period_tax
+    allocator.state.period_allocations = allocations
+    allocator.state.period_life_topups = life_topups
+
+
 def income_history_date(operation: dict) -> str:
     payload = operation.get("payload") or {}
     raw_date = payload.get("date") or operation.get("created_at")
@@ -1303,16 +1335,18 @@ async def send_income_history_detail(
     await message.answer(
         income_operation_card_text(operation),
         reply_markup=keyboard([
+            [("Показать распределение", f"incomehistory:distribution:{operation_id}")],
             [
                 (
                     "✎ Заметка" if has_note else "+ Заметка",
                     f"incomehistory:note:{operation_id}",
-                )
+                ),
+                ("Удалить доход", f"incomehistory:delete:{operation_id}"),
             ],
-            [("Показать распределение", f"incomehistory:distribution:{operation_id}")],
-            [("Удалить доход", f"incomehistory:delete:{operation_id}")],
-            [("← К истории", "incomehistory:open")],
-            [("← В главное меню", "menu:back")],
+            [
+                ("← В главное меню", "menu:back"),
+                ("← К истории", "incomehistory:open"),
+            ],
         ]),
     )
     return True
@@ -1546,12 +1580,13 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
         )
         return
 
-    db.save_allocator(callback.from_user.id, restored)
     if not db.delete_income_operation(callback.from_user.id, operation_id):
         await callback.message.answer(
             "Не удалось завершить удаление. Балансы не изменяйте и обратитесь в поддержку."
         )
         return
+    rebuild_period_analytics_from_history(restored, callback.from_user.id)
+    db.save_allocator(callback.from_user.id, restored)
     await state.clear()
     await callback.message.answer(
         "<b>ДОХОД УДАЛЁН</b>\n\n"

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from dashboard import (
     income_distribution_text,
     income_operation_card_text,
+    rebuild_period_analytics_from_history,
     send_income_history,
 )
 from financial_engine import FinancialAllocator, UserSettings
@@ -52,6 +53,23 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<blockquote>", text)
         self.assertLess(text.index("📈"), text.index("❤️ <b>Квартира</b>"))
         self.assertLess(text.index("Квартира"), text.index("Тройка"))
+
+    def test_deletion_rebuilds_chart_totals_from_remaining_ledger(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            life_categories={"Квартира": Decimal("100")},
+        ))
+        remaining = operation()
+        with patch("dashboard.db") as db:
+            db.load_operations.return_value = [remaining, {"type": "period_reset"}]
+            rebuild_period_analytics_from_history(allocator, 42)
+        self.assertEqual(allocator.state.period_income, Decimal("3700"))
+        self.assertEqual(allocator.state.period_tax, Decimal("222"))
+        self.assertEqual(allocator.state.period_allocations["Инвестиции"], Decimal("740"))
 
     def test_latest_income_rollback_restores_the_exact_snapshot(self):
         allocator = FinancialAllocator(UserSettings(

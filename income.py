@@ -689,7 +689,8 @@ async def show_income_confirmation(
         f"{income_date.strftime('%d.%m.%Y')}\n"
         f"{escape(income_type)} — {rub(amount)}\n"
         + (
-            f"📝 Заметка — {escape(str(data['income_note']))}\n"
+            "————————————\n"
+            f"📝 {escape(str(data['income_note']))}\n"
             if data.get("income_note")
             else ""
         )
