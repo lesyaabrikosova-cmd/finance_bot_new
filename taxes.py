@@ -465,15 +465,13 @@ def report_text(
     )
 
 
-def tax_obligations_overview(telegram_id: int, obligations: list[dict]) -> str:
+def tax_obligations_overview(obligations: list[dict]) -> str:
     if not obligations:
         return "У вас нет добавленных налогов."
     lines = ["Добавленные налоги:"]
     for item in obligations:
-        key = tax_obligation_key(item["tax_type"], item["object_name"])
         lines.append(
-            f"• {escape(item['tax_type'])} • {escape(item['object_name'])} — "
-            f"{money(virtual_tax_balance(telegram_id, key))}"
+            f"• {escape(item['tax_type'])} • {escape(item['object_name'])}"
         )
     return "\n".join(lines)
 
@@ -591,7 +589,7 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         detailed,
     )
     obligations = db.load_tax_obligations(telegram_id)
-    text += f"\n\n{tax_obligations_overview(telegram_id, obligations)}"
+    text += f"\n\n{tax_obligations_overview(obligations)}"
     rows = [[("+ Добавить налог", "taxes:add")]]
     rows.append([("✎ Изменить налоги", "taxes:edit")])
     rows.append([("Получено уведомление ФНС", "taxes:notice")])

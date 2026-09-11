@@ -131,7 +131,7 @@ class TaxFeatureTests(unittest.TestCase):
     def test_tax_overview_lists_active_obligations_or_empty_state(self):
         telegram_id = 990001
         self.assertEqual(
-            tax_obligations_overview(telegram_id, []),
+            tax_obligations_overview([]),
             "У вас нет добавленных налогов.",
         )
         obligation_id = db.add_tax_obligation(
@@ -143,8 +143,8 @@ class TaxFeatureTests(unittest.TestCase):
             if item["id"] == obligation_id
         )
         self.assertIn(
-            "• Налог на имущество • Квартира — 1 000 ₽",
-            tax_obligations_overview(telegram_id, [obligation]),
+            "• Налог на имущество • Квартира",
+            tax_obligations_overview([obligation]),
         )
 
     def test_legacy_patent_no_longer_inflates_critical_life_or_reserves(self):
