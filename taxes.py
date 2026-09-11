@@ -467,8 +467,8 @@ def report_text(
 
 def tax_obligations_overview(obligations: list[dict]) -> str:
     if not obligations:
-        return "У вас нет добавленных налогов."
-    lines = ["Добавленные налоги:"]
+        return "<b>ДОБАВЛЕННЫЕ НАЛОГИ</b>\n\nУ вас нет добавленных налогов."
+    lines = ["<b>ДОБАВЛЕННЫЕ НАЛОГИ</b>", ""]
     for item in obligations:
         lines.append(
             f"• {escape(item['tax_type'])} • {escape(item['object_name'])}"
@@ -589,7 +589,7 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         detailed,
     )
     obligations = db.load_tax_obligations(telegram_id)
-    text += f"\n\n{tax_obligations_overview(obligations)}"
+    text += f"\n\n————————————\n{tax_obligations_overview(obligations)}"
     rows = [[("+ Добавить налог", "taxes:add")]]
     rows.append([("✎ Изменить налоги", "taxes:edit")])
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
@@ -1057,9 +1057,7 @@ async def tax_obligation_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(TaxStates.obligation_type)
     await callback.message.answer(
-        "<b>КАКОЙ НАЛОГ НУЖНО НАКОПИТЬ?</b>\n\n"
-        "Все виды налогов учитываются внутри одного общего конверта «Налоги». "
-        "Здесь вы добавляете отдельное обязательство для расчёта суммы и срока.",
+        "<b>КАКОЙ НАЛОГ НУЖНО НАКОПИТЬ?</b>",
         reply_markup=keyboard([
             [("Налог на имущество", "taxgoal:type:property")],
             [("Транспортный налог", "taxgoal:type:transport")],
@@ -1088,9 +1086,10 @@ async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TaxStates.obligation_name)
     if code == "patent":
         prompt = (
-            "<b>ПАТЕНТ</b>\n\n"
-            "Введите название, по которому вы узнаете этот патент.\n"
-            "Например: <b>Ветеринарная клиника — первый платёж</b>."
+            "<b>ПАТЕНТ</b>\n"
+            "——————\n"
+            "<b>→ Введите название, по которому вы узнаете этот патент.</b>\n"
+            "Например: <b>Ветеринарная клиника — 1-й платёж</b>."
         )
     else:
         examples = {
@@ -1146,9 +1145,13 @@ async def tax_obligation_name(message: Message, state: FSMContext):
         due_prompt = (
             f"<b>{escape(name.upper())}</b>\n\n"
             "<b>КОГДА НУЖНО ВНЕСТИ ЭТОТ ПЛАТЁЖ?</b>\n\n"
-            "Введите ближайший срок оплаты, указанный в патенте.\n"
-            "Если патент оплачивается двумя частями, добавьте каждый платёж отдельно.\n\n"
-            "Введите дату в формате <code>ДД.ММ.ГГГГ</code>."
+            "Укажите ближайший срок оплаты, указанный в патенте.\n"
+            "Если патент оплачивается двумя частями, добавьте в список налогов "
+            "каждый платёж отдельно, например:\n"
+            "• Кофейня — 1-й платёж\n"
+            "• Кофейня — 2-й платёж\n"
+            "——————\n"
+            "<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>"
         )
     else:
         due_prompt = (

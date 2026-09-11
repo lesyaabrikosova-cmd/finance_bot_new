@@ -132,7 +132,7 @@ class TaxFeatureTests(unittest.TestCase):
         telegram_id = 990001
         self.assertEqual(
             tax_obligations_overview([]),
-            "У вас нет добавленных налогов.",
+            "<b>ДОБАВЛЕННЫЕ НАЛОГИ</b>\n\nУ вас нет добавленных налогов.",
         )
         obligation_id = db.add_tax_obligation(
             telegram_id, "Налог на имущество", "Квартира", Decimal("12000"),
