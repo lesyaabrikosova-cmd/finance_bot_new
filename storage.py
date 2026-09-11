@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 from typing import Optional
 
@@ -596,6 +596,7 @@ class Database:
                 saved_before TEXT NOT NULL DEFAULT '0',
                 months INTEGER NOT NULL,
                 monthly_amount TEXT NOT NULL,
+                annual_monthly_amount TEXT NOT NULL DEFAULT '0',
                 ready_reminder_sent_at TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (telegram_id)
@@ -634,6 +635,10 @@ class Database:
             cursor.execute("ALTER TABLE tax_obligations ADD COLUMN due_date TEXT")
         if "ready_reminder_sent_at" not in tax_columns:
             cursor.execute("ALTER TABLE tax_obligations ADD COLUMN ready_reminder_sent_at TEXT")
+        if "annual_monthly_amount" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN annual_monthly_amount TEXT NOT NULL DEFAULT '0'"
+            )
 
         state_columns = {
             row["name"]
@@ -2162,6 +2167,28 @@ class Database:
         }
         settings.track_tax_payments = track_payments
 
+        # В старой модели monthly_amount для имущественного налога был
+        # срочным взносом до ближайшего 1 декабря. При первом чтении новой
+        # версии отделяем от него годовую норму, чтобы КМ и резервы сразу
+        # перестали учитывать временное ускорение накопления.
+        annual_property_taxes = {
+            "Налог на имущество", "Транспортный налог", "Земельный налог",
+        }
+        for item in self.load_tax_obligations(telegram_id):
+            if item["tax_type"] not in annual_property_taxes:
+                continue
+            annual_monthly = item["annual_monthly_amount"]
+            if annual_monthly <= Decimal("0"):
+                annual_monthly = (item["target_amount"] / Decimal("12")).quantize(
+                    Decimal("0.01"), rounding=ROUND_CEILING,
+                )
+                self.update_tax_obligation_annual_monthly(
+                    telegram_id, item["id"], annual_monthly,
+                )
+            settings.planned_taxes[
+                f"{item['tax_type']} · {item['object_name']}"
+            ] = annual_monthly
+
         # load_settings создаёт UserSettings до tax_configuration. Поэтому
         # для старого профиля отделяем налоговые взносы здесь, после загрузки
         # реальных обязательств, а не позволяем им попасть в постоянный КМ.
@@ -2172,6 +2199,11 @@ class Database:
             )
         for name, amount in settings.planned_taxes.items():
             settings.set_automatic_life_obligation(f"tax:{name}", amount)
+        if tax_total > Decimal("0"):
+            settings.ensure_life_category_id("Налоги")
+            settings.life_categories["Налоги"] = tax_total
+        else:
+            settings.life_categories.pop("Налоги", None)
 
         # Старые профили хранили временные платежи прямо внутри КМ. Один раз
         # отделяем их от скрытой постоянной основы и дальше пересчитываем КМ
@@ -2328,14 +2360,25 @@ class Database:
         months: int,
         monthly_amount: Decimal,
         due_date: str | None = None,
+        annual_monthly_amount: Decimal | None = None,
     ) -> int:
         self.ensure_user(telegram_id)
+        if annual_monthly_amount is None:
+            if tax_type in {
+                "Налог на имущество", "Транспортный налог", "Земельный налог",
+            }:
+                annual_monthly_amount = (target_amount / Decimal("12")).quantize(
+                    Decimal("0.01"), rounding=ROUND_CEILING,
+                )
+            else:
+                annual_monthly_amount = monthly_amount
         cursor = self.connection.execute(
             """
             INSERT INTO tax_obligations (
                 telegram_id, tax_type, object_name, target_amount,
-                opening_amount, saved_before, months, monthly_amount, due_date, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                opening_amount, saved_before, months, monthly_amount, annual_monthly_amount,
+                due_date, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 telegram_id,
@@ -2346,6 +2389,7 @@ class Database:
                 decimal_to_string(saved_before),
                 months,
                 decimal_to_string(monthly_amount),
+                decimal_to_string(annual_monthly_amount),
                 due_date,
             ),
         )
@@ -2369,6 +2413,7 @@ class Database:
                 "saved_before": string_to_decimal(row["saved_before"]),
                 "months": row["months"],
                 "monthly_amount": string_to_decimal(row["monthly_amount"]),
+                "annual_monthly_amount": string_to_decimal(row["annual_monthly_amount"]),
                 "due_date": row["due_date"],
                 "ready_reminder_sent_at": row["ready_reminder_sent_at"],
                 "active": bool(row["active"]),
@@ -2525,6 +2570,18 @@ class Database:
             WHERE telegram_id = ? AND id = ?
             """,
             (decimal_to_string(monthly_amount), telegram_id, obligation_id),
+        )
+        self.connection.commit()
+
+    def update_tax_obligation_annual_monthly(
+        self, telegram_id: int, obligation_id: int, annual_monthly_amount: Decimal
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tax_obligations SET annual_monthly_amount = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (decimal_to_string(annual_monthly_amount), telegram_id, obligation_id),
         )
         self.connection.commit()
 

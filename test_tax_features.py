@@ -1088,7 +1088,7 @@ class TaxFeatureTests(unittest.TestCase):
             "Урок с Машей",
         )
 
-    def test_completed_tax_goal_stops_future_monthly_target(self):
+    def test_completed_property_tax_keeps_annual_monthly_norm(self):
         telegram_id = 880001
         settings = UserSettings(
             has_debts=False,
@@ -1096,8 +1096,8 @@ class TaxFeatureTests(unittest.TestCase):
             critical_life=Decimal("1000"),
             household_reserve=Decimal("0"),
             average_income=Decimal("1000"),
-            life_categories={"Налоги": Decimal("1000")},
-            planned_taxes={"Налог на имущество · Двушка": Decimal("1000")},
+            life_categories={"Налоги": Decimal("83.34")},
+            planned_taxes={"Налог на имущество · Двушка": Decimal("83.34")},
         )
         allocator = FinancialAllocator(settings)
         db.save_allocator(telegram_id, allocator)
@@ -1111,7 +1111,7 @@ class TaxFeatureTests(unittest.TestCase):
             Decimal("1000"),
         )
         apply_planned_tax_allocation(telegram_id, allocator, Decimal("1000"))
-        self.assertNotIn("Налоги", allocator.settings.life_categories)
+        self.assertEqual(allocator.settings.life_categories["Налоги"], Decimal("83.34"))
         item = db.load_tax_obligations(telegram_id)[0]
         self.assertEqual(item["saved_before"], Decimal("1000"))
         self.assertEqual(item["monthly_amount"], Decimal("0"))
@@ -1128,12 +1128,48 @@ class TaxFeatureTests(unittest.TestCase):
         db.save_allocator(telegram_id, allocator)
         db.add_tax_obligation(
             telegram_id, "Налог на имущество", "Дом", Decimal("3000"),
-            Decimal("1000"), 4, Decimal("500"), "2026-12-01",
+            Decimal("1000"), 4, Decimal("500"), "2026-12-01", Decimal("250"),
         )
         refresh_planned_tax_targets(telegram_id, allocator, date(2026, 9, 1))
         item = db.load_tax_obligations(telegram_id)[0]
         self.assertEqual(item["monthly_amount"], Decimal("1000.00"))
-        self.assertEqual(allocator.settings.life_categories["Налоги"], Decimal("1000.00"))
+        # До ближайшей даты нужно собрать 1 000 ₽ в месяц, но КМ и
+        # резервы растут только из годовой нормы: 3 000 / 12 = 250 ₽.
+        self.assertEqual(allocator.settings.life_categories["Налоги"], Decimal("250.00"))
+        self.assertEqual(
+            allocator.settings.tax_catchups["Налог на имущество · Дом"],
+            Decimal("1000.00"),
+        )
+
+    def test_annual_property_tax_does_not_expand_reserves_by_catchup_amount(self):
+        telegram_id = 880021
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            income_rhythm="irregular",
+            critical_life=Decimal("90000"),
+            household_reserve=Decimal("20000"),
+            average_income=Decimal("180000"),
+            force_majeure_months=Decimal("4"),
+            stabilizer_target_months=Decimal("1"),
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        db.add_tax_obligation(
+            telegram_id, "Земельный налог", "Дача", Decimal("7000"),
+            Decimal("0"), 2, Decimal("3500"), "2026-12-01",
+        )
+
+        allocator = db.load_allocator(telegram_id)
+        self.assertEqual(allocator.settings.critical_life, Decimal("90583.34"))
+        self.assertEqual(allocator.settings.force_majeure_limit, Decimal("362333.36"))
+        self.assertEqual(allocator.settings.stabilizer_full_limit, Decimal("110583.34"))
+
+        refresh_planned_tax_targets(telegram_id, allocator, date(2026, 9, 1))
+        self.assertEqual(
+            allocator.settings.tax_catchups["Земельный налог · Дача"],
+            Decimal("3500.00"),
+        )
 
     def test_property_taxes_are_ready_one_month_before_payment_deadline(self):
         due = date(2026, 12, 1)

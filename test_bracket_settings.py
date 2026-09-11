@@ -106,7 +106,8 @@ class BracketPresentationTests(unittest.TestCase):
                                                      "saved_before": D(0), "monthly_amount": D(5)}]
             refresh_planned_tax_targets(42, a, date(2026, 9, 9), persist=False)
             db.update_tax_obligation_monthly.assert_not_called()
-            self.assertEqual(a.settings.planned_taxes["Налог · Дом"], D(100))
+            self.assertEqual(a.settings.planned_taxes["Налог · Дом"], D(5))
+            self.assertEqual(a.settings.tax_catchups["Налог · Дом"], D(100))
 
 
 class BracketSettingsFlowTests(unittest.IsolatedAsyncioTestCase):

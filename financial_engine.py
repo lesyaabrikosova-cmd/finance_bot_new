@@ -635,6 +635,9 @@ class UserSettings:
     # Ключ — понятное пользователю обязательство/объект,
     # значение — его среднемесячная сумма.
     planned_taxes: Dict[str, Decimal] = field(default_factory=dict)
+    # Временный взнос до ближайшего срока оплаты. Он участвует в порядке
+    # распределения дохода, но не входит в КМ и не раздувает резервы.
+    tax_catchups: Dict[str, Decimal] = field(default_factory=dict)
     track_tax_payments: bool = False
 
     # ----------------------------
@@ -761,6 +764,11 @@ class UserSettings:
         self.planned_taxes = {
             name: D(amount)
             for name, amount in self.planned_taxes.items()
+        }
+        self.tax_catchups = {
+            name: max(ZERO, D(amount))
+            for name, amount in self.tax_catchups.items()
+            if max(ZERO, D(amount)) > ZERO
         }
         self.automatic_life_obligations = {
             str(name): max(ZERO, D(amount))
@@ -3195,7 +3203,14 @@ class FinancialAllocator:
         # Налоги на имущество, транспорт и землю должны быть собраны к дате,
         # а не получать случайную долю КМ. Сначала закрываем месячный взнос,
         # затем распределяем оставшуюся сумму по обычным категориям жизни.
-        planned_tax_monthly = sum(self.settings.planned_taxes.values(), ZERO)
+        planned_tax_monthly = sum(
+            (
+                self.settings.tax_catchups
+                if self.settings.tax_catchups
+                else self.settings.planned_taxes
+            ).values(),
+            ZERO,
+        )
         if planned_tax_monthly > ZERO and "Налоги" in self.life_category_targets():
             already_saved = D(self.state.period_life_topups.get("Налоги", ZERO))
             priority_tax = min(amount, max(ZERO, planned_tax_monthly - already_saved))
@@ -3899,10 +3914,15 @@ class FinancialAllocator:
 
         planned_tax_details: Dict[str, Decimal] = {}
         planned_tax_allocation = D(allocations.get("КЖ:Налоги", ZERO))
-        planned_tax_target = sum(self.settings.planned_taxes.values(), ZERO)
+        planned_tax_targets = (
+            self.settings.tax_catchups
+            if self.settings.tax_catchups
+            else self.settings.planned_taxes
+        )
+        planned_tax_target = sum(planned_tax_targets.values(), ZERO)
         if planned_tax_allocation > ZERO and planned_tax_target > ZERO:
             distributed_tax = ZERO
-            tax_items = list(self.settings.planned_taxes.items())
+            tax_items = list(planned_tax_targets.items())
             for index, (name, target) in enumerate(tax_items):
                 share = (
                     planned_tax_allocation - distributed_tax
