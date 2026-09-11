@@ -53,6 +53,7 @@ from taxes import (  # noqa: E402
     make_pie_chart,
     refresh_planned_tax_targets,
     report_text,
+    TAX_COLORS,
     tax_funding_date,
     tax_months_remaining,
 )
@@ -998,7 +999,7 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(result["Налог на имущество · Двушка"], Decimal("500.00"))
         self.assertEqual(result["Налог на имущество · Однушка"], Decimal("300.00"))
 
-    def test_empty_tax_report_uses_zero_percent(self):
+    def test_tax_report_leaves_amounts_to_diagram_and_uses_current_years(self):
         groups = {
             name: {"total": Decimal("0"), "details": {}}
             for name in (
@@ -1009,7 +1010,15 @@ class TaxFeatureTests(unittest.TestCase):
             )
         }
         text = report_text(groups, Decimal("0"), 2026, Decimal("0"), None, True)
-        self.assertIn("Налог на доход — 0,00 ₽ (0.0%)", text)
+        due_year = annual_tax_due_date().year
+        self.assertIn("Налог на доход</b> платите", text)
+        self.assertIn(f"за <b>{due_year - 1}</b> год", text)
+        self.assertIn(f"до 1 декабря {due_year} года", text)
+        self.assertNotIn("0 ₽", text)
+        self.assertEqual(TAX_COLORS["Налог на доход"], "#7656D8")
+        self.assertEqual(TAX_COLORS["Транспортный налог"], "#7A7F87")
+        self.assertEqual(TAX_COLORS["Налог на имущество"], "#E2B93B")
+        self.assertEqual(TAX_COLORS["Земельный налог"], "#8B5A2B")
         self.assertIsNone(make_pie_chart(groups))
 
     def test_income_operation_keeps_planned_tax_breakdown(self):

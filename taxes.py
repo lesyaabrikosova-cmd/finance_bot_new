@@ -70,9 +70,9 @@ TAX_GROUPS = (
 
 TAX_COLORS = {
     "Налог на доход": "#7656D8",
-    "Налог на имущество": "#4F9DD9",
-    "Транспортный налог": "#D89B3C",
-    "Земельный налог": "#58A66B",
+    "Налог на имущество": "#E2B93B",
+    "Транспортный налог": "#7A7F87",
+    "Земельный налог": "#8B5A2B",
 }
 
 
@@ -294,30 +294,17 @@ def report_text(
     calculated_balance: Decimal | None,
     detailed: bool,
 ) -> str:
-    lines = [
-        "<b>НАЛОГИ</b>",
-        "",
-        f"Отложено ботом за {year} год — <b>{money(annual_total)}</b>",
-    ]
-    if calculated_balance is not None:
-        lines.append(f"Расчётный остаток в конверте — <b>{money(calculated_balance)}</b>")
-        lines.append(f"Отмечено оплаченным за {year} год — <b>{money(annual_payments)}</b>")
-    lines.append("")
-
-    for name in TAX_GROUPS:
-        amount = groups[name]["total"]
-        if amount <= ZERO and annual_total > ZERO:
-            continue
-        percent = ZERO if annual_total <= ZERO else amount * Decimal("100") / annual_total
-        lines.append(f"<b>{name} — {money(amount)} ({percent.quantize(Decimal('0.1'))}%)</b>")
-        details = groups[name]["details"]
-        if detailed and details:
-            for detail, value in details.items():
-                lines.append(f"• {escape(str(detail))} — {money(value)}")
-        elif detailed:
-            lines.append("• Не настроен")
-        lines.append("")
-    return "\n".join(lines).rstrip()
+    # Суммы, доли и виды налогов уже находятся на диаграмме. Под ней
+    # оставляем только постоянную подсказку о сроках оплаты.
+    due_year = annual_tax_due_date().year
+    tax_year = due_year - 1
+    return (
+        "🏛️ <b>НАЛОГИ</b>\n\n"
+        "<b>Налог на доход</b> платите по графику своего налогового режима.\n\n"
+        "На <b>квартиру, машину и землю</b> сейчас копим налог за "
+        f"<b>{tax_year}</b> год. Его нужно заплатить "
+        f"<b>до 1 декабря {due_year} года</b>."
+    )
 
 
 async def show_taxes(message: Message, telegram_id: int, detailed: bool = False) -> None:
@@ -340,8 +327,7 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         calculated_balance,
         detailed,
     )
-    rows = [[("Подробнее" if not detailed else "Кратко", "taxes:details" if not detailed else "taxes:summary")]]
-    rows.append([("Добавить налог", "taxes:add"), ("Изменить налоги", "taxes:edit")])
+    rows = [[("Добавить налог", "taxes:add"), ("Изменить налоги", "taxes:edit")]]
     rows.append([("Отметить оплату", "taxes:payment")])
     # Это разовая миграция для профилей, созданных до разделения КМ на
     # постоянную основу и временные обязательства. После ручного изменения
@@ -363,10 +349,6 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         rows.append([("Учитывать оплаты", "taxes:tracking:on")])
     rows.append([("Назад", "taxes:back")])
 
-    text += ("\n\n——————\n\n"
-             "<b>P.S.</b> Налог на <b>доход</b> платите по графику своего налогового режима. "
-             "Налоги на <b>квартиру, машину и землю</b> за "
-             f"{year} год нужно будет заплатить <b>до 1 декабря {year + 1} года</b>.")
     tax_values = {name: data["total"] for name, data in groups.items() if data["total"] > ZERO}
     await send_chart_report(
         message, tax_values,
