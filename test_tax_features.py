@@ -1273,6 +1273,61 @@ class TaxFeatureTests(unittest.TestCase):
         db.save_tax_payment(telegram_id, key, Decimal("1200"))
         self.assertEqual(virtual_tax_balance(telegram_id, key), Decimal("3800"))
 
+    def test_tax_rename_keeps_historical_balance_under_new_name(self):
+        telegram_id = 880030
+        old_key = "Земельный налог · Дача"
+        new_key = "Земельный налог · Участок"
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Земельный налог", "Дача", Decimal("800"),
+            Decimal("100"), 2, Decimal("350"), "2026-12-01",
+        )
+        db.save_operation(telegram_id, "income_distribution", {
+            "type": "income_distribution",
+            "date": "2026-09-01",
+            "planned_tax_details": {old_key: "300"},
+            "allocations": {"КЖ:Налоги": "300"},
+        })
+        db.save_tax_payment(
+            telegram_id, old_key, Decimal("50"), obligation_id=obligation_id,
+        )
+
+        db.rename_tax_obligation(
+            telegram_id, "Земельный налог", "Дача", "Участок",
+        )
+
+        item = next(
+            row for row in db.load_tax_obligations(telegram_id)
+            if row["id"] == obligation_id
+        )
+        self.assertEqual(item["object_name"], "Участок")
+        self.assertEqual(virtual_tax_balance(telegram_id, old_key), Decimal("0"))
+        self.assertEqual(virtual_tax_balance(telegram_id, new_key), Decimal("350"))
+        self.assertEqual(db.load_tax_payments(telegram_id)[0]["tax_name"], new_key)
+
+    def test_tax_plan_amount_update_is_persisted(self):
+        telegram_id = 880031
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Транспортный налог", "Автомобиль", Decimal("12000"),
+            Decimal("8000"), 2, Decimal("2000"), "2026-12-01",
+            Decimal("1000"),
+        )
+        db.update_tax_obligation_plan(
+            telegram_id,
+            obligation_id,
+            target_amount=Decimal("14400"),
+            months=1,
+            monthly_amount=Decimal("6400"),
+            annual_monthly_amount=Decimal("1200"),
+        )
+        item = next(
+            row for row in db.load_tax_obligations(telegram_id)
+            if row["id"] == obligation_id
+        )
+        self.assertEqual(item["target_amount"], Decimal("14400"))
+        self.assertEqual(item["months"], 1)
+        self.assertEqual(item["monthly_amount"], Decimal("6400"))
+        self.assertEqual(item["annual_monthly_amount"], Decimal("1200"))
+
     def test_notice_flag_survives_storage_round_trip(self):
         telegram_id = 880023
         obligation_id = db.add_tax_obligation(

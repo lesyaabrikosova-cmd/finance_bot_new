@@ -2610,6 +2610,73 @@ class Database:
         )
         self.connection.commit()
 
+    def rename_tax_obligation(
+        self,
+        telegram_id: int,
+        tax_type: str,
+        old_name: str,
+        new_name: str,
+    ) -> None:
+        """Rename one tax object without splitting its historical balance."""
+        old_key = f"{tax_type} · {old_name}"
+        new_key = f"{tax_type} · {new_name}"
+        rows = self.connection.execute(
+            "SELECT id, payload FROM operation_log WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchall()
+        for row in rows:
+            payload = deserialize_json(row["payload"])
+            details = payload.get("planned_tax_details")
+            if not isinstance(details, dict) or old_key not in details:
+                continue
+            old_value = string_to_decimal(details.pop(old_key))
+            new_value = string_to_decimal(details.get(new_key, "0"))
+            details[new_key] = decimal_to_string(old_value + new_value)
+            self.connection.execute(
+                "UPDATE operation_log SET payload = ? WHERE id = ? AND telegram_id = ?",
+                (serialize_json(payload), row["id"], telegram_id),
+            )
+        self.connection.execute(
+            """
+            UPDATE tax_obligations SET object_name = ?
+            WHERE telegram_id = ? AND tax_type = ? AND object_name = ?
+            """,
+            (new_name, telegram_id, tax_type, old_name),
+        )
+        self.connection.execute(
+            "UPDATE tax_payments SET tax_name = ? WHERE telegram_id = ? AND tax_name = ?",
+            (new_key, telegram_id, old_key),
+        )
+        self.connection.commit()
+
+    def update_tax_obligation_plan(
+        self,
+        telegram_id: int,
+        obligation_id: int,
+        *,
+        target_amount: Decimal,
+        months: int,
+        monthly_amount: Decimal,
+        annual_monthly_amount: Decimal,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tax_obligations
+            SET target_amount = ?, months = ?, monthly_amount = ?,
+                annual_monthly_amount = ?
+            WHERE telegram_id = ? AND id = ? AND active = 1
+            """,
+            (
+                decimal_to_string(target_amount),
+                int(months),
+                decimal_to_string(monthly_amount),
+                decimal_to_string(annual_monthly_amount),
+                telegram_id,
+                obligation_id,
+            ),
+        )
+        self.connection.commit()
+
     def update_tax_obligation_saved(
         self,
         telegram_id: int,
