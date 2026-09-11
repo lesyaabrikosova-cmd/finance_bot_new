@@ -30,6 +30,16 @@ def tax_obligation_key(tax_type: str, object_name: str) -> str:
     return f"{tax_type} · {object_name}"
 
 
+def parse_tax_object_name(text: str | None) -> str | None:
+    """Return a clean human-readable name, rejecting amounts and commands."""
+    value = " ".join((text or "").split())
+    if not 2 <= len(value) <= 60:
+        return None
+    if value.startswith("/") or not any(char.isalpha() for char in value):
+        return None
+    return value
+
+
 def set_tax_monthly_target(allocator, key: str, monthly: Decimal) -> None:
     """Synchronise the recurring annual tax norm with the hidden part of KМ."""
     monthly = max(ZERO, Decimal(str(monthly)))
@@ -726,9 +736,13 @@ async def tax_payment_obligation(callback: CallbackQuery, state: FSMContext):
 
 @router.message(TaxStates.payment_name)
 async def tax_payment_name(message: Message, state: FSMContext):
-    name = (message.text or "").strip()
-    if len(name) < 2:
-        await message.answer("Введите понятное название налога.")
+    name = parse_tax_object_name(message.text)
+    if name is None:
+        await message.answer(
+            "Здесь нужно название налога или объекта, а не сумма.\n\n"
+            "Например: <b>Дача</b>, <b>Автомобиль</b>, <b>Квартира</b> "
+            "или <b>Патент № 1</b>."
+        )
         return
     await state.update_data(tax_payment_name=name)
     await state.set_state(TaxStates.payment_amount)
@@ -981,9 +995,13 @@ async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
 
 @router.message(TaxStates.obligation_name)
 async def tax_obligation_name(message: Message, state: FSMContext):
-    name = (message.text or "").strip()
-    if len(name) < 2:
-        await message.answer("Введите понятное название.")
+    name = parse_tax_object_name(message.text)
+    if name is None:
+        await message.answer(
+            "Здесь нужно название объекта или обязательства, а не сумма.\n\n"
+            "Например: <b>Дача</b>, <b>Автомобиль</b>, <b>Квартира</b> "
+            "или <b>Патент № 1</b>."
+        )
         return
     await state.update_data(tax_goal_name=name)
     data = await state.get_data()
@@ -1308,9 +1326,13 @@ async def tax_obligation_edit_name(callback: CallbackQuery, state: FSMContext):
 
 @router.message(TaxStates.edit_obligation_name)
 async def tax_obligation_save_name(message: Message, state: FSMContext):
-    new_name = (message.text or "").strip()
-    if len(new_name) < 2 or len(new_name) > 60:
-        await message.answer("Введите название длиной от 2 до 60 символов.")
+    new_name = parse_tax_object_name(message.text)
+    if new_name is None:
+        await message.answer(
+            "Здесь нужно название объекта или обязательства, а не сумма.\n\n"
+            "Например: <b>Дача</b>, <b>Автомобиль</b>, <b>Квартира</b> "
+            "или <b>Патент № 1</b>."
+        )
         return
     data = await state.get_data()
     obligation_id = int(data.get("tax_edit_obligation_id", 0))

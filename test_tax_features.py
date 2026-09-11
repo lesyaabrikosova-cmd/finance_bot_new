@@ -56,6 +56,7 @@ from taxes import (  # noqa: E402
     calculate_payment_progress,
     collect_tax_statistics,
     make_pie_chart,
+    parse_tax_object_name,
     reconcile_tax_obligation_balances,
     refresh_planned_tax_targets,
     report_text,
@@ -78,6 +79,15 @@ from storage import (  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_tax_object_name_rejects_amounts_and_normalizes_valid_names(self):
+        self.assertIsNone(parse_tax_object_name("1000"))
+        self.assertIsNone(parse_tax_object_name("1 000 ₽"))
+        self.assertIsNone(parse_tax_object_name("01.12.2026"))
+        self.assertIsNone(parse_tax_object_name("/menu"))
+        self.assertIsNone(parse_tax_object_name("—"))
+        self.assertEqual(parse_tax_object_name("  Дача   2 "), "Дача 2")
+        self.assertEqual(parse_tax_object_name("Патент № 1"), "Патент № 1")
+
     def test_legacy_tax_tables_receive_cycle_and_reminder_columns(self):
         with tempfile.TemporaryDirectory() as data_dir:
             database_path = os.path.join(data_dir, "legacy.db")
