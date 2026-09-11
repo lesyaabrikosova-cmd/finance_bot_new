@@ -459,13 +459,12 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         calculated_balance,
         detailed,
     )
-    rows = [[("+ Добавить налог", "taxes:add"), ("✎ Изменить налоги", "taxes:edit")]]
+    rows = [[("+ Добавить налог", "taxes:add")]]
+    rows.append([("✎ Изменить налоги", "taxes:edit")])
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
     rows.append([("Налог оплачен", "taxes:payment")])
-    rows.append([
-        ("← Главное меню", "taxes:back"),
-        ("ℹ️ Как это работает", "taxes:help"),
-    ])
+    rows.append([("← Главное меню", "taxes:back")])
+    rows.append([("ℹ️ Как это работает", "taxes:help")])
 
     tax_values = {name: data["total"] for name, data in groups.items() if data["total"] > ZERO}
     await send_chart_report(
@@ -1290,8 +1289,11 @@ async def show_tax_obligation(message: Message, telegram_id: int, obligation_id:
                 ("✎ Название", f"taxgoal:edit_name:{obligation_id}"),
                 ("✎ Сумма", f"taxgoal:edit_amount:{obligation_id}"),
             ],
-            [("Удалить из плана", f"taxgoal:delete:{obligation_id}")],
-            [("← Назад", "taxes:edit")],
+            [("🗑️ Удалить из плана", f"taxgoal:delete:{obligation_id}")],
+            [
+                ("← Главное меню", "taxes:back"),
+                ("← Назад", "taxes:edit"),
+            ],
         ]),
     )
 
@@ -1477,7 +1479,7 @@ async def tax_obligation_delete_confirm(callback: CallbackQuery):
         "из Критического минимума. "
         "История уже внесённых пополнений и оплат сохранится.",
         reply_markup=keyboard([
-            [("Удалить налог", f"taxgoal:delete_confirm:{obligation_id}")],
+            [("🗑️ Удалить налог", f"taxgoal:delete_confirm:{obligation_id}")],
             [("✖️ Отмена", f"taxgoal:view:{obligation_id}")],
         ]),
     )

@@ -182,7 +182,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
             ] if allocator.profile_id == "cyclic" else []),
             [(dev_button, "settings:developer")],
             [("🗑 Полный сброс учёта", "settings:full_reset")],
-            *([[("🧹 Удалить профиль и всю историю", "settings:erase_all")]] if s.developer_mode else []),
+            *([[("🗑️ Удалить профиль и всю историю", "settings:erase_all")]] if s.developer_mode else []),
             [("🔄 Пройти настройку заново", "setup:restart")],
             [("⬅️ Главное меню", "menu:back")],
         ]),
@@ -994,7 +994,7 @@ async def income_type_view(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard([
             [("Изменить название", "incomesettings:rename")],
             [("Изменить налог", "incomesettings:rerate")],
-            [("Удалить", "incomesettings:delete")],
+            [("🗑️ Удалить", "incomesettings:delete")],
             [("← Назад", "settings:income_types")],
         ]),
     )
@@ -1062,7 +1062,7 @@ async def income_type_delete(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"Удалить тип дохода <b>{escape(name)}</b>? История поступлений сохранится.",
         reply_markup=keyboard([
-            [("Удалить", "incomesettings:delete:confirm"), ("Отмена", "incomesettings:cancel")],
+            [("🗑️ Удалить", "incomesettings:delete:confirm"), ("Отмена", "incomesettings:cancel")],
         ]),
     )
 
@@ -1211,7 +1211,7 @@ async def open_life_category(callback: CallbackQuery, state: FSMContext):
         f"<b>{escape(name)}</b>\n\nСумма в Критическом минимуме — <b>{rub(amount)}</b>.",
         reply_markup=keyboard([
             [("Переименовать", f"settings:life_rename:{name}"), ("Изменить сумму", f"settings:life_amount:{name}")],
-            [("Удалить категорию", f"settings:life_delete:{name}")],
+            [("🗑️ Удалить категорию", f"settings:life_delete:{name}")],
             [("← Назад к категориям", "settings:life_categories")],
         ]),
     )
@@ -1467,7 +1467,7 @@ async def ask_erase_all(callback: CallbackQuery, state: FSMContext):
         "После удаления отправьте /start, чтобы пройти настройку с нуля.\n"
         "Старые сообщения в Telegram останутся, но данные в боте будут удалены.",
         reply_markup=keyboard([
-            [("Удалить всё и начать с нуля", "settings:erase_all_confirm")],
+            [("🗑️ Удалить всё и начать с нуля", "settings:erase_all_confirm")],
             [("Отмена", "settings:full_reset_cancel")],
         ]),
     )

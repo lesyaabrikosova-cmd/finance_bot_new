@@ -1970,7 +1970,7 @@ async def profile_income_view(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard([
             [("Изменить название", f"profileincome:editname:{index}")],
             [("Изменить налог", f"profileincome:edittax:{index}")],
-            [("Удалить", f"profileincome:delete:{index}")],
+            [("🗑️ Удалить", f"profileincome:delete:{index}")],
             [("← Назад", "profileincome:back")],
         ]),
     )
@@ -4790,7 +4790,7 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
     if data.get("combined_life_onboarding") and not has_deadline:
         rows.append([("Перенести в Бытовой резерв", f"lifemove:br:{index}")])
     rows.extend([
-        [("Удалить", f"kmedit:delete:{index}")],
+        [("🗑️ Удалить", f"kmedit:delete:{index}")],
         [("← Назад", "lifeedit:list" if data.get("combined_life_onboarding") else "kmedit:list")],
     ])
     await callback.message.answer(
@@ -5497,7 +5497,7 @@ async def save_br_item(message: Message, state: FSMContext, months: Decimal):
     index = len(items) - 1
     await message.answer(
         f"<b>{escape(item['name'])}</b> — {rub(amount)} {input_period_label(months)}",
-        reply_markup=keyboard([[('Изменить', f'bredit:item:{index}'), ('Удалить', f'bredit:delete:{index}')]])
+        reply_markup=keyboard([[('Изменить', f'bredit:item:{index}'), ('🗑️ Удалить', f'bredit:delete:{index}')]])
     )
     await show_br_menu(message, state)
 
@@ -5605,7 +5605,7 @@ async def br_edit_item(callback: CallbackQuery, state: FSMContext):
     elif item.get("category") == "subscriptions":
         rows.append([('Вернуть в Критический минимум', f'brmove:km:{index}')])
     rows.extend([
-        [('Удалить',f'bredit:delete:{index}')],
+        [('🗑️ Удалить',f'bredit:delete:{index}')],
         [('← Назад','lifeedit:list' if data.get("combined_life_onboarding") else 'bredit:list')],
     ])
     pass_details = (

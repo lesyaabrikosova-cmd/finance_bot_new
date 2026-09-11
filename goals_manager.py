@@ -687,7 +687,7 @@ async def view_position(callback: CallbackQuery):
     if goal.status == "archived":
         actions.append([("Вернуть из архива", f"goalmanage:restore:{index}")])
     if not goal.is_system_chest:
-        actions.append([("Удалить", f"goalmanage:delete:ask:{index}")])
+        actions.append([("🗑️ Удалить", f"goalmanage:delete:ask:{index}")])
     else:
         actions.append([("ℹ️ Постоянный Сундук", f"goalmanage:system_chest:{index}")])
     actions.append([("← Назад", "goals:manage")])
@@ -931,7 +931,7 @@ async def ask_delete_position(callback: CallbackQuery):
     await callback.message.answer(
         f"Удалить {icon(goal)} <b>{escape(display_name(goal))}</b>? Это действие нельзя отменить.",
         reply_markup=keyboard([
-            [("Удалить", f"goalmanage:delete:yes:{index}")],
+            [("🗑️ Удалить", f"goalmanage:delete:yes:{index}")],
             [("✖️ Отмена", "goals:manage")],
         ]),
     )

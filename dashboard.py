@@ -1379,7 +1379,7 @@ async def send_income_history_detail(
                     "✎ Заметка" if has_note else "+ Заметка",
                     f"incomehistory:note:{operation_id}",
                 ),
-                ("Удалить доход", f"incomehistory:delete:{operation_id}"),
+                ("🗑️ Удалить доход", f"incomehistory:delete:{operation_id}"),
             ],
             [
                 ("← Главное меню", "menu:back"),
@@ -1566,7 +1566,7 @@ async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard([
             [
                 ("✗ Отмена", f"incomehistory:delete_cancel:{operation_id}"),
-                ("Удалить доход", f"incomehistory:delete_confirm:{operation_id}"),
+                ("🗑️ Удалить доход", f"incomehistory:delete_confirm:{operation_id}"),
             ],
             [("← К доходу", f"incomehistory:detail:{operation_id}")],
         ]),

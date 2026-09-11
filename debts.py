@@ -167,7 +167,7 @@ async def debt_view(callback: CallbackQuery, state: FSMContext):
         if suggested > 0:
             rows.append([("Погасить из Подушки", f"debt:pillow:{index}")])
         rows.append([("Закрыть полностью", f"debt:closeask:{index}")])
-    rows.extend([[("Удалить запись", f"debt:deleteask:{index}")], [("← К долгам", "menu:credits")]])
+    rows.extend([[('🗑️ Удалить запись', f'debt:deleteask:{index}')], [("← К долгам", "menu:credits")]])
     await callback.message.answer(
         f"<b>{credit.name.upper()}</b>\n\n"
         f"Остаток — <b>{fmt_money(credit.principal_balance)} ₽</b>\n"
@@ -315,7 +315,7 @@ async def debt_delete_ask(callback: CallbackQuery):
     index = int(callback.data.rsplit(":", 1)[1])
     await callback.message.answer(
         "Удалить запись о долге? Историю этой записи восстановить автоматически не получится.",
-        reply_markup=keyboard([[('Удалить запись', f'debt:delete:{index}')], [('← Назад', f'debt:view:{index}')]]),
+        reply_markup=keyboard([[('🗑️ Удалить запись', f'debt:delete:{index}')], [('← Назад', f'debt:view:{index}')]]),
     )
 
 
