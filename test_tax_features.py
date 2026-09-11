@@ -51,6 +51,7 @@ from onboarding import (  # noqa: E402
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets  # noqa: E402
 from taxes import (  # noqa: E402
     annual_tax_due_date,
+    annual_tax_monthly_norm,
     apply_planned_tax_allocation,
     calculate_notice_plan,
     calculate_payment_progress,
@@ -65,6 +66,8 @@ from taxes import (  # noqa: E402
     tax_funding_date,
     tax_months_remaining,
     tax_notice_months_remaining,
+    tax_obligation_card_text,
+    tax_obligations_overview,
     virtual_tax_balance,
 )
 from financial_engine import AllocatorState, FinancialAllocator, Goal, PhaseLifeBudget, UserSettings  # noqa: E402
@@ -87,6 +90,110 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertIsNone(parse_tax_object_name("—"))
         self.assertEqual(parse_tax_object_name("  Дача   2 "), "Дача 2")
         self.assertEqual(parse_tax_object_name("Патент № 1"), "Патент № 1")
+
+    def test_property_tax_card_explains_only_accelerated_saving(self):
+        item = {
+            "tax_type": "Налог на имущество",
+            "object_name": "Хата",
+            "target_amount": Decimal("12000"),
+            "monthly_amount": Decimal("6000"),
+            "annual_monthly_amount": Decimal("1000"),
+            "due_date": "2026-12-01",
+        }
+        text = tax_obligation_card_text(item, Decimal("0"))
+        self.assertIn("Сейчас откладываем — 6 000 ₽/мес", text)
+        self.assertIn("Если бы копили весь год", text)
+        self.assertIn("До 1 ноября предварительная сумма будет собрана.", text)
+        self.assertIn("До 1 декабря — налог должен быть оплачен.", text)
+
+        item["monthly_amount"] = Decimal("1000")
+        self.assertNotIn(
+            "Если бы копили весь год",
+            tax_obligation_card_text(item, Decimal("0")),
+        )
+
+    def test_patent_is_a_dated_payment_without_annual_reserve_norm(self):
+        item = {
+            "tax_type": "Патент",
+            "object_name": "Ветеринарка",
+            "target_amount": Decimal("60000"),
+            "monthly_amount": Decimal("30000"),
+            "annual_monthly_amount": Decimal("30000"),
+            "due_date": "2026-11-11",
+        }
+        self.assertEqual(annual_tax_monthly_norm(item), Decimal("0"))
+        text = tax_obligation_card_text(item, Decimal("0"), show_changes=True)
+        self.assertIn("До 11 ноября — патент должен быть оплачен.", text)
+        self.assertIn("Критический минимум и резервы не изменились.", text)
+        self.assertNotIn("предварительная сумма", text)
+        self.assertNotIn("Годовая норма", text)
+
+    def test_tax_overview_lists_active_obligations_or_empty_state(self):
+        telegram_id = 990001
+        self.assertEqual(
+            tax_obligations_overview(telegram_id, []),
+            "У вас нет добавленных налогов.",
+        )
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Налог на имущество", "Квартира", Decimal("12000"),
+            Decimal("1000"), 10, Decimal("1100"), "2026-12-01", Decimal("1000"),
+        )
+        obligation = next(
+            item for item in db.load_tax_obligations(telegram_id)
+            if item["id"] == obligation_id
+        )
+        self.assertIn(
+            "• Налог на имущество • Квартира — 1 000 ₽",
+            tax_obligations_overview(telegram_id, [obligation]),
+        )
+
+    def test_legacy_patent_no_longer_inflates_critical_life_or_reserves(self):
+        telegram_id = 990002
+        key = "Патент · Ветеринарка"
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            income_rhythm="irregular",
+            critical_life=Decimal("120000"),
+            average_income=Decimal("180000"),
+            base_critical_life=Decimal("90000"),
+            automatic_life_obligations={f"tax:{key}": Decimal("30000")},
+            planned_taxes={key: Decimal("30000")},
+            household_reserve=Decimal("20000"),
+            force_majeure_months=Decimal("4"),
+            stabilizer_target_months=Decimal("1"),
+        )
+        db.save_allocator(telegram_id, FinancialAllocator(settings))
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Патент", "Ветеринарка", Decimal("60000"),
+            Decimal("0"), 2, Decimal("30000"), "2026-11-11", Decimal("30000"),
+        )
+
+        allocator = db.load_allocator(telegram_id)
+        self.assertEqual(allocator.settings.critical_life, Decimal("90000.00"))
+        self.assertEqual(allocator.settings.household_life, Decimal("110000.00"))
+        self.assertEqual(allocator.settings.force_majeure_limit, Decimal("360000.00"))
+        self.assertNotIn(key, allocator.settings.planned_taxes)
+        item = next(
+            row for row in db.load_tax_obligations(telegram_id)
+            if row["id"] == obligation_id
+        )
+        self.assertEqual(item["annual_monthly_amount"], Decimal("0"))
+
+    def test_dated_tax_catchup_is_allocated_without_permanent_life_category(self):
+        key = "Патент · Ветеринарка"
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("10000"),
+            average_income=Decimal("20000"),
+            household_reserve=Decimal("0"),
+            tax_catchups={key: Decimal("1000")},
+        ))
+        allocations = {}
+        allocator._allocate_to_life(Decimal("2000"), allocations)
+        self.assertEqual(allocations["КЖ:Налоги"], Decimal("1000"))
+        self.assertEqual(allocations["КЖ:Зарплата"], Decimal("1000"))
 
     def test_legacy_tax_tables_receive_cycle_and_reminder_columns(self):
         with tempfile.TemporaryDirectory() as data_dir:

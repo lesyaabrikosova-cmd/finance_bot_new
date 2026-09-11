@@ -62,14 +62,17 @@ def annual_tax_monthly_norm(item: dict) -> Decimal:
     `monthly_amount` is deliberately not used here: it is a temporary
     catch-up amount needed before the next payment date.
     """
+    # Only property, transport and land taxes are predictable annual household
+    # costs. Patent and custom dated payments are temporary obligations: their
+    # catch-up belongs in the tax envelope, but must not inflate KМ or reserves.
+    if item["tax_type"] not in ANNUAL_PROPERTY_TAXES:
+        return ZERO
     stored = Decimal(str(item.get("annual_monthly_amount", ZERO)))
     if stored > ZERO:
         return stored
-    if item["tax_type"] in ANNUAL_PROPERTY_TAXES:
-        return (item["target_amount"] / Decimal("12")).quantize(
-            Decimal("0.01"), rounding=ROUND_CEILING,
-        )
-    return Decimal(str(item["monthly_amount"]))
+    return (item["target_amount"] / Decimal("12")).quantize(
+        Decimal("0.01"), rounding=ROUND_CEILING,
+    )
 
 TAX_GROUPS = (
     "Налог на доход",
@@ -462,6 +465,103 @@ def report_text(
     )
 
 
+def tax_obligations_overview(telegram_id: int, obligations: list[dict]) -> str:
+    if not obligations:
+        return "У вас нет добавленных налогов."
+    lines = ["Добавленные налоги:"]
+    for item in obligations:
+        key = tax_obligation_key(item["tax_type"], item["object_name"])
+        lines.append(
+            f"• {escape(item['tax_type'])} • {escape(item['object_name'])} — "
+            f"{money(virtual_tax_balance(telegram_id, key))}"
+        )
+    return "\n".join(lines)
+
+
+_RUSSIAN_MONTHS = (
+    "", "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+
+def tax_date_words(value: date) -> str:
+    return f"{value.day} {_RUSSIAN_MONTHS[value.month]}"
+
+
+def tax_obligation_card_text(
+    item: dict,
+    saved: Decimal,
+    allocator=None,
+    *,
+    show_changes: bool = False,
+) -> str:
+    tax_type = str(item["tax_type"])
+    target = Decimal(str(item["target_amount"]))
+    monthly = Decimal(str(item["monthly_amount"]))
+    annual_monthly = annual_tax_monthly_norm(item)
+    due = date.fromisoformat(item["due_date"]) if item.get("due_date") else None
+    lines = [
+        f"<b>{escape(tax_type.upper())}</b>",
+        "",
+        f"<b>{escape(str(item['object_name']).upper())}</b>",
+        "",
+        f"Нужно накопить — {money(target)}",
+        f"Уже есть — {money(saved)}",
+        f"Сейчас откладываем — {money(monthly)}/мес",
+    ]
+
+    if tax_type in ANNUAL_PROPERTY_TAXES:
+        if monthly > annual_monthly:
+            lines.extend([
+                "",
+                "ℹ️ Если бы копили весь год, было бы достаточно "
+                f"{money(annual_monthly)} в месяц. Сейчас сумма выше, потому что "
+                "до оплаты осталось мало времени.",
+            ])
+        if due is not None:
+            ready = tax_funding_date(tax_type, due)
+            lines.extend([
+                "————————————",
+                f"До {tax_date_words(ready)} предварительная сумма будет собрана.",
+                f"До {tax_date_words(due)} — налог должен быть оплачен.",
+            ])
+        if show_changes and allocator is not None:
+            settings = allocator.settings
+            lines.extend([
+                "————————————",
+                "<b>ИЗМЕНЕНИЕ СТОИМОСТИ ЖИЗНИ И РЕЗЕРВОВ</b>",
+                "",
+                f"➤ Критический минимум увеличен до {money(settings.critical_life)}.",
+                f"➤ Устойчивая жизнь увеличена до {money(settings.household_life)}.",
+                f"🛡️ Подушка увеличена до {money(settings.force_majeure_limit)}.",
+            ])
+            if settings.needs_stabilizer:
+                lines.append(
+                    f"🛟 Стабилизатор увеличен до {money(settings.stabilizer_full_limit)}."
+                )
+            if settings.needs_intercontract_reserve:
+                lines.append(
+                    f"🏦 Фонд Зарплаты увеличен до {money(allocator.intercontract_current_limit)}."
+                )
+    else:
+        if due is not None:
+            noun = "патент" if tax_type == "Патент" else "налог"
+            lines.extend([
+                "————————————",
+                f"К {tax_date_words(due)} сумма будет собрана.",
+                f"До {tax_date_words(due)} — {noun} должен быть оплачен.",
+            ])
+        if show_changes:
+            lines.extend([
+                "————————————",
+                "<b>СТОИМОСТЬ ЖИЗНИ И РЕЗЕРВЫ</b>",
+                "",
+                "Критический минимум и резервы не изменились. "
+                "Этот платёж учтён отдельно и будет собираться к указанной дате.",
+            ])
+    return "\n".join(lines)
+
+
 def tax_navigation(back_callback: str) -> list[tuple[str, str]]:
     """Standard navigation row for every nested tax screen."""
     return [
@@ -490,6 +590,8 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         calculated_balance,
         detailed,
     )
+    obligations = db.load_tax_obligations(telegram_id)
+    text += f"\n\n{tax_obligations_overview(telegram_id, obligations)}"
     rows = [[("+ Добавить налог", "taxes:add")]]
     rows.append([("✎ Изменить налоги", "taxes:edit")])
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
@@ -986,9 +1088,26 @@ async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
         return
     await state.update_data(tax_goal_type=labels[code])
     await state.set_state(TaxStates.obligation_name)
+    if code == "patent":
+        prompt = (
+            "<b>ПАТЕНТ</b>\n\n"
+            "Введите название, по которому вы узнаете этот патент.\n"
+            "Например: <b>Ветеринарная клиника — первый платёж</b>."
+        )
+    else:
+        examples = {
+            "property": "Квартира или Дача",
+            "transport": "Автомобиль",
+            "land": "Дача или Земельный участок",
+            "other": "Страховые взносы или другой понятный вам платёж",
+        }
+        prompt = (
+            f"<b>{labels[code].upper()}</b>\n\n"
+            "Введите название объекта или обязательства.\n"
+            f"Например: <b>{examples[code]}</b>."
+        )
     await callback.message.answer(
-        f"<b>{labels[code].upper()}</b>\n\nВведите название объекта или обязательства.\n"
-        "Например: Двушка, Автомобиль, Дача или Патент — первый платёж.",
+        prompt,
         reply_markup=keyboard([tax_navigation("taxes:add")]),
     )
 
@@ -1025,10 +1144,22 @@ async def tax_obligation_name(message: Message, state: FSMContext):
         )
         return
     await state.set_state(TaxStates.obligation_due_date)
+    if data.get("tax_goal_type") == "Патент":
+        due_prompt = (
+            f"<b>{escape(name.upper())}</b>\n\n"
+            "<b>КОГДА НУЖНО ВНЕСТИ ЭТОТ ПЛАТЁЖ?</b>\n\n"
+            "Введите ближайший срок оплаты, указанный в патенте.\n"
+            "Если патент оплачивается двумя частями, добавьте каждый платёж отдельно.\n\n"
+            "Введите дату в формате <code>ДД.ММ.ГГГГ</code>."
+        )
+    else:
+        due_prompt = (
+            f"<b>{escape(name.upper())}</b>\n\n"
+            "<b>КОГДА НУЖНО ОПЛАТИТЬ НАЛОГ?</b>\n\n"
+            "Введите дату в формате <code>ДД.ММ.ГГГГ</code>."
+        )
     await message.answer(
-        f"<b>{escape(name.upper())}</b>\n\n"
-        "<b>КОГДА НУЖНО ОПЛАТИТЬ НАЛОГ?</b>\n\n"
-        "Введите дату в формате <code>ДД.ММ.ГГГГ</code>.",
+        due_prompt,
         reply_markup=keyboard([tax_navigation("taxes:add")]),
     )
 
@@ -1161,60 +1292,28 @@ async def save_tax_obligation(
         return
     annual_monthly = (
         (target / Decimal("12")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
-        if tax_type in ANNUAL_PROPERTY_TAXES else monthly
+        if tax_type in ANNUAL_PROPERTY_TAXES else ZERO
     )
-    due_line = (
-        f"Оплатить до — <b>{date.fromisoformat(due_date).strftime('%d.%m.%Y')}</b>\n"
-        if due_date else ""
-    )
-    ready_line = ""
-    if due_date:
-        ready = tax_funding_date(tax_type, date.fromisoformat(due_date))
-        if ready != date.fromisoformat(due_date):
-            ready_line = f"Предварительная сумма должна быть готова — <b>{ready.strftime('%d.%m.%Y')}</b>\n"
-    db.add_tax_obligation(
+    obligation_id = db.add_tax_obligation(
         telegram_id, tax_type, object_name, target, saved, months, monthly, due_date,
         annual_monthly,
     )
 
     allocator = db.load_allocator(telegram_id)
-    reserve_effect = ""
     if allocator is not None:
-        pillow_before = allocator.settings.force_majeure_limit
-        stabilizer_before = allocator.settings.stabilizer_full_limit
         set_tax_monthly_target(allocator, key, annual_monthly)
         allocator.settings.tax_catchups[key] = monthly
-        pillow_delta = allocator.settings.force_majeure_limit - pillow_before
-        stabilizer_delta = allocator.settings.stabilizer_full_limit - stabilizer_before
-        effects = [f"➤ Критический минимум — +{money(annual_monthly)}"]
-        if pillow_delta > ZERO:
-            effects.append(f"➤ Цель Подушки — +{money(pillow_delta)}")
-        if allocator.settings.needs_stabilizer and stabilizer_delta > ZERO:
-            effects.append(f"➤ Цель Стабилизатора — +{money(stabilizer_delta)}")
-        reserve_effect = (
-            "\n\n————————————\n"
-            "<b>ИЗМЕНЕНИЕ ФИНАНСОВЫХ ЦЕЛЕЙ</b>\n\n"
-            + "\n".join(effects)
-            + "\n\nВ Критический минимум и резервы входит годовая норма налога. "
-            "Срочное накопление до ближайшей даты влияет только на пополнение конверта «Налоги»."
-        )
         db.save_allocator(telegram_id, allocator)
 
+    item = next(
+        row for row in db.load_tax_obligations(telegram_id)
+        if row["id"] == obligation_id
+    )
     await state.clear()
     await message.answer(
-        f"<b>{escape(tax_type.upper())}: {escape(object_name.upper())}</b>\n\n"
-        f"Нужно накопить — <b>{money(target)}</b>\n"
-        f"Уже накоплено — <b>{money(saved)}</b>\n"
-        f"Срок — <b>{months} мес.</b>\n"
-        f"{ready_line}"
-        f"{due_line}"
-        f"Срочно направлять в «Налоги» — <b>{money(monthly)}</b> в месяц\n"
-        f"Годовая норма для Критического минимума — <b>{money(annual_monthly)}</b> в месяц\n\n"
-        "Годовая норма включена в Критический минимум. До 1 ноября Аллокатор собирает "
-        "предварительную сумму. Когда придёт уведомление ФНС, нажмите "
-        "«Получено уведомление ФНС» "
-        "и введите полную сумму из него."
-        f"{reserve_effect}",
+        tax_obligation_card_text(
+            item, saved, allocator, show_changes=True,
+        ),
         reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
@@ -1252,34 +1351,11 @@ async def show_tax_obligation(message: Message, telegram_id: int, obligation_id:
     if item is None:
         await show_tax_obligations_edit(message, telegram_id, "Налог не найден.")
         return
-    due_line = (
-        f"Оплатить до — <b>{date.fromisoformat(item['due_date']).strftime('%d.%m.%Y')}</b>\n"
-        if item.get("due_date") else ""
-    )
-    ready_line = ""
-    if item.get("due_date") and not item.get("notice_received"):
-        due = date.fromisoformat(item["due_date"])
-        ready = tax_funding_date(item["tax_type"], due)
-        if ready != due:
-            ready_line = f"Предварительная сумма должна быть готова — <b>{ready.strftime('%d.%m.%Y')}</b>\n"
     key = tax_obligation_key(item["tax_type"], item["object_name"])
     virtually_saved = virtual_tax_balance(telegram_id, key)
-    status_line = (
-        "Статус — <b>готово к оплате</b>\n"
-        if virtually_saved >= item["target_amount"]
-        else ""
-    )
+    allocator = db.load_allocator(telegram_id)
     await message.answer(
-        f"<b>{escape(item['tax_type'].upper())}</b>\n\n"
-        f"{escape(item['object_name'])}\n"
-        f"Нужно — <b>{money(item['target_amount'])}</b>\n"
-        f"Аллокатор отнёс на этот налог — <b>{money(virtually_saved)}</b>\n"
-        f"{status_line}"
-        f"{ready_line}"
-        f"{due_line}"
-        f"Срочно направлять в «Налоги» — <b>{money(item['monthly_amount'])}</b> в месяц\n"
-        f"Годовая норма для Критического минимума — "
-        f"<b>{money(annual_tax_monthly_norm(item))}</b> в месяц",
+        tax_obligation_card_text(item, virtually_saved, allocator),
         reply_markup=keyboard([
             [
                 ("✎ Название", f"taxgoal:edit_name:{obligation_id}"),
@@ -1438,7 +1514,7 @@ async def tax_obligation_save_amount(message: Message, state: FSMContext):
     )
     annual_monthly = (
         (target / Decimal("12")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
-        if item["tax_type"] in ANNUAL_PROPERTY_TAXES else monthly
+        if item["tax_type"] in ANNUAL_PROPERTY_TAXES else ZERO
     )
     db.update_tax_obligation_plan(
         message.from_user.id,

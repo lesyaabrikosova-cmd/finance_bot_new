@@ -3200,9 +3200,9 @@ class FinancialAllocator:
         if amount <= ZERO:
             return
 
-        # Налоги на имущество, транспорт и землю должны быть собраны к дате,
-        # а не получать случайную долю КМ. Сначала закрываем месячный взнос,
-        # затем распределяем оставшуюся сумму по обычным категориям жизни.
+        # Налоговые обязательства должны быть собраны к дате, а не получать
+        # случайную долю КМ. Сначала закрываем месячный взнос, затем
+        # распределяем оставшуюся сумму по обычным категориям жизни.
         planned_tax_monthly = sum(
             (
                 self.settings.tax_catchups
@@ -3211,7 +3211,7 @@ class FinancialAllocator:
             ).values(),
             ZERO,
         )
-        if planned_tax_monthly > ZERO and "Налоги" in self.life_category_targets():
+        if planned_tax_monthly > ZERO:
             already_saved = D(self.state.period_life_topups.get("Налоги", ZERO))
             priority_tax = min(amount, max(ZERO, planned_tax_monthly - already_saved))
             if priority_tax > ZERO:

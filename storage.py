@@ -2228,6 +2228,25 @@ class Database:
         annual_property_taxes = {
             "Налог на имущество", "Транспортный налог", "Земельный налог",
         }
+        # Patent and custom dated payments used to be persisted as recurring
+        # parts of KМ. They are one-time catch-ups and must not increase the
+        # user's cost of life or reserve targets.
+        one_time_tax_keys = {
+            f"{item['tax_type']} · {item['object_name']}"
+            for item in active_tax_obligations
+            if item["tax_type"] not in annual_property_taxes
+        }
+        for name in one_time_tax_keys:
+            settings.planned_taxes.pop(name, None)
+            settings.automatic_life_obligations.pop(f"tax:{name}", None)
+        for item in active_tax_obligations:
+            if (
+                item["tax_type"] not in annual_property_taxes
+                and item["annual_monthly_amount"] != Decimal("0")
+            ):
+                self.update_tax_obligation_annual_monthly(
+                    telegram_id, item["id"], Decimal("0"),
+                )
         for item in active_tax_obligations:
             if item["tax_type"] not in annual_property_taxes:
                 continue
