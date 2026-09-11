@@ -789,7 +789,7 @@ async def period_reminder_worker(bot: Bot):
                     + heading + "\n\n" + "\n".join(lines),
                     reply_markup=keyboard([
                         [("Получено уведомление ФНС", "taxes:notice")],
-                        [("← В главное меню", "taxes:back")],
+                        [("← Главное меню", "taxes:back")],
                     ]),
                 )
                 for item in items:
@@ -810,7 +810,7 @@ async def period_reminder_worker(bot: Bot):
             overdue = any(today > item["due_date"] for item in items)
             title = "НАЛОГ ЕЩЁ НЕ ОТМЕЧЕН КАК ОПЛАЧЕННЫЙ" if overdue else "СЕГОДНЯ СРОК ОПЛАТЫ НАЛОГА"
             body = (
-                "Если вы уже заплатили налог полностью или частично, внесите фактическую "
+                "Если вы уже заплатили налог, внесите фактическую "
                 "сумму. Пока вся сумма не отмечена как оплаченная, налог останется активным."
             )
             try:
@@ -818,13 +818,10 @@ async def period_reminder_worker(bot: Bot):
                     telegram_id,
                     f"<b>{title}</b>\n\n" + "\n".join(lines) + "\n\n" + body,
                     reply_markup=keyboard([
-                        [
-                            ("Налог оплачен", "taxes:payment"),
-                            ("Оплачен частично", "taxes:payment"),
-                        ],
+                        [("Налог оплачен", "taxes:payment")],
                         [("Ещё не оплачен", "taxreminder:not_paid")],
                         [("Напомнить через 3 дня", "taxreminder:snooze")],
-                        [("← В главное меню", "taxes:back")],
+                        [("← Главное меню", "taxes:back")],
                     ]),
                 )
                 for item in items:

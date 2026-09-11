@@ -1120,7 +1120,7 @@ async def send_balances(
         colors=colors, preserve_order=True, center_amount=income,
         fallback_text="\n".join(lines),
         reply_markup=keyboard([
-            [("← В главное меню", "menu:back")],
+            [("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1312,7 +1312,7 @@ async def send_income_history(message: Message, telegram_id: int, page: int = 0)
             "Вы ещё не добавили ни одного дохода.",
             reply_markup=keyboard([
                 [("← К анализу доходов", "menu:income_analysis")],
-                [("← В главное меню", "menu:back")],
+                [("← Главное меню", "menu:back")],
             ]),
         )
         return
@@ -1330,7 +1330,7 @@ async def send_income_history(message: Message, telegram_id: int, page: int = 0)
         rows.append(navigation)
     rows.extend([
         [("← К анализу доходов", "menu:income_analysis")],
-        [("← В главное меню", "menu:back")],
+        [("← Главное меню", "menu:back")],
     ])
     await message.answer(
         "<b>ИСТОРИЯ ДОХОДОВ</b>",
@@ -1382,7 +1382,7 @@ async def send_income_history_detail(
                 ("Удалить доход", f"incomehistory:delete:{operation_id}"),
             ],
             [
-                ("← В главное меню", "menu:back"),
+                ("← Главное меню", "menu:back"),
                 ("← К истории", "incomehistory:open"),
             ],
         ]),
@@ -1633,7 +1633,7 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
         "Налог, распределение, балансы и итоги периода восстановлены.",
         reply_markup=keyboard([
             [("← К истории доходов", "incomehistory:open")],
-            [("← В главное меню", "menu:back")],
+            [("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1656,7 +1656,7 @@ async def income_history_distribution(callback: CallbackQuery, state: FSMContext
         reply_markup=keyboard([
             [("← К доходу", f"incomehistory:detail:{operation_id}")],
             [("← К истории", "incomehistory:open")],
-            [("← В главное меню", "menu:back")],
+            [("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1666,7 +1666,7 @@ async def send_income_analysis(
 ):
     analysis_keyboard = keyboard([
         [("История доходов", "incomehistory:open")],
-        [("← В главное меню", "menu:back")],
+        [("← Главное меню", "menu:back")],
     ])
 
     allocator = db.load_allocator(

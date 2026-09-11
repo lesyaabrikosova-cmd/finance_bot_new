@@ -43,7 +43,7 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         buttons = [button.text for row in markup.inline_keyboard for button in row]
         self.assertIn("09.09 · Частник · 3 700", buttons)
         self.assertIn("← К анализу доходов", buttons)
-        self.assertIn("← В главное меню", buttons)
+        self.assertIn("← Главное меню", buttons)
 
     def test_card_and_distribution_keep_note_and_group_order(self):
         item = operation()

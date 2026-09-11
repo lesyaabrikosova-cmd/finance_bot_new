@@ -1971,7 +1971,7 @@ async def profile_income_view(callback: CallbackQuery, state: FSMContext):
             [("Изменить название", f"profileincome:editname:{index}")],
             [("Изменить налог", f"profileincome:edittax:{index}")],
             [("Удалить", f"profileincome:delete:{index}")],
-            [("Назад", "profileincome:back")],
+            [("← Назад", "profileincome:back")],
         ]),
     )
 
@@ -4791,7 +4791,7 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
         rows.append([("Перенести в Бытовой резерв", f"lifemove:br:{index}")])
     rows.extend([
         [("Удалить", f"kmedit:delete:{index}")],
-        [("Назад", "lifeedit:list" if data.get("combined_life_onboarding") else "kmedit:list")],
+        [("← Назад", "lifeedit:list" if data.get("combined_life_onboarding") else "kmedit:list")],
     ])
     await callback.message.answer(
         f"<b>{escape(km_item_display_name(item))}</b>\n\n"
@@ -5185,14 +5185,14 @@ async def km_storage_item(callback: CallbackQuery, state: FSMContext):
 
     rows = []
     if is_tax:
-        rows.append([("Назад", "kmstorage:edit")])
+        rows.append([("← Назад", "kmstorage:edit")])
     elif item.get("storage") == "separate":
         rows.append([("Оставить на Зарплате", f"kmstorage:salary:{index}")])
         rows.append([("Изменить название конверта", f"kmstorage:rename:{index}")])
     else:
         rows.append([("Создать отдельный конверт", f"kmstorage:separate:{index}")])
     if not is_tax:
-        rows.append([("Назад", "kmstorage:edit")])
+        rows.append([("← Назад", "kmstorage:edit")])
 
     await callback.message.answer(
         f"<b>{escape(km_storage_item_display_name(item).upper())}</b>\n\n"
@@ -5585,7 +5585,7 @@ async def cancel_br_item(callback: CallbackQuery, state: FSMContext):
 async def br_edit_list(callback: CallbackQuery, state: FSMContext):
     await callback.answer(); data=await state.get_data(); items=data.get("br_items",[])
     if not items: await callback.message.answer("Пока нечего редактировать."); return
-    rows=[[(f"{item['name']} — {rub(Decimal(item['monthly']))}",f"bredit:item:{i}")] for i,item in enumerate(items)]; rows.append([('Назад','bredit:back')])
+    rows=[[(f"{item['name']} — {rub(Decimal(item['monthly']))}",f"bredit:item:{i}")] for i,item in enumerate(items)]; rows.append([('← Назад','bredit:back')])
     await callback.message.answer("<b>ЧТО ИЗМЕНИТЬ?</b>",reply_markup=keyboard(rows))
 
 
@@ -5606,7 +5606,7 @@ async def br_edit_item(callback: CallbackQuery, state: FSMContext):
         rows.append([('Вернуть в Критический минимум', f'brmove:km:{index}')])
     rows.extend([
         [('Удалить',f'bredit:delete:{index}')],
-        [('Назад','lifeedit:list' if data.get("combined_life_onboarding") else 'bredit:list')],
+        [('← Назад','lifeedit:list' if data.get("combined_life_onboarding") else 'bredit:list')],
     ])
     pass_details = (
         f"Уже накоплено — {rub(Decimal(str(item.get('accumulated', '0'))))}\n"

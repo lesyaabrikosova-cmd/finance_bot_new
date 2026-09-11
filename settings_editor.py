@@ -866,7 +866,7 @@ async def show_income_types_settings(message: Message, telegram_id: int):
     ]
     rows = [[(name, f"incomesettings:view:{index}")] for index, name in enumerate(rates)]
     rows.append([("Добавить доход", "incomesettings:add")])
-    rows.append([("Назад", "settings:open")])
+    rows.append([("← Назад", "settings:open")])
     await message.answer(
         "<b>ТИПЫ ДОХОДОВ</b>\n\n"
         + ("\n".join(lines) if lines else "Пока ничего не добавлено."),
@@ -995,7 +995,7 @@ async def income_type_view(callback: CallbackQuery, state: FSMContext):
             [("Изменить название", "incomesettings:rename")],
             [("Изменить налог", "incomesettings:rerate")],
             [("Удалить", "incomesettings:delete")],
-            [("Назад", "settings:income_types")],
+            [("← Назад", "settings:income_types")],
         ]),
     )
 
@@ -1130,7 +1130,7 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         f"{current}\n\n"
         "Выберите категорию, чтобы изменить её название или сумму.\n\n"
         "Не распределённая между категориями часть Критического минимума остаётся в конверте «Зарплата».",
-        reply_markup=keyboard(rows + [[("Назад", "settings:open")]])
+        reply_markup=keyboard(rows + [[("← Назад", "settings:open")]])
     )
 
 
@@ -1153,7 +1153,7 @@ async def choose_legacy_life_category(callback: CallbackQuery, state: FSMContext
         "<b>ПРЕЖНИЕ КАТЕГОРИИ</b>\n\n"
         "Выберите старое название. Затем укажите его новое название — "
         "Аллокатор объединит всю сумму за период и историю доходов.",
-        reply_markup=keyboard(rows + [[("Назад", "settings:life_categories")]]),
+        reply_markup=keyboard(rows + [[("← Назад", "settings:life_categories")]]),
     )
 
 
@@ -1170,7 +1170,7 @@ async def choose_current_life_category(callback: CallbackQuery, state: FSMContex
     await callback.message.answer(
         f"Старое название: <b>{escape(old)}</b>\n\n"
         "Выберите текущую категорию, к которой относится эта сумма.",
-        reply_markup=keyboard(rows + [[("Назад", "settings:life_repair")]]),
+        reply_markup=keyboard(rows + [[("← Назад", "settings:life_repair")]]),
     )
 
 
@@ -1212,7 +1212,7 @@ async def open_life_category(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard([
             [("Переименовать", f"settings:life_rename:{name}"), ("Изменить сумму", f"settings:life_amount:{name}")],
             [("Удалить категорию", f"settings:life_delete:{name}")],
-            [("Назад к категориям", "settings:life_categories")],
+            [("← Назад к категориям", "settings:life_categories")],
         ]),
     )
 
