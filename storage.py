@@ -597,6 +597,7 @@ class Database:
                 months INTEGER NOT NULL,
                 monthly_amount TEXT NOT NULL,
                 annual_monthly_amount TEXT NOT NULL DEFAULT '0',
+                notice_received INTEGER NOT NULL DEFAULT 0,
                 ready_reminder_sent_at TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (telegram_id)
@@ -638,6 +639,10 @@ class Database:
         if "annual_monthly_amount" not in tax_columns:
             cursor.execute(
                 "ALTER TABLE tax_obligations ADD COLUMN annual_monthly_amount TEXT NOT NULL DEFAULT '0'"
+            )
+        if "notice_received" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN notice_received INTEGER NOT NULL DEFAULT 0"
             )
 
         state_columns = {
@@ -2361,6 +2366,8 @@ class Database:
         monthly_amount: Decimal,
         due_date: str | None = None,
         annual_monthly_amount: Decimal | None = None,
+        notice_received: bool = False,
+        opening_amount: Decimal | None = None,
     ) -> int:
         self.ensure_user(telegram_id)
         if annual_monthly_amount is None:
@@ -2377,19 +2384,22 @@ class Database:
             INSERT INTO tax_obligations (
                 telegram_id, tax_type, object_name, target_amount,
                 opening_amount, saved_before, months, monthly_amount, annual_monthly_amount,
-                due_date, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                notice_received, due_date, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 telegram_id,
                 tax_type,
                 object_name,
                 decimal_to_string(target_amount),
-                decimal_to_string(saved_before),
+                decimal_to_string(
+                    saved_before if opening_amount is None else opening_amount
+                ),
                 decimal_to_string(saved_before),
                 months,
                 decimal_to_string(monthly_amount),
                 decimal_to_string(annual_monthly_amount),
+                int(notice_received),
                 due_date,
             ),
         )
@@ -2414,6 +2424,7 @@ class Database:
                 "months": row["months"],
                 "monthly_amount": string_to_decimal(row["monthly_amount"]),
                 "annual_monthly_amount": string_to_decimal(row["annual_monthly_amount"]),
+                "notice_received": bool(row["notice_received"]),
                 "due_date": row["due_date"],
                 "ready_reminder_sent_at": row["ready_reminder_sent_at"],
                 "active": bool(row["active"]),
@@ -2592,6 +2603,7 @@ class Database:
             WHERE active = 1
               AND tax_type IN ('Налог на имущество', 'Транспортный налог', 'Земельный налог')
               AND due_date IS NOT NULL
+              AND notice_received = 0
               AND (substr(due_date, 1, 4) || '-11-01') <= ?
               AND ready_reminder_sent_at IS NULL
             ORDER BY telegram_id, id

@@ -29,6 +29,7 @@ from onboarding import (  # noqa: E402
     keyboard,
     km_item_display_name,
     km_item_totals_by_name,
+    km_group_totals,
     life_classification_reason,
     life_categories_from_storage,
     life_expense_summary,
@@ -50,12 +51,16 @@ from planned_payments import apply_planned_payment_allocation, refresh_planned_p
 from taxes import (  # noqa: E402
     annual_tax_due_date,
     apply_planned_tax_allocation,
+    calculate_notice_plan,
     make_pie_chart,
     refresh_planned_tax_targets,
     report_text,
+    start_next_annual_tax_cycle,
     TAX_COLORS,
     tax_funding_date,
     tax_months_remaining,
+    tax_notice_months_remaining,
+    virtual_tax_balance,
 )
 from financial_engine import AllocatorState, FinancialAllocator, Goal, PhaseLifeBudget, UserSettings  # noqa: E402
 from storage import (  # noqa: E402
@@ -987,17 +992,40 @@ class TaxFeatureTests(unittest.TestCase):
             {
                 "subcategory": "property_tax",
                 "item_name": "Двушка",
+                "amount": "6000",
                 "monthly": "500",
             },
             {
                 "subcategory": "property_tax",
                 "item_name": "Однушка",
+                "amount": "3600",
                 "monthly": "300",
             },
         ]
         result = planned_taxes_from_storage(items)
         self.assertEqual(result["Налог на имущество · Двушка"], Decimal("500.00"))
         self.assertEqual(result["Налог на имущество · Однушка"], Decimal("300.00"))
+
+    def test_onboarding_uses_annual_tax_norm_in_life_and_keeps_catchup_separate(self):
+        item = {
+            "category": "housing",
+            "category_label": "Недвижимость",
+            "subcategory": "property_tax",
+            "name": "Квартира",
+            "amount": "7000",
+            "months": "2",
+            "monthly": "3500",
+            "due_date": "2026-12-01",
+        }
+        self.assertEqual(km_group_totals([item])["Недвижимость"], Decimal("583.34"))
+        storage = build_default_km_storage([item])
+        self.assertEqual(storage[0]["monthly"], "3500.00")
+        self.assertEqual(storage[0]["annual_monthly"], "583.34")
+        self.assertEqual(life_categories_from_storage(storage)["Налоги"], Decimal("583.34"))
+        self.assertEqual(
+            planned_taxes_from_storage(storage)["Налог на имущество · Квартира"],
+            Decimal("583.34"),
+        )
 
     def test_tax_report_leaves_amounts_to_diagram_and_uses_current_years(self):
         groups = {
@@ -1187,6 +1215,86 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(months_until_tax_ready(date(2026, 9, 1), due), 2)
         self.assertEqual(next_annual_tax_due_date(date(2026, 8, 29)), due)
         self.assertEqual(annual_tax_due_date(date(2026, 8, 29)), due)
+        self.assertEqual(annual_tax_due_date(date(2026, 12, 1)), due)
+        self.assertEqual(tax_notice_months_remaining(due, date(2026, 11, 1)), 1)
+
+    def test_virtual_tax_balance_uses_internal_breakdown_in_shared_envelope(self):
+        telegram_id = 880022
+        key = "Транспортный налог · Автомобиль"
+        db.add_tax_obligation(
+            telegram_id, "Транспортный налог", "Автомобиль", Decimal("12000"),
+            Decimal("2000"), 10, Decimal("1000"), "2026-12-01",
+        )
+        db.save_operation(telegram_id, "income_distribution", {
+            "type": "income_distribution",
+            "date": "2026-03-01",
+            "planned_tax_details": {key: "3000"},
+            "allocations": {"КЖ:Налоги": "3000"},
+        })
+        self.assertEqual(virtual_tax_balance(telegram_id, key), Decimal("5000"))
+        db.save_tax_payment(telegram_id, key, Decimal("1200"))
+        self.assertEqual(virtual_tax_balance(telegram_id, key), Decimal("3800"))
+
+    def test_notice_flag_survives_storage_round_trip(self):
+        telegram_id = 880023
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Налог на имущество", "Квартира", Decimal("14400"),
+            Decimal("8000"), 1, Decimal("6400"), "2026-12-01",
+            Decimal("1200"), notice_received=True, opening_amount=Decimal("0"),
+        )
+        item = next(
+            row for row in db.load_tax_obligations(telegram_id)
+            if row["id"] == obligation_id
+        )
+        self.assertTrue(item["notice_received"])
+        self.assertEqual(item["opening_amount"], Decimal("0"))
+
+    def test_notice_recalculates_only_the_shortfall_until_december(self):
+        remaining, months, catchup, annual_norm = calculate_notice_plan(
+            Decimal("14400"), Decimal("8000"),
+            date(2026, 12, 1), date(2026, 10, 1),
+        )
+        self.assertEqual(remaining, Decimal("6400"))
+        self.assertEqual(months, 2)
+        self.assertEqual(catchup, Decimal("3200.00"))
+        self.assertEqual(annual_norm, Decimal("1200.00"))
+
+    def test_paid_annual_tax_starts_next_year_cycle_and_reminder(self):
+        telegram_id = 880025
+        settings = UserSettings(
+            has_debts=False, employment_type="Наёмный",
+            critical_life=Decimal("11000"), household_reserve=Decimal("0"),
+            average_income=Decimal("20000"),
+            planned_taxes={"Транспортный налог · Автомобиль": Decimal("1000")},
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        old_id = db.add_tax_obligation(
+            telegram_id, "Транспортный налог", "Автомобиль", Decimal("12000"),
+            Decimal("12000"), 1, Decimal("0"), "2026-12-01", Decimal("1000"),
+            opening_amount=Decimal("0"),
+        )
+        old_item = next(
+            row for row in db.load_tax_obligations(telegram_id)
+            if row["id"] == old_id
+        )
+        db.save_operation(telegram_id, "income_distribution", {
+            "type": "income_distribution", "date": "2026-11-01",
+            "planned_tax_details": {"Транспортный налог · Автомобиль": "12000"},
+            "allocations": {"КЖ:Налоги": "12000"},
+        })
+        db.save_tax_payment(
+            telegram_id, "Транспортный налог · Автомобиль", Decimal("12000"),
+        )
+        db.deactivate_tax_obligation(telegram_id, old_id)
+        result = start_next_annual_tax_cycle(
+            telegram_id, old_item, allocator, date(2026, 12, 1),
+        )
+        self.assertEqual(result["due_date"], date(2027, 12, 1))
+        self.assertEqual(result["saved_before"], Decimal("0"))
+        self.assertEqual(result["monthly_amount"], Decimal("1090.91"))
+        rows = db.due_tax_readiness_reminders("2027-11-01")
+        self.assertTrue(any(row["id"] == result["id"] for row in rows))
 
     def test_tax_readiness_reminder_is_returned_only_once(self):
         telegram_id = 880009
@@ -1198,6 +1306,16 @@ class TaxFeatureTests(unittest.TestCase):
         rows = db.due_tax_readiness_reminders("2026-11-01")
         self.assertTrue(any(row["id"] == obligation_id for row in rows))
         db.mark_tax_readiness_reminder_sent(telegram_id, obligation_id)
+        rows = db.due_tax_readiness_reminders("2026-11-01")
+        self.assertFalse(any(row["id"] == obligation_id for row in rows))
+
+    def test_notice_received_does_not_trigger_preliminary_reminder(self):
+        telegram_id = 880024
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Земельный налог", "Дача", Decimal("900"),
+            Decimal("600"), 1, Decimal("300"), "2026-12-01",
+            notice_received=True,
+        )
         rows = db.due_tax_readiness_reminders("2026-11-01")
         self.assertFalse(any(row["id"] == obligation_id for row in rows))
 

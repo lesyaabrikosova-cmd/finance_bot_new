@@ -829,9 +829,25 @@ def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
         label = item["category_label"]
         result[label] = money2(
             result.get(label, Decimal("0"))
-            + Decimal(item["monthly"])
+            + km_effective_monthly(item)
         )
     return result
+
+
+ANNUAL_TAX_SUBCATEGORIES = {"tax", "property_tax", "land_tax"}
+
+
+def km_effective_monthly(item: dict) -> Decimal:
+    """Monthly cost of life; annual taxes use their stable 1/12 norm."""
+    if item.get("subcategory") in ANNUAL_TAX_SUBCATEGORIES:
+        annual_amount = Decimal(str(item.get("amount", "0")))
+        if annual_amount > 0:
+            return money2(
+                (annual_amount / Decimal("12")).quantize(
+                    Decimal("0.01"), rounding=ROUND_CEILING,
+                )
+            )
+    return money2(Decimal(str(item.get("monthly", "0"))))
 
 
 def km_item_display_name(item: dict) -> str:
@@ -866,7 +882,7 @@ def km_item_totals_by_name(items: list[dict]) -> list[tuple[str, Decimal]]:
         )
         display_names.setdefault(key, km_item_display_name(item))
         totals[key] = money2(
-            totals.get(key, Decimal("0")) + Decimal(item["monthly"])
+            totals.get(key, Decimal("0")) + km_effective_monthly(item)
         )
     return [(display_names[key], total) for key, total in totals.items()]
 
@@ -1051,6 +1067,9 @@ def default_km_storage(item: dict) -> dict:
         "envelope_name": envelope_name,
         "subcategory": subtype,
     }
+    if subtype in ANNUAL_TAX_SUBCATEGORIES:
+        result["amount"] = str(money2(Decimal(str(item.get("amount", "0")))))
+        result["annual_monthly"] = str(km_effective_monthly(item))
     if item.get("due_date"):
         result["due_date"] = item["due_date"]
     if item.get("one_time"):
@@ -1080,7 +1099,10 @@ def life_categories_from_storage(storage_items: list[dict]) -> dict[str, Decimal
             envelope = "Налоги"
         else:
             envelope = (item.get("envelope_name") or item.get("item_name") or "Конверт").strip()
-        amount = Decimal(item["monthly"])
+        amount = (
+            km_effective_monthly(item)
+            if is_tax else Decimal(item["monthly"])
+        )
         result[envelope] = money2(result.get(envelope, Decimal("0")) + amount)
     return result
 
@@ -1099,9 +1121,15 @@ def planned_taxes_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
             continue
         object_name = (item.get("item_name") or labels[subtype]).strip()
         key = f"{labels[subtype]} · {object_name}"
-        result[key] = money2(
-            result.get(key, Decimal("0")) + Decimal(item["monthly"])
+        annual_amount = Decimal(str(item.get("amount", "0")))
+        monthly_norm = (
+            (annual_amount / Decimal("12")).quantize(
+                Decimal("0.01"), rounding=ROUND_CEILING,
+            )
+            if annual_amount > 0
+            else Decimal(str(item.get("annual_monthly", item.get("monthly", "0"))))
         )
+        result[key] = money2(result.get(key, Decimal("0")) + monthly_norm)
     return result
 
 
@@ -1118,7 +1146,7 @@ def months_until_due_date(today: date, due_date: date) -> int:
 
 
 def months_until_tax_ready(today: date, due_date: date) -> int:
-    """Имущественные налоги должны быть полностью собраны к 1 ноября."""
+    """Предварительную сумму имущественных налогов собираем к 1 ноября."""
     ready = date(due_date.year, 11, 1)
     return months_until_due_date(today, ready)
 
@@ -1276,7 +1304,7 @@ def life_result_breakdown_lines(
                 )
         else:
             total = money2(sum(
-                (Decimal(str(item.get("monthly", "0"))) for item in items),
+                (km_effective_monthly(item) for item in items),
                 Decimal("0"),
             ))
             lines.append(f"• {escape(label)} — {rub(total)}")
@@ -2059,7 +2087,7 @@ async def show_km_menu(
     data = await state.get_data()
     items = data.get("km_items", [])
     br_items = data.get("br_items", [])
-    exact = money2(sum((Decimal(item["monthly"]) for item in items), Decimal("0")))
+    exact = money2(sum((km_effective_monthly(item) for item in items), Decimal("0")))
     br_exact = money2(sum((Decimal(item["monthly"]) for item in br_items), Decimal("0")))
 
     all_items = [*items, *br_items]
@@ -3651,10 +3679,11 @@ async def km_item_name(message: Message, state: FSMContext):
         await message.answer(
             f"{setup_progress(data, 5)}\n\n"
             f"<b>{escape(name.upper())}</b>\n\n"
-            f"Сумма должна быть готова к <b>{ready_date.strftime('%d.%m.%Y')}</b>.\n"
+            f"Предварительная сумма должна быть готова к <b>{ready_date.strftime('%d.%m.%Y')}</b>.\n"
             f"Оплатить налог нужно до <b>{due_date.strftime('%d.%m.%Y')}</b>.\n\n"
-            "<b>СКОЛЬКО ОСТАЛОСЬ НАКОПИТЬ?</b>\n\n"
-            "Укажите сумму, которой сейчас не хватает в конверте «Налоги».\n\n"
+            "<b>КАКУЮ ГОДОВУЮ СУММУ ЗАПЛАНИРОВАТЬ?</b>\n\n"
+            "Введите полную сумму из последнего уведомления ФНС. "
+            "Если уведомления ещё не было, укажите осторожную оценку.\n\n"
             "——————\n<b>→ Введите сумму.</b>",
             reply_markup=life_input_keyboard(current_life_back_callback(data)),
         )
@@ -4611,7 +4640,7 @@ def life_classification_section_blocks(
         return [parts[0] + "\n\nНет расходов."]
     for category, category_items in group_life_classification_items(items):
         lines = [
-            f"• {escape(km_item_display_name(item))} — {rub(Decimal(item['monthly']))}"
+            f"• {escape(km_item_display_name(item))} — {rub(km_effective_monthly(item))}"
             for item in category_items
         ]
         parts.append(
@@ -4656,7 +4685,7 @@ async def km_edit_list(callback: CallbackQuery, state: FSMContext):
     if not items:
         await callback.message.answer("Пока нечего редактировать.")
         return
-    rows = [[(f"{km_item_display_name(item)} — {rub(Decimal(item['monthly']))}", f"kmedit:item:{i}")] for i, item in enumerate(items)]
+    rows = [[(f"{km_item_display_name(item)} — {rub(km_effective_monthly(item))}", f"kmedit:item:{i}")] for i, item in enumerate(items)]
     rows.append([("← К расчёту КМ", "kmedit:back")])
     await callback.message.answer("<b>ЧТО ИЗМЕНИТЬ?</b>", reply_markup=keyboard(rows))
 
@@ -4668,7 +4697,7 @@ async def life_edit_list(callback: CallbackQuery, state: FSMContext):
     rows = []
     for index, item in enumerate(data.get("km_items", [])):
         rows.append([(
-            f"КМ · {km_item_display_name(item)} — {rub(Decimal(item['monthly']))}",
+            f"КМ · {km_item_display_name(item)} — {rub(km_effective_monthly(item))}",
             f"kmedit:item:{index}",
         )])
     for index, item in enumerate(data.get("br_items", [])):
@@ -4775,7 +4804,12 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
             else ""
         )
         + period_line
-        + f"В расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>",
+        + (
+            f"В Критическом минимуме — <b>{rub(km_effective_monthly(item))} / мес.</b>\n"
+            f"Временно до ближайшего срока — <b>{rub(Decimal(item['monthly']))} / мес.</b>"
+            if is_tax else
+            f"В расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>"
+        ),
         reply_markup=keyboard(rows),
     )
 
@@ -5162,7 +5196,7 @@ async def km_storage_item(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"<b>{escape(km_storage_item_display_name(item).upper())}</b>\n\n"
-        f"Среднемесячно — <b>{rub(Decimal(item['monthly']))}</b>\n"
+        f"Среднемесячно — <b>{rub(km_effective_monthly(item))}</b>\n"
         f"Сейчас: <b>{current}</b>."
         + (
             "\n\nВсе налоговые обязательства хранятся только в общем конверте «Налоги»."
@@ -5597,7 +5631,7 @@ async def move_br_item_to_critical_minimum(callback: CallbackQuery, state: FSMCo
     item["category_label"] = "Связь и подписки"
     km_items = list(data.get("km_items", []))
     km_items.append(item)
-    exact = money2(sum((Decimal(entry["monthly"]) for entry in km_items), Decimal("0")))
+    exact = money2(sum((km_effective_monthly(item) for item in km_items), Decimal("0")))
     storage_items = build_default_km_storage(km_items)
     categories = life_categories_from_storage(storage_items)
     await state.update_data(
@@ -5695,7 +5729,7 @@ async def br_final_continue(callback: CallbackQuery, state: FSMContext):
 
 def contract_obligation_entries(data: dict) -> list[tuple[str, dict]]:
     # Имущественные налоги не спрашиваем повторно: у них собственный конверт
-    # и календарный план до 1 ноября, который действует в обеих фазах цикла.
+    # и предварительный календарный план до 1 ноября, который действует в обеих фазах цикла.
     tax_subtypes = {"property_tax", "land_tax", "tax"}
     return (
         [
@@ -5839,7 +5873,7 @@ async def show_contract_obligations(message: Message, state: FSMContext):
         "между домашними и рабочими месяцами. Часть на время работы подготовит заранее. "
         "Один и тот же расход не будет учитываться дважды.\n\n"
         "Имущественный, транспортный и земельный налоги здесь не показываются: "
-        "они всегда копятся в конверте «Налоги» по собственному календарю до 1 ноября.\n\n"
+        "их предварительная сумма всегда копится в конверте «Налоги» к 1 ноября.\n\n"
         "Неотмеченные расходы будут финансироваться только за домашние месяцы.\n\n"
         "Нажмите на расход повторно, чтобы снять выбор.",
         reply_markup=keyboard(rows),
@@ -5849,7 +5883,7 @@ async def show_contract_obligations(message: Message, state: FSMContext):
 async def show_contract_obligations_confirmation(message: Message, state: FSMContext):
     data = await state.get_data()
     km_items, br_items = recalculate_cyclic_expense_rates(data)
-    km_exact = money2(sum((Decimal(item["monthly"]) for item in km_items), Decimal("0")))
+    km_exact = money2(sum((km_effective_monthly(item) for item in km_items), Decimal("0")))
     br_groups = br_group_totals(br_items)
     br_exact = money2(sum(br_groups.values(), Decimal("0")))
     historical_gifts_monthly = gift_history_monthly(br_items)

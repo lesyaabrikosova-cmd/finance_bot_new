@@ -767,29 +767,30 @@ async def period_reminder_worker(bot: Bot):
             by_user.setdefault(item["telegram_id"], []).append(item)
         for telegram_id, items in by_user.items():
             lines = []
-            total_missing = 0
             for item in items:
                 missing = max(0, item["target_amount"] - item["saved_before"])
-                total_missing += missing
                 status = (
-                    "сумма готова"
-                    if missing <= 0 else f"не хватает {fmt_money(missing)} ₽"
+                    "предварительная сумма собрана"
+                    if missing <= 0 else f"по предварительному плану не хватает {fmt_money(missing)} ₽"
                 )
                 lines.append(
                     f"• {escape(item['tax_type'])} · {escape(item['object_name'])} — {status}"
                 )
             heading = (
-                "Все запланированные суммы готовы. Проверьте начисления и оплатите их до 1 декабря."
-                if total_missing <= 0 else
-                f"До полной суммы не хватает <b>{fmt_money(total_missing)} ₽</b>. "
-                "Проверьте начисления и постарайтесь закрыть дефицит до оплаты."
+                "К этому моменту ФНС должна направить налоговое уведомление. "
+                "Проверьте его в личном кабинете ФНС или на Госуслугах.\n\n"
+                "Затем нажмите «Получено уведомление» и введите полную сумму из него. "
+                "Аллокатор сам учтёт деньги, которые уже отнёс на этот налог."
             )
             try:
                 await bot.send_message(
                     telegram_id,
-                    "<b>НАЛОГИ ДОЛЖНЫ БЫТЬ ГОТОВЫ</b>\n\n"
+                    "<b>ПРОВЕРЬТЕ НАЛОГОВОЕ УВЕДОМЛЕНИЕ</b>\n\n"
                     + heading + "\n\n" + "\n".join(lines),
-                    reply_markup=keyboard([[('Открыть налоги', 'menu:taxes')]]),
+                    reply_markup=keyboard([
+                        [("Получено уведомление", "taxes:notice")],
+                        [("← В главное меню", "taxes:back")],
+                    ]),
                 )
                 for item in items:
                     db.mark_tax_readiness_reminder_sent(telegram_id, item["id"])
