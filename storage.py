@@ -2191,11 +2191,34 @@ class Database:
         if settings is None:
             return None
 
+        existing_automatic_keys = set(settings.automatic_life_obligations)
         planned_taxes, track_payments = self.load_tax_configuration(telegram_id)
+        all_tax_obligations = self.load_tax_obligations(
+            telegram_id, active_only=False,
+        )
+        active_tax_obligations = [
+            item for item in all_tax_obligations if item["active"]
+        ]
+        active_tax_keys = {
+            f"{item['tax_type']} · {item['object_name']}"
+            for item in active_tax_obligations
+        }
+        inactive_tax_keys = {
+            f"{item['tax_type']} · {item['object_name']}"
+            for item in all_tax_obligations
+            if not item["active"]
+        }
         settings.planned_taxes = {
             name: string_to_decimal(amount)
             for name, amount in planned_taxes.items()
+            if name not in inactive_tax_keys or name in active_tax_keys
         }
+        valid_tax_automatic_keys = {
+            f"tax:{name}" for name in settings.planned_taxes
+        }
+        for key in list(settings.automatic_life_obligations):
+            if key.startswith("tax:") and key not in valid_tax_automatic_keys:
+                settings.automatic_life_obligations.pop(key, None)
         settings.track_tax_payments = track_payments
 
         # В старой модели monthly_amount для имущественного налога был
@@ -2205,7 +2228,7 @@ class Database:
         annual_property_taxes = {
             "Налог на имущество", "Транспортный налог", "Земельный налог",
         }
-        for item in self.load_tax_obligations(telegram_id):
+        for item in active_tax_obligations:
             if item["tax_type"] not in annual_property_taxes:
                 continue
             annual_monthly = item["annual_monthly_amount"]
@@ -2225,8 +2248,15 @@ class Database:
         # реальных обязательств, а не позволяем им попасть в постоянный КМ.
         tax_total = sum(settings.planned_taxes.values(), Decimal("0"))
         if getattr(settings, "_base_critical_life_inferred", False):
+            unaccounted_tax_total = sum(
+                (
+                    amount for name, amount in settings.planned_taxes.items()
+                    if f"tax:{name}" not in existing_automatic_keys
+                ),
+                Decimal("0"),
+            )
             settings.base_critical_life = max(
-                Decimal("0"), settings.base_critical_life - tax_total,
+                Decimal("0"), settings.base_critical_life - unaccounted_tax_total,
             )
         for name, amount in settings.planned_taxes.items():
             settings.set_automatic_life_obligation(f"tax:{name}", amount)
@@ -2240,13 +2270,23 @@ class Database:
         # отделяем их от скрытой постоянной основы и дальше пересчитываем КМ
         # только из активных обязательств.
         planned_payments = self.load_planned_payments(telegram_id)
-        payment_total = sum(
-            (string_to_decimal(item["monthly_amount"]) for item in planned_payments),
-            Decimal("0"),
-        )
+        valid_payment_automatic_keys = {
+            f"payment:{item['id']}" for item in planned_payments
+        }
+        for key in list(settings.automatic_life_obligations):
+            if key.startswith("payment:") and key not in valid_payment_automatic_keys:
+                settings.automatic_life_obligations.pop(key, None)
         if getattr(settings, "_base_critical_life_inferred", False):
+            unaccounted_payment_total = sum(
+                (
+                    string_to_decimal(item["monthly_amount"])
+                    for item in planned_payments
+                    if f"payment:{item['id']}" not in existing_automatic_keys
+                ),
+                Decimal("0"),
+            )
             settings.base_critical_life = max(
-                Decimal("0"), settings.base_critical_life - payment_total,
+                Decimal("0"), settings.base_critical_life - unaccounted_payment_total,
             )
         for item in planned_payments:
             settings.set_automatic_life_obligation(

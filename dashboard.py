@@ -22,6 +22,7 @@ from storage import db
 from ui import keyboard, main_menu_keyboard
 from mode_presentation import mode_image_path
 from charts import send_chart_report
+from taxes import reconcile_tax_obligation_balances
 
 
 router = Router()
@@ -1625,6 +1626,7 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
             "Не удалось завершить удаление. Балансы не изменяйте и обратитесь в поддержку."
         )
         return
+    reconcile_tax_obligation_balances(callback.from_user.id, restored)
     rebuild_period_analytics_from_history(restored, callback.from_user.id)
     db.save_allocator(callback.from_user.id, restored)
     await state.clear()

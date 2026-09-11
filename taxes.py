@@ -416,6 +416,19 @@ def refresh_planned_tax_targets(telegram_id: int, allocator, today: date | None 
             ] = monthly
 
 
+def reconcile_tax_obligation_balances(
+    telegram_id: int,
+    allocator,
+    today: date | None = None,
+) -> None:
+    """Rebuild cached tax progress after an income operation is removed."""
+    for item in db.load_tax_obligations(telegram_id):
+        key = tax_obligation_key(item["tax_type"], item["object_name"])
+        actual = min(item["target_amount"], virtual_tax_balance(telegram_id, key))
+        db.update_tax_obligation_saved(telegram_id, item["id"], actual, True)
+    refresh_planned_tax_targets(telegram_id, allocator, today)
+
+
 def make_pie_chart(groups: dict) -> bytes | None:
     if Image is None:
         return None
@@ -437,6 +450,14 @@ def report_text(
         "В Аллокаторе всегда видно, сколько денег отложено на каждый налог, "
         "поэтому суммы не смешаются."
     )
+
+
+def tax_navigation(back_callback: str) -> list[tuple[str, str]]:
+    """Standard navigation row for every nested tax screen."""
+    return [
+        ("← Главное меню", "taxes:back"),
+        ("← Назад", back_callback),
+    ]
 
 
 async def show_taxes(message: Message, telegram_id: int, detailed: bool = False) -> None:
@@ -463,8 +484,8 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
     rows.append([("✎ Изменить налоги", "taxes:edit")])
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
     rows.append([("Налог оплачен", "taxes:payment")])
-    rows.append([("← Главное меню", "taxes:back")])
     rows.append([("ℹ️ Как это работает", "taxes:help")])
+    rows.append([("← Главное меню", "taxes:back")])
 
     tax_values = {name: data["total"] for name, data in groups.items() if data["total"] > ZERO}
     await send_chart_report(
@@ -505,70 +526,27 @@ async def taxes_help(callback: CallbackQuery):
         "После оплаты нажмите\n"
         "Налог оплачен\n"
         "— и начнём копить на следующий платёж.",
-        reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
 @router.callback_query(F.data == "taxes:km_repair")
 async def ask_critical_life_repair(callback: CallbackQuery):
     await callback.answer()
-    allocator = db.load_allocator(callback.from_user.id)
-    if allocator is None or not getattr(
-        allocator.settings, "_base_critical_life_inferred", False,
-    ):
-        await show_taxes(callback.message, callback.from_user.id)
-        return
-    cancelled = [
-        item for item in db.load_tax_obligations(callback.from_user.id, active_only=False)
-        if not item["active"]
-        and item["saved_before"] < item["target_amount"]
-        and item["monthly_amount"] > ZERO
-    ]
-    correction = sum((item["monthly_amount"] for item in cancelled), ZERO)
-    if correction <= ZERO:
-        await show_taxes(callback.message, callback.from_user.id)
-        return
     await callback.message.answer(
-        "<b>ВОССТАНОВИТЬ КРИТИЧЕСКИЙ МИНИМУМ?</b>\n\n"
-        f"Найдены отменённые налоговые планы на <b>{money(correction)}</b> в месяц. "
-        "Их взносы могли остаться внутри Критического минимума из старой версии расчёта.\n\n"
-        f"Критический минимум уменьшится на <b>{money(correction)}</b>.",
-        reply_markup=keyboard([
-            [("✔️ Восстановить критический минимум", "taxes:km_repair:confirm")],
-            [("✖️ Отмена", "menu:taxes")],
-        ]),
+        "Старая ручная корректировка больше не требуется. "
+        "Критический минимум не изменён: Аллокатор теперь пересчитывает "
+        "налоговые обязательства автоматически.",
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
 @router.callback_query(F.data == "taxes:km_repair:confirm")
 async def apply_critical_life_repair(callback: CallbackQuery):
     await callback.answer()
-    allocator = db.load_allocator(callback.from_user.id)
-    if allocator is None or not getattr(
-        allocator.settings, "_base_critical_life_inferred", False,
-    ):
-        await show_taxes(callback.message, callback.from_user.id)
-        return
-    cancelled = [
-        item for item in db.load_tax_obligations(callback.from_user.id, active_only=False)
-        if not item["active"]
-        and item["saved_before"] < item["target_amount"]
-        and item["monthly_amount"] > ZERO
-    ]
-    correction = sum((item["monthly_amount"] for item in cancelled), ZERO)
-    if correction <= ZERO:
-        await show_taxes(callback.message, callback.from_user.id)
-        return
-    allocator.settings.base_critical_life = max(
-        ZERO, allocator.settings.base_critical_life - correction,
-    )
-    allocator.settings.recalculate_critical_life()
-    for item in cancelled:
-        db.update_tax_obligation_monthly(callback.from_user.id, item["id"], ZERO)
-    db.save_allocator(callback.from_user.id, allocator)
     await callback.message.answer(
-        f"Критический минимум уменьшен на <b>{money(correction)}</b>.",
-        reply_markup=main_menu_keyboard(callback.from_user.id),
+        "Старая ручная корректировка отключена. Критический минимум не изменён.",
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
@@ -610,7 +588,7 @@ async def tax_notice_start(callback: CallbackQuery, state: FSMContext):
             "Сначала добавьте квартиру, машину или землю, для которых вы платите налог.",
             reply_markup=keyboard([
                 [("+ Добавить налог", "taxes:add")],
-                [("← Назад", "menu:taxes")],
+                tax_navigation("menu:taxes"),
             ]),
         )
         return
@@ -621,7 +599,7 @@ async def tax_notice_start(callback: CallbackQuery, state: FSMContext):
         )]
         for item in items
     ]
-    rows.append([("← Назад", "menu:taxes")])
+    rows.append(tax_navigation("menu:taxes"))
     await callback.message.answer(
         "<b>ПО КАКОМУ НАЛОГУ ПРИШЛО УВЕДОМЛЕНИЕ?</b>",
         reply_markup=keyboard(rows),
@@ -660,7 +638,7 @@ async def tax_notice_item(callback: CallbackQuery, state: FSMContext):
         "Вычитать накопленные деньги самостоятельно не нужно.\n\n"
         "——————\n"
         "<b>→ Введите сумму.</b>",
-        reply_markup=keyboard([[('← Назад', 'taxes:notice')]]),
+        reply_markup=keyboard([tax_navigation("taxes:notice")]),
     )
 
 
@@ -683,7 +661,7 @@ async def tax_payment_start(callback: CallbackQuery, state: FSMContext):
         ]
         rows.extend([
             [("Другой налог", "taxpayment:other")],
-            [("← Назад", "menu:taxes")],
+            tax_navigation("menu:taxes"),
         ])
         await callback.message.answer(
             "<b>КАКОЙ НАЛОГ ВЫ ОПЛАТИЛИ?</b>",
@@ -693,7 +671,7 @@ async def tax_payment_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TaxStates.payment_name)
     await callback.message.answer(
         "<b>КАКОЙ НАЛОГ ВЫ ОПЛАТИЛИ?</b>\n\nВведите название налога или объекта.",
-        reply_markup=keyboard([[("← Назад", "menu:taxes")]]),
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
@@ -703,7 +681,7 @@ async def tax_payment_other(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TaxStates.payment_name)
     await callback.message.answer(
         "Введите название налога или объекта.",
-        reply_markup=keyboard([[("← Назад", "menu:taxes")]]),
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
@@ -723,7 +701,7 @@ async def tax_payment_obligation(callback: CallbackQuery, state: FSMContext):
     if remaining <= ZERO:
         await callback.message.answer(
             "Этот налог уже отмечен как оплаченный.",
-            reply_markup=keyboard([[("← К налогам", "menu:taxes")]]),
+            reply_markup=keyboard([tax_navigation("taxes:payment")]),
         )
         return
     await state.update_data(
@@ -742,7 +720,7 @@ async def tax_payment_obligation(callback: CallbackQuery, state: FSMContext):
         f"Уже оплачено — <b>{money(already_paid)}</b>\n"
         f"Осталось оплатить — <b>{money(remaining)}</b>\n\n"
         "Введите фактически оплаченную сумму.",
-        reply_markup=keyboard([[("← Назад", "taxes:payment")]]),
+        reply_markup=keyboard([tax_navigation("taxes:payment")]),
     )
 
 
@@ -756,7 +734,7 @@ async def tax_payment_name(message: Message, state: FSMContext):
     await state.set_state(TaxStates.payment_amount)
     await message.answer(
         f"<b>{escape(name.upper())}</b>\n\nВведите оплаченную сумму.",
-        reply_markup=keyboard([[("← Назад", "taxes:payment")]]),
+        reply_markup=keyboard([tax_navigation("taxes:payment")]),
     )
 
 
@@ -784,7 +762,7 @@ async def tax_payment_amount(message: Message, state: FSMContext):
             await state.clear()
             await message.answer(
                 "Налоговое обязательство больше не активно.",
-                reply_markup=keyboard([[("← К налогам", "menu:taxes")]]),
+                reply_markup=keyboard([tax_navigation("taxes:payment")]),
             )
             return
         paid_before = db.tax_obligation_paid_amount(message.from_user.id, int(obligation_id))
@@ -840,7 +818,7 @@ async def tax_payment_amount(message: Message, state: FSMContext):
             f"Осталось оплатить — <b>{money(remaining_after)}</b>.\n\n"
             "Налог остаётся активным. Аллокатор не начнёт новый годовой цикл, "
             "пока вы не отметите оплату оставшейся суммы.",
-            reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
+            reply_markup=keyboard([tax_navigation("menu:taxes")]),
         )
         return
     if standard_annual:
@@ -849,7 +827,7 @@ async def tax_payment_amount(message: Message, state: FSMContext):
             "Аллокатор продолжит копить по последней известной годовой сумме. "
             "Когда придёт новое уведомление ФНС, откройте «Налоги» и нажмите "
             "«Получено уведомление ФНС».",
-            reply_markup=keyboard([[("← К налогам", "menu:taxes")]]),
+            reply_markup=keyboard([tax_navigation("menu:taxes")]),
         )
         return
     await message.answer(
@@ -956,7 +934,7 @@ async def save_next_tax_amount(message: Message, state: FSMContext):
         f"Оплатить до — <b>{due.strftime('%d.%m.%Y')}</b>\n"
         f"Временно направлять в «Налоги» — <b>{money(monthly)}</b> в месяц\n"
         f"Годовая норма для Критического минимума — <b>{money(annual_monthly)}</b> в месяц.",
-        reply_markup=keyboard([[("← К налогам", "menu:taxes")]]),
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
@@ -974,7 +952,7 @@ async def tax_obligation_start(callback: CallbackQuery, state: FSMContext):
             [("Земельный налог", "taxgoal:type:land")],
             [("Патент", "taxgoal:type:patent")],
             [("Другой налог", "taxgoal:type:other")],
-            [("← Назад", "menu:taxes")],
+            tax_navigation("menu:taxes"),
         ]),
     )
 
@@ -997,7 +975,7 @@ async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"<b>{labels[code].upper()}</b>\n\nВведите название объекта или обязательства.\n"
         "Например: Двушка, Автомобиль, Дача или Патент — первый платёж.",
-        reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
+        reply_markup=keyboard([tax_navigation("taxes:add")]),
     )
 
 
@@ -1025,7 +1003,7 @@ async def tax_obligation_name(message: Message, state: FSMContext):
             "Введите полную сумму из последнего налогового уведомления. "
             "Если уведомления ещё не было, укажите осторожную оценку.\n\n"
             "——————\n<b>→ Введите сумму.</b>",
-            reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
+            reply_markup=keyboard([tax_navigation("taxes:add")]),
         )
         return
     await state.set_state(TaxStates.obligation_due_date)
@@ -1033,7 +1011,7 @@ async def tax_obligation_name(message: Message, state: FSMContext):
         f"<b>{escape(name.upper())}</b>\n\n"
         "<b>КОГДА НУЖНО ОПЛАТИТЬ НАЛОГ?</b>\n\n"
         "Введите дату в формате <code>ДД.ММ.ГГГГ</code>.",
-        reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
+        reply_markup=keyboard([tax_navigation("taxes:add")]),
     )
 
 
@@ -1103,7 +1081,7 @@ async def tax_obligation_due_date(message: Message, state: FSMContext):
         "<b>СКОЛЬКО ОСТАЛОСЬ НАКОПИТЬ К ДАТЕ ПЛАТЕЖА?</b>\n\n"
         "Укажите не полную сумму начисления, а остаток, которого сейчас не хватает в конверте «Налоги».\n\n"
         "——————\n<b>→ Введите сумму.</b>",
-        reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
+        reply_markup=keyboard([tax_navigation("taxes:add")]),
     )
 
 
@@ -1159,7 +1137,7 @@ async def save_tax_obligation(
             reply_markup=keyboard([
                 [("✎ Изменить налоги", "taxes:edit")],
                 [("Получено уведомление ФНС", "taxes:notice")],
-                [("← К налогам", "menu:taxes")],
+                tax_navigation("menu:taxes"),
             ]),
         )
         return
@@ -1219,7 +1197,7 @@ async def save_tax_obligation(
         "«Получено уведомление ФНС» "
         "и введите полную сумму из него."
         f"{reserve_effect}",
-        reply_markup=main_menu_keyboard(telegram_id),
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
@@ -1324,7 +1302,7 @@ async def tax_obligation_edit_name(callback: CallbackQuery, state: FSMContext):
         f"Сейчас — <b>{escape(item['object_name'])}</b>\n\n"
         "——————\n"
         "<b>→ Введите новое название.</b>",
-        reply_markup=keyboard([[('← Назад', f'taxgoal:view:{obligation_id}')]]),
+        reply_markup=keyboard([tax_navigation(f"taxgoal:view:{obligation_id}")]),
     )
 
 
@@ -1394,7 +1372,7 @@ async def tax_obligation_edit_amount(callback: CallbackQuery, state: FSMContext)
         "и пересчитает дальнейшие пополнения.\n\n"
         "——————\n"
         "<b>→ Введите сумму.</b>",
-        reply_markup=keyboard([[('← Назад', f'taxgoal:view:{obligation_id}')]]),
+        reply_markup=keyboard([tax_navigation(f"taxgoal:view:{obligation_id}")]),
     )
 
 
@@ -1480,7 +1458,7 @@ async def tax_obligation_delete_confirm(callback: CallbackQuery):
         "История уже внесённых пополнений и оплат сохранится.",
         reply_markup=keyboard([
             [("🗑️ Удалить налог", f"taxgoal:delete_confirm:{obligation_id}")],
-            [("✖️ Отмена", f"taxgoal:view:{obligation_id}")],
+            tax_navigation(f"taxgoal:view:{obligation_id}"),
         ]),
     )
 
@@ -1539,7 +1517,7 @@ async def tax_reminder_not_paid(callback: CallbackQuery):
     await callback.message.answer(
         "Хорошо. Налог остаётся активным. Если оплата не будет отмечена, "
         "я напомню снова через неделю.",
-        reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
 
@@ -1549,5 +1527,5 @@ async def tax_reminder_snooze(callback: CallbackQuery):
     db.snooze_tax_payment_reminders(callback.from_user.id, days=3)
     await callback.message.answer(
         "Напомню об оплате налога через 3 дня.",
-        reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
+        reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )

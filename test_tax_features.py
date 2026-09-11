@@ -56,6 +56,7 @@ from taxes import (  # noqa: E402
     calculate_payment_progress,
     collect_tax_statistics,
     make_pie_chart,
+    reconcile_tax_obligation_balances,
     refresh_planned_tax_targets,
     report_text,
     start_next_annual_tax_cycle,
@@ -1327,6 +1328,127 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(item["months"], 1)
         self.assertEqual(item["monthly_amount"], Decimal("6400"))
         self.assertEqual(item["annual_monthly_amount"], Decimal("1200"))
+
+    def test_legacy_tax_migration_does_not_subtract_same_norm_twice(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            database = Database(os.path.join(data_dir, "migration.db"))
+            telegram_id = 880032
+            key = "Земельный налог · Дача"
+            settings = UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                critical_life=Decimal("92000"),
+                base_critical_life=Decimal("90000"),
+                automatic_life_obligations={f"tax:{key}": Decimal("2000")},
+                household_reserve=Decimal("0"),
+                average_income=Decimal("100000"),
+                planned_taxes={key: Decimal("2000")},
+            )
+            database.save_allocator(telegram_id, FinancialAllocator(settings))
+            database.add_tax_obligation(
+                telegram_id, "Земельный налог", "Дача", Decimal("24000"),
+                Decimal("0"), 2, Decimal("12000"), "2026-12-01",
+                Decimal("2000"),
+            )
+            database.connection.execute(
+                "UPDATE settings SET base_critical_life = NULL WHERE telegram_id = ?",
+                (telegram_id,),
+            )
+            database.connection.commit()
+
+            loaded = database.load_allocator(telegram_id)
+            self.assertEqual(loaded.settings.base_critical_life, Decimal("90000"))
+            self.assertEqual(loaded.settings.critical_life, Decimal("92000"))
+
+            obligation_id = database.load_tax_obligations(telegram_id)[0]["id"]
+            database.deactivate_tax_obligation(telegram_id, obligation_id)
+            loaded_without_tax = database.load_allocator(telegram_id)
+            self.assertEqual(
+                loaded_without_tax.settings.base_critical_life, Decimal("90000"),
+            )
+            self.assertEqual(loaded_without_tax.settings.critical_life, Decimal("90000"))
+            database.close()
+
+    def test_adding_and_deleting_multiple_taxes_returns_exact_base(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            database = Database(os.path.join(data_dir, "roundtrip.db"))
+            telegram_id = 880034
+            settings = UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                critical_life=Decimal("90000"),
+                household_reserve=Decimal("20000"),
+                average_income=Decimal("180000"),
+                force_majeure_months=Decimal("4"),
+                stabilizer_target_months=Decimal("1"),
+            )
+            database.save_allocator(telegram_id, FinancialAllocator(settings))
+            land_id = database.add_tax_obligation(
+                telegram_id, "Земельный налог", "Дача", Decimal("1200"),
+                Decimal("0"), 2, Decimal("600"), "2026-12-01",
+                Decimal("100"),
+            )
+            car_id = database.add_tax_obligation(
+                telegram_id, "Транспортный налог", "Автомобиль", Decimal("2400"),
+                Decimal("0"), 2, Decimal("1200"), "2026-12-01",
+                Decimal("200"),
+            )
+            with_taxes = database.load_allocator(telegram_id)
+            database.save_allocator(telegram_id, with_taxes)
+            self.assertEqual(with_taxes.settings.critical_life, Decimal("90300"))
+
+            database.deactivate_tax_obligation(telegram_id, land_id)
+            one_tax = database.load_allocator(telegram_id)
+            database.save_allocator(telegram_id, one_tax)
+            self.assertEqual(one_tax.settings.critical_life, Decimal("90200"))
+
+            database.deactivate_tax_obligation(telegram_id, car_id)
+            no_taxes = database.load_allocator(telegram_id)
+            self.assertEqual(no_taxes.settings.base_critical_life, Decimal("90000"))
+            self.assertEqual(no_taxes.settings.critical_life, Decimal("90000"))
+            self.assertEqual(no_taxes.settings.automatic_life_obligations, {})
+            database.close()
+
+    def test_deleted_income_rebuilds_tax_progress(self):
+        telegram_id = 880033
+        key = "Земельный налог · Дача"
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("90000"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("100000"),
+            planned_taxes={key: Decimal("100")},
+        )
+        allocator = FinancialAllocator(settings)
+        db.save_allocator(telegram_id, allocator)
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Земельный налог", "Дача", Decimal("1200"),
+            Decimal("0"), 2, Decimal("600"), "2026-12-01",
+            Decimal("100"),
+        )
+        db.save_operation(telegram_id, "income_distribution", {
+            "type": "income_distribution",
+            "date": "2026-09-01",
+            "planned_tax_details": {key: "300"},
+            "allocations": {"КЖ:Налоги": "300"},
+        })
+        operation_id = db.load_operations(telegram_id)[0]["id"]
+        db.update_tax_obligation_saved(
+            telegram_id, obligation_id, Decimal("300"), True,
+        )
+        self.assertTrue(db.delete_income_operation(telegram_id, operation_id))
+
+        allocator = db.load_allocator(telegram_id)
+        reconcile_tax_obligation_balances(
+            telegram_id, allocator, date(2026, 9, 1),
+        )
+        item = next(
+            row for row in db.load_tax_obligations(telegram_id)
+            if row["id"] == obligation_id
+        )
+        self.assertEqual(item["saved_before"], Decimal("0"))
+        self.assertEqual(item["monthly_amount"], Decimal("600.00"))
 
     def test_notice_flag_survives_storage_round_trip(self):
         telegram_id = 880023
