@@ -173,6 +173,20 @@ def calculate_notice_plan(
     return remaining, months, catchup, annual_monthly
 
 
+def calculate_payment_progress(
+    target_amount: Decimal,
+    paid_before: Decimal,
+    current_payment: Decimal,
+) -> tuple[Decimal, Decimal, bool]:
+    """Return the cumulative payment, remainder and whether the tax is closed."""
+    target_amount = max(ZERO, Decimal(str(target_amount)))
+    paid_before = max(ZERO, Decimal(str(paid_before)))
+    current_payment = max(ZERO, Decimal(str(current_payment)))
+    paid_after = paid_before + current_payment
+    remaining = max(ZERO, target_amount - paid_after)
+    return paid_after, remaining, remaining <= ZERO
+
+
 def start_next_annual_tax_cycle(
     telegram_id: int,
     item: dict,
@@ -243,6 +257,7 @@ def tax_group(name: str) -> str:
 
 
 def collect_tax_statistics(telegram_id: int, year: int) -> tuple[dict, Decimal, Decimal]:
+    """Build current virtual balances inside the shared bank tax envelope."""
     groups: dict[str, dict] = {
         name: {"total": ZERO, "details": defaultdict(lambda: ZERO)}
         for name in TAX_GROUPS
@@ -251,27 +266,22 @@ def collect_tax_statistics(telegram_id: int, year: int) -> tuple[dict, Decimal, 
     allocator = db.load_allocator(telegram_id)
     planned = allocator.settings.planned_taxes if allocator else {}
     target_total = sum(planned.values(), ZERO)
-    total_all_time += sum(
-        (item["opening_amount"] for item in db.load_tax_obligations(telegram_id, active_only=False)),
-        ZERO,
-    )
+    for item in db.load_tax_obligations(telegram_id, active_only=False):
+        opening = item["opening_amount"]
+        if opening <= ZERO:
+            continue
+        group = tax_group(item["tax_type"])
+        groups[group]["total"] += opening
+        groups[group]["details"][item["object_name"]] += opening
+        total_all_time += opening
 
     for operation in db.load_operations(telegram_id, limit=10000):
         payload = operation.get("payload", {})
         if payload.get("type") != "income_distribution":
             continue
-        operation_date = payload.get("date") or operation.get("created_at", "")[:10]
-        try:
-            operation_year = date.fromisoformat(operation_date).year
-        except (TypeError, ValueError):
-            continue
-
         income_tax = Decimal(str(payload.get("tax", "0")))
         planned_tax = Decimal(str(payload.get("allocations", {}).get("КЖ:Налоги", "0")))
         total_all_time += income_tax + planned_tax
-
-        if operation_year != year:
-            continue
 
         if income_tax > ZERO:
             source = payload.get("income_type") or "Другой доход"
@@ -305,8 +315,18 @@ def collect_tax_statistics(telegram_id: int, year: int) -> tuple[dict, Decimal, 
                 groups["Налог на имущество"]["total"] += planned_tax
                 groups["Налог на имущество"]["details"]["Налоги Критического минимума"] += planned_tax
 
-    annual_total = sum((item["total"] for item in groups.values()), ZERO)
-    return groups, annual_total, total_all_time
+    for payment in db.load_tax_payments(telegram_id):
+        amount = payment["amount"]
+        group = tax_group(payment["tax_name"])
+        groups[group]["total"] = max(ZERO, groups[group]["total"] - amount)
+        detail = payment["tax_name"].split(" · ", 1)[-1]
+        if detail in groups[group]["details"]:
+            groups[group]["details"][detail] = max(
+                ZERO, groups[group]["details"][detail] - amount,
+            )
+
+    current_total = sum((item["total"] for item in groups.values()), ZERO)
+    return groups, current_total, total_all_time
 
 
 def apply_planned_tax_allocation(telegram_id: int, allocator, amount: Decimal) -> None:
@@ -409,16 +429,11 @@ def report_text(
     calculated_balance: Decimal | None,
     detailed: bool,
 ) -> str:
-    # Суммы, доли и виды налогов уже находятся на диаграмме. Под ней
-    # оставляем только постоянную подсказку о сроках оплаты.
-    due_year = annual_tax_due_date().year
-    tax_year = due_year - 1
     return (
         "🏛️ <b>НАЛОГИ</b>\n\n"
-        "<b>Налог на доход</b> платите по графику своего налогового режима.\n\n"
-        "На <b>квартиру, машину и землю</b> сейчас копим налог за "
-        f"<b>{tax_year}</b> год. Его нужно заплатить "
-        f"<b>до 1 декабря {due_year} года</b>."
+        "Все налоги храним на одном накопительном счёте в банке. "
+        "В Аллокаторе всегда видно, сколько денег отложено на каждый налог, "
+        "поэтому суммы не смешаются."
     )
 
 
@@ -443,32 +458,53 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         detailed,
     )
     rows = [[("+ Добавить налог", "taxes:add"), ("✎ Изменить налоги", "taxes:edit")]]
+    rows.append([("Получено уведомление ФНС", "taxes:notice")])
+    rows.append([("Налог оплачен", "taxes:payment")])
     rows.append([
-        ("Получено уведомление", "taxes:notice"),
-        ("Налог оплачен", "taxes:payment"),
+        ("← Главное меню", "taxes:back"),
+        ("ℹ️ Как это работает", "taxes:help"),
     ])
-    # Это разовая миграция для профилей, созданных до разделения КМ на
-    # постоянную основу и временные обязательства. После ручного изменения
-    # КМ база уже сохранена отдельно, поэтому старые отменённые планы нельзя
-    # вычитать повторно.
-    cancelled = []
-    if getattr(allocator.settings, "_base_critical_life_inferred", False):
-        cancelled = [
-            item for item in db.load_tax_obligations(telegram_id, active_only=False)
-            if not item["active"]
-            and item["saved_before"] < item["target_amount"]
-            and item["monthly_amount"] > ZERO
-        ]
-    if cancelled:
-        rows.append([("Восстановить КМ", "taxes:km_repair")])
-    rows.append([("← В главное меню", "taxes:back")])
 
     tax_values = {name: data["total"] for name, data in groups.items() if data["total"] > ZERO}
     await send_chart_report(
         message, tax_values,
         "НАЛОГИ", text, reply_markup=keyboard(rows),
-        subtitle=f"Фактически отложено ботом за {year} год", colors=TAX_COLORS,
+        subtitle="Сейчас отложено на налоговом счёте", colors=TAX_COLORS,
         center_amount=annual_total,
+        center_label="Отложено",
+        center_suffix="₽ на налоги",
+    )
+
+
+@router.callback_query(F.data == "taxes:help")
+async def taxes_help(callback: CallbackQuery):
+    await callback.answer()
+    current_year = date.today().year
+    tax_year = current_year - 1
+    await callback.message.answer(
+        "ℹ️ <b>КАК ЭТО РАБОТАЕТ</b>\n\n"
+        "<b>➤ Копим заранее</b>\n"
+        f"Сейчас, в {current_year} году, мы копим на налоги за квартиру, машину "
+        f"и землю за {tax_year} год.\n"
+        "<b>С января по октябрь</b> понемногу откладываем примерную сумму. "
+        "За ориентир берём налог прошлого года.\n\n"
+        "<b>➤ Сверяем с ФНС</b>\n"
+        "<b>1 ноября</b> я напомню проверить налоговое уведомление. Нажмите\n"
+        "Получено уведомление\n"
+        "и введите сумму из него.\n\n"
+        "<b>➤ Докапливаем</b>\n"
+        "Аллокатор пересчитает налог по уведомлению и, если нужно, поможет "
+        f"накопить недостающую сумму <b>до 1 декабря {current_year}.</b>\n\n"
+        "<b>➤ Платим</b>\n"
+        "• Налоги на имущество, транспорт и землю нужно оплатить "
+        f"до 1 декабря {current_year}.\n"
+        "• Налог на доход платите по графику своего налогового режима "
+        "(Самозанятый, ИП-УСН, Патент и т.п.).\n\n"
+        "<b>➤ Повторяем</b>\n"
+        "После оплаты нажмите\n"
+        "Налог оплачен\n"
+        "— и начнём копить на следующий платёж.",
+        reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
     )
 
 
@@ -631,7 +667,11 @@ async def tax_notice_item(callback: CallbackQuery, state: FSMContext):
 async def tax_payment_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
-    obligations = db.load_tax_obligations(callback.from_user.id)
+    obligations = [
+        item for item in db.load_tax_obligations(callback.from_user.id)
+        if db.tax_obligation_paid_amount(callback.from_user.id, item["id"])
+        < item["target_amount"]
+    ]
     if obligations:
         rows = [
             [(
@@ -677,19 +717,29 @@ async def tax_payment_obligation(callback: CallbackQuery, state: FSMContext):
     if item is None:
         await callback.message.answer("Налоговое обязательство не найдено.")
         return
+    already_paid = db.tax_obligation_paid_amount(callback.from_user.id, obligation_id)
+    remaining = max(ZERO, item["target_amount"] - already_paid)
+    if remaining <= ZERO:
+        await callback.message.answer(
+            "Этот налог уже отмечен как оплаченный.",
+            reply_markup=keyboard([[("← К налогам", "menu:taxes")]]),
+        )
+        return
     await state.update_data(
         tax_payment_name=f"{item['tax_type']} · {item['object_name']}",
         tax_payment_obligation_id=obligation_id,
         tax_payment_type=item["tax_type"],
         tax_payment_object=item["object_name"],
         tax_payment_due_date=item.get("due_date"),
-        tax_payment_suggested=str(item["target_amount"]),
+        tax_payment_suggested=str(remaining),
     )
     await state.set_state(TaxStates.payment_amount)
     await callback.message.answer(
         f"<b>{escape(item['tax_type'].upper())}</b>\n\n"
         f"{escape(item['object_name'])}\n"
-        f"Плановая сумма — <b>{money(item['target_amount'])}</b>.\n\n"
+        f"Начислено — <b>{money(item['target_amount'])}</b>\n"
+        f"Уже оплачено — <b>{money(already_paid)}</b>\n"
+        f"Осталось оплатить — <b>{money(remaining)}</b>\n\n"
         "Введите фактически оплаченную сумму.",
         reply_markup=keyboard([[("← Назад", "taxes:payment")]]),
     )
@@ -719,14 +769,48 @@ async def tax_payment_amount(message: Message, state: FSMContext):
         await message.answer("Введите положительную сумму.")
         return
     data = await state.get_data()
-    db.save_tax_payment(message.from_user.id, data["tax_payment_name"], amount)
     obligation_id = data.get("tax_payment_obligation_id")
+    item = None
+    paid_before = ZERO
+    remaining_after = ZERO
+    fully_paid = False
     if obligation_id:
         item = next(
             (row for row in db.load_tax_obligations(message.from_user.id) if row["id"] == obligation_id),
             None,
         )
-        if item is not None:
+        if item is None:
+            await state.clear()
+            await message.answer(
+                "Налоговое обязательство больше не активно.",
+                reply_markup=keyboard([[("← К налогам", "menu:taxes")]]),
+            )
+            return
+        paid_before = db.tax_obligation_paid_amount(message.from_user.id, int(obligation_id))
+        remaining_before = max(ZERO, item["target_amount"] - paid_before)
+        if amount > remaining_before:
+            await message.answer(
+                f"Осталось оплатить <b>{money(remaining_before)}</b>. "
+                "Введите сумму текущей оплаты, не превышающую остаток."
+            )
+            return
+        due_year = None
+        if item.get("due_date"):
+            try:
+                due_year = date.fromisoformat(item["due_date"]).year
+            except ValueError:
+                pass
+        db.save_tax_payment(
+            message.from_user.id,
+            data["tax_payment_name"],
+            amount,
+            obligation_id=int(obligation_id),
+            tax_due_year=due_year,
+        )
+        paid_after, remaining_after, fully_paid = calculate_payment_progress(
+            item["target_amount"], paid_before, amount,
+        )
+        if fully_paid:
             allocator = db.load_allocator(message.from_user.id)
             if allocator is not None:
                 key = tax_obligation_key(item['tax_type'], item['object_name'])
@@ -742,14 +826,28 @@ async def tax_payment_amount(message: Message, state: FSMContext):
                 db.save_allocator(message.from_user.id, allocator)
             else:
                 db.deactivate_tax_obligation(message.from_user.id, int(obligation_id))
+    else:
+        db.save_tax_payment(message.from_user.id, data["tax_payment_name"], amount)
 
     standard_annual = data.get("tax_payment_type") in ANNUAL_PROPERTY_TAXES
     await state.clear()
+    if obligation_id and not fully_paid:
+        await message.answer(
+            f"Частичная оплата <b>{escape(data['tax_payment_name'])}</b> "
+            f"на сумму <b>{money(amount)}</b> сохранена.\n\n"
+            f"Всего оплачено — <b>{money(paid_before + amount)}</b>\n"
+            f"Осталось оплатить — <b>{money(remaining_after)}</b>.\n\n"
+            "Налог остаётся активным. Аллокатор не начнёт новый годовой цикл, "
+            "пока вы не отметите оплату оставшейся суммы.",
+            reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
+        )
+        return
     if standard_annual:
         await message.answer(
             f"Оплата <b>{escape(data['tax_payment_name'])}</b> на сумму <b>{money(amount)}</b> сохранена.\n\n"
             "Аллокатор продолжит копить по последней известной годовой сумме. "
-            "Когда придёт новое уведомление ФНС, откройте «Налоги» и нажмите «Получено уведомление».",
+            "Когда придёт новое уведомление ФНС, откройте «Налоги» и нажмите "
+            "«Получено уведомление ФНС».",
             reply_markup=keyboard([[("← К налогам", "menu:taxes")]]),
         )
         return
@@ -774,26 +872,52 @@ async def save_next_tax_amount(message: Message, state: FSMContext):
         return
     key = tax_obligation_key(tax_type, object_name)
     saved = virtual_tax_balance(message.from_user.id, key)
+    source_id = data.get("tax_notice_source_id")
+    source_item = next(
+        (
+            item for item in db.load_tax_obligations(message.from_user.id)
+            if item["id"] == source_id
+        ),
+        None,
+    )
+    already_paid = (
+        db.tax_obligation_paid_amount(message.from_user.id, int(source_id))
+        if source_item is not None else ZERO
+    )
+    funded_for_cycle = min(amount, saved + already_paid)
     due = annual_tax_due_date()
     remaining, months, monthly, annual_monthly = calculate_notice_plan(
-        amount, saved, due, date.today(),
+        amount, funded_for_cycle, due, date.today(),
     )
-    for item in db.load_tax_obligations(message.from_user.id):
-        if tax_obligation_key(item["tax_type"], item["object_name"]) == key:
-            db.deactivate_tax_obligation(message.from_user.id, item["id"])
-    db.add_tax_obligation(
-        message.from_user.id,
-        tax_type,
-        object_name,
-        amount,
-        min(saved, amount),
-        months,
-        monthly,
-        due.isoformat(),
-        annual_monthly,
-        notice_received=True,
-        opening_amount=ZERO,
-    )
+    if source_item is not None:
+        db.update_tax_obligation_notice(
+            message.from_user.id,
+            int(source_id),
+            target_amount=amount,
+            saved_before=funded_for_cycle,
+            months=months,
+            monthly_amount=monthly,
+            annual_monthly_amount=annual_monthly,
+            due_date=due.isoformat(),
+        )
+        obligation_id = int(source_id)
+    else:
+        for item in db.load_tax_obligations(message.from_user.id):
+            if tax_obligation_key(item["tax_type"], item["object_name"]) == key:
+                db.deactivate_tax_obligation(message.from_user.id, item["id"])
+        obligation_id = db.add_tax_obligation(
+            message.from_user.id,
+            tax_type,
+            object_name,
+            amount,
+            funded_for_cycle,
+            months,
+            monthly,
+            due.isoformat(),
+            annual_monthly,
+            notice_received=True,
+            opening_amount=ZERO,
+        )
     allocator = db.load_allocator(message.from_user.id)
     if allocator is not None:
         set_tax_monthly_target(
@@ -805,13 +929,28 @@ async def save_next_tax_amount(message: Message, state: FSMContext):
             allocator.settings.tax_catchups[key] = monthly
         else:
             allocator.settings.tax_catchups.pop(key, None)
+        if already_paid >= amount and source_item is not None:
+            refreshed_item = next(
+                item for item in db.load_tax_obligations(message.from_user.id)
+                if item["id"] == obligation_id
+            )
+            db.deactivate_tax_obligation(message.from_user.id, obligation_id)
+            start_next_annual_tax_cycle(
+                message.from_user.id, refreshed_item, allocator, date.today(),
+            )
         db.save_allocator(message.from_user.id, allocator)
     await state.clear()
+    paid_line = (
+        f"Уже оплачено — <b>{money(already_paid)}</b>\n"
+        if already_paid > ZERO else ""
+    )
     await message.answer(
         f"<b>УВЕДОМЛЕНИЕ СОХРАНЕНО</b>\n\n"
         f"{escape(tax_type)} · {escape(str(object_name))}\n"
         f"Сумма из уведомления — <b>{money(amount)}</b>\n"
         f"Уже отложено — <b>{money(saved)}</b>\n"
+        + paid_line
+        +
         f"Осталось накопить — <b>{money(remaining)}</b>\n\n"
         f"Оплатить до — <b>{due.strftime('%d.%m.%Y')}</b>\n"
         f"Временно направлять в «Налоги» — <b>{money(monthly)}</b> в месяц\n"
@@ -856,7 +995,8 @@ async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TaxStates.obligation_name)
     await callback.message.answer(
         f"<b>{labels[code].upper()}</b>\n\nВведите название объекта или обязательства.\n"
-        "Например: Двушка, Автомобиль, Дача или Патент — первый платёж."
+        "Например: Двушка, Автомобиль, Дача или Патент — первый платёж.",
+        reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
     )
 
 
@@ -883,14 +1023,16 @@ async def tax_obligation_name(message: Message, state: FSMContext):
             "<b>КАКУЮ ГОДОВУЮ СУММУ ЗАПЛАНИРОВАТЬ?</b>\n\n"
             "Введите полную сумму из последнего налогового уведомления. "
             "Если уведомления ещё не было, укажите осторожную оценку.\n\n"
-            "——————\n<b>→ Введите сумму.</b>"
+            "——————\n<b>→ Введите сумму.</b>",
+            reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
         )
         return
     await state.set_state(TaxStates.obligation_due_date)
     await message.answer(
         f"<b>{escape(name.upper())}</b>\n\n"
         "<b>КОГДА НУЖНО ОПЛАТИТЬ НАЛОГ?</b>\n\n"
-        "Введите дату в формате <code>ДД.ММ.ГГГГ</code>."
+        "Введите дату в формате <code>ДД.ММ.ГГГГ</code>.",
+        reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
     )
 
 
@@ -959,7 +1101,8 @@ async def tax_obligation_due_date(message: Message, state: FSMContext):
     await message.answer(
         "<b>СКОЛЬКО ОСТАЛОСЬ НАКОПИТЬ К ДАТЕ ПЛАТЕЖА?</b>\n\n"
         "Укажите не полную сумму начисления, а остаток, которого сейчас не хватает в конверте «Налоги».\n\n"
-        "——————\n<b>→ Введите сумму.</b>"
+        "——————\n<b>→ Введите сумму.</b>",
+        reply_markup=keyboard([[('← Назад', 'taxes:add')]]),
     )
 
 
@@ -997,6 +1140,28 @@ async def save_tax_obligation(
     )
     tax_type = data["tax_goal_type"]
     object_name = data["tax_goal_name"]
+    key = tax_obligation_key(tax_type, object_name)
+    duplicate = next(
+        (
+            item for item in db.load_tax_obligations(telegram_id)
+            if tax_obligation_key(item["tax_type"], item["object_name"]).casefold()
+            == key.casefold()
+        ),
+        None,
+    )
+    if duplicate is not None:
+        await state.clear()
+        await message.answer(
+            f"Налог <b>{escape(tax_type)} · {escape(object_name)}</b> уже есть. "
+            "Измените существующий налог или внесите сумму из уведомления ФНС — "
+            "второй одинаковый план создавать не нужно.",
+            reply_markup=keyboard([
+                [("✎ Изменить налоги", "taxes:edit")],
+                [("Получено уведомление ФНС", "taxes:notice")],
+                [("← К налогам", "menu:taxes")],
+            ]),
+        )
+        return
     annual_monthly = (
         (target / Decimal("12")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
         if tax_type in ANNUAL_PROPERTY_TAXES else monthly
@@ -1020,7 +1185,6 @@ async def save_tax_obligation(
     if allocator is not None:
         pillow_before = allocator.settings.force_majeure_limit
         stabilizer_before = allocator.settings.stabilizer_full_limit
-        key = tax_obligation_key(tax_type, object_name)
         set_tax_monthly_target(allocator, key, annual_monthly)
         allocator.settings.tax_catchups[key] = monthly
         pillow_delta = allocator.settings.force_majeure_limit - pillow_before
@@ -1050,7 +1214,8 @@ async def save_tax_obligation(
         f"Срочно направлять в «Налоги» — <b>{money(monthly)}</b> в месяц\n"
         f"Годовая норма для КМ — <b>{money(annual_monthly)}</b> в месяц\n\n"
         "Годовая норма включена в Критический минимум. До 1 ноября Аллокатор собирает "
-        "предварительную сумму. Когда придёт уведомление ФНС, нажмите «Получено уведомление» "
+        "предварительную сумму. Когда придёт уведомление ФНС, нажмите "
+        "«Получено уведомление ФНС» "
         "и введите полную сумму из него."
         f"{reserve_effect}",
         reply_markup=main_menu_keyboard(telegram_id),
@@ -1118,6 +1283,29 @@ async def tax_obligation_view(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("taxgoal:delete:"))
+async def tax_obligation_delete_confirm(callback: CallbackQuery):
+    await callback.answer()
+    obligation_id = int(callback.data.rsplit(":", 1)[1])
+    item = next(
+        (item for item in db.load_tax_obligations(callback.from_user.id) if item["id"] == obligation_id),
+        None,
+    )
+    if item is None:
+        await callback.message.answer("Налог уже удалён.")
+        return
+    await callback.message.answer(
+        "<b>УДАЛИТЬ НАЛОГ ИЗ ПЛАНА?</b>\n\n"
+        f"{escape(item['tax_type'])} · {escape(item['object_name'])}\n\n"
+        "Аллокатор перестанет копить на него и исключит его годовую норму из КМ. "
+        "История уже внесённых пополнений и оплат сохранится.",
+        reply_markup=keyboard([
+            [("Удалить налог", f"taxgoal:delete_confirm:{obligation_id}")],
+            [("✖️ Отмена", f"taxgoal:view:{obligation_id}")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("taxgoal:delete_confirm:"))
 async def tax_obligation_delete(callback: CallbackQuery):
     await callback.answer()
     obligation_id = int(callback.data.rsplit(":", 1)[1])
@@ -1127,13 +1315,27 @@ async def tax_obligation_delete(callback: CallbackQuery):
     )
     if item is None:
         return
+    db.deactivate_tax_obligation(callback.from_user.id, obligation_id)
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is not None:
         key = tax_obligation_key(item['tax_type'], item['object_name'])
-        set_tax_monthly_target(allocator, key, ZERO)
-        allocator.settings.tax_catchups.pop(key, None)
+        remaining_same_tax = next(
+            (
+                row for row in db.load_tax_obligations(callback.from_user.id)
+                if tax_obligation_key(row["tax_type"], row["object_name"]) == key
+            ),
+            None,
+        )
+        if remaining_same_tax is None:
+            set_tax_monthly_target(allocator, key, ZERO)
+            allocator.settings.tax_catchups.pop(key, None)
+        else:
+            set_tax_monthly_target(
+                allocator, key, annual_tax_monthly_norm(remaining_same_tax),
+            )
+            if remaining_same_tax["monthly_amount"] > ZERO:
+                allocator.settings.tax_catchups[key] = remaining_same_tax["monthly_amount"]
         db.save_allocator(callback.from_user.id, allocator)
-    db.deactivate_tax_obligation(callback.from_user.id, obligation_id)
     await callback.message.answer(
         "Налог удалён из плана. Ранее сохранённая статистика не изменилась.",
         reply_markup=main_menu_keyboard(callback.from_user.id),
@@ -1147,4 +1349,24 @@ async def taxes_back(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "Что хотите сделать?",
         reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data == "taxreminder:not_paid")
+async def tax_reminder_not_paid(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "Хорошо. Налог остаётся активным. Если оплата не будет отмечена, "
+        "я напомню снова через неделю.",
+        reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
+    )
+
+
+@router.callback_query(F.data == "taxreminder:snooze")
+async def tax_reminder_snooze(callback: CallbackQuery):
+    await callback.answer()
+    db.snooze_tax_payment_reminders(callback.from_user.id, days=3)
+    await callback.message.answer(
+        "Напомню об оплате налога через 3 дня.",
+        reply_markup=keyboard([[('← К налогам', 'menu:taxes')]]),
     )

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 from typing import Optional
@@ -577,6 +577,8 @@ class Database:
                 tax_name TEXT NOT NULL,
                 amount TEXT NOT NULL,
                 paid_at TEXT NOT NULL,
+                obligation_id INTEGER,
+                tax_due_year INTEGER,
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
                     ON DELETE CASCADE
@@ -599,6 +601,9 @@ class Database:
                 annual_monthly_amount TEXT NOT NULL DEFAULT '0',
                 notice_received INTEGER NOT NULL DEFAULT 0,
                 ready_reminder_sent_at TEXT,
+                last_notice_reminder_at TEXT,
+                last_payment_reminder_at TEXT,
+                next_payment_reminder_date TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
@@ -644,6 +649,27 @@ class Database:
             cursor.execute(
                 "ALTER TABLE tax_obligations ADD COLUMN notice_received INTEGER NOT NULL DEFAULT 0"
             )
+        if "last_notice_reminder_at" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN last_notice_reminder_at TEXT"
+            )
+        if "last_payment_reminder_at" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN last_payment_reminder_at TEXT"
+            )
+        if "next_payment_reminder_date" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN next_payment_reminder_date TEXT"
+            )
+
+        payment_columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(tax_payments)").fetchall()
+        }
+        if "obligation_id" not in payment_columns:
+            cursor.execute("ALTER TABLE tax_payments ADD COLUMN obligation_id INTEGER")
+        if "tax_due_year" not in payment_columns:
+            cursor.execute("ALTER TABLE tax_payments ADD COLUMN tax_due_year INTEGER")
 
         state_columns = {
             row["name"]
@@ -2324,21 +2350,39 @@ class Database:
             return {}, False
         return deserialize_json(row["planned_taxes"]), bool(row["track_payments"])
 
-    def save_tax_payment(self, telegram_id: int, tax_name: str, amount: Decimal):
+    def save_tax_payment(
+        self,
+        telegram_id: int,
+        tax_name: str,
+        amount: Decimal,
+        *,
+        obligation_id: int | None = None,
+        tax_due_year: int | None = None,
+    ) -> int:
         self.ensure_user(telegram_id)
-        self.connection.execute(
+        cursor = self.connection.execute(
             """
-            INSERT INTO tax_payments (telegram_id, tax_name, amount, paid_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO tax_payments (
+                telegram_id, tax_name, amount, paid_at, obligation_id, tax_due_year
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (telegram_id, tax_name, decimal_to_string(amount), datetime.utcnow().isoformat()),
+            (
+                telegram_id,
+                tax_name,
+                decimal_to_string(amount),
+                datetime.utcnow().isoformat(),
+                obligation_id,
+                tax_due_year,
+            ),
         )
         self.connection.commit()
+        return int(cursor.lastrowid)
 
     def load_tax_payments(self, telegram_id: int, year: int | None = None) -> list[dict]:
         rows = self.connection.execute(
             """
-            SELECT tax_name, amount, paid_at FROM tax_payments
+            SELECT id, tax_name, amount, paid_at, obligation_id, tax_due_year
+            FROM tax_payments
             WHERE telegram_id = ? ORDER BY id DESC
             """,
             (telegram_id,),
@@ -2349,11 +2393,24 @@ class Database:
             if year is not None and paid_at.year != year:
                 continue
             result.append({
+                "id": int(row["id"]),
                 "tax_name": row["tax_name"],
                 "amount": string_to_decimal(row["amount"]),
                 "paid_at": row["paid_at"],
+                "obligation_id": row["obligation_id"],
+                "tax_due_year": row["tax_due_year"],
             })
         return result
+
+    def tax_obligation_paid_amount(self, telegram_id: int, obligation_id: int) -> Decimal:
+        rows = self.connection.execute(
+            """
+            SELECT amount FROM tax_payments
+            WHERE telegram_id = ? AND obligation_id = ?
+            """,
+            (telegram_id, obligation_id),
+        ).fetchall()
+        return sum((string_to_decimal(row["amount"]) for row in rows), Decimal("0"))
 
     def add_tax_obligation(
         self,
@@ -2427,6 +2484,9 @@ class Database:
                 "notice_received": bool(row["notice_received"]),
                 "due_date": row["due_date"],
                 "ready_reminder_sent_at": row["ready_reminder_sent_at"],
+                "last_notice_reminder_at": row["last_notice_reminder_at"],
+                "last_payment_reminder_at": row["last_payment_reminder_at"],
+                "next_payment_reminder_date": row["next_payment_reminder_date"],
                 "active": bool(row["active"]),
             }
             for row in rows
@@ -2596,7 +2656,41 @@ class Database:
         )
         self.connection.commit()
 
+    def update_tax_obligation_notice(
+        self,
+        telegram_id: int,
+        obligation_id: int,
+        *,
+        target_amount: Decimal,
+        saved_before: Decimal,
+        months: int,
+        monthly_amount: Decimal,
+        annual_monthly_amount: Decimal,
+        due_date: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tax_obligations
+            SET target_amount = ?, saved_before = ?, months = ?, monthly_amount = ?,
+                annual_monthly_amount = ?, due_date = ?, notice_received = 1,
+                ready_reminder_sent_at = NULL, last_notice_reminder_at = NULL
+            WHERE telegram_id = ? AND id = ? AND active = 1
+            """,
+            (
+                decimal_to_string(target_amount),
+                decimal_to_string(saved_before),
+                int(months),
+                decimal_to_string(monthly_amount),
+                decimal_to_string(annual_monthly_amount),
+                due_date,
+                telegram_id,
+                obligation_id,
+            ),
+        )
+        self.connection.commit()
+
     def due_tax_readiness_reminders(self, today: str) -> list[dict]:
+        """Return annual taxes due for the Nov 1/15/25 notice reminders."""
         rows = self.connection.execute(
             """
             SELECT * FROM tax_obligations
@@ -2604,14 +2698,26 @@ class Database:
               AND tax_type IN ('Налог на имущество', 'Транспортный налог', 'Земельный налог')
               AND due_date IS NOT NULL
               AND notice_received = 0
-              AND (substr(due_date, 1, 4) || '-11-01') <= ?
-              AND ready_reminder_sent_at IS NULL
             ORDER BY telegram_id, id
             """,
-            (today,),
         ).fetchall()
-        return [
-            {
+        today_date = date.fromisoformat(today)
+        result = []
+        for row in rows:
+            due = date.fromisoformat(row["due_date"])
+            stages = (
+                date(due.year, 11, 1),
+                date(due.year, 11, 15),
+                date(due.year, 11, 25),
+            )
+            reached = [stage for stage in stages if stage <= today_date < due]
+            if not reached:
+                continue
+            last_raw = row["last_notice_reminder_at"] or row["ready_reminder_sent_at"]
+            last_date = date.fromisoformat(last_raw[:10]) if last_raw else None
+            if last_date is not None and last_date >= reached[-1]:
+                continue
+            result.append({
                 "id": int(row["id"]),
                 "telegram_id": int(row["telegram_id"]),
                 "tax_type": row["tax_type"],
@@ -2619,17 +2725,106 @@ class Database:
                 "target_amount": string_to_decimal(row["target_amount"]),
                 "saved_before": string_to_decimal(row["saved_before"]),
                 "due_date": row["due_date"],
-            }
-            for row in rows
-        ]
+            })
+        return result
 
-    def mark_tax_readiness_reminder_sent(self, telegram_id: int, obligation_id: int) -> None:
+    def mark_tax_readiness_reminder_sent(
+        self, telegram_id: int, obligation_id: int, sent_on: str | None = None,
+    ) -> None:
+        sent_on = sent_on or date.today().isoformat()
         self.connection.execute(
             """
-            UPDATE tax_obligations SET ready_reminder_sent_at = ?
+            UPDATE tax_obligations
+            SET ready_reminder_sent_at = ?, last_notice_reminder_at = ?
             WHERE telegram_id = ? AND id = ?
             """,
-            (datetime.utcnow().isoformat(), telegram_id, obligation_id),
+            (
+                datetime.utcnow().isoformat(),
+                sent_on,
+                telegram_id,
+                obligation_id,
+            ),
+        )
+        self.connection.commit()
+
+    def due_tax_payment_reminders(self, today: str) -> list[dict]:
+        """Return unpaid annual taxes due today or overdue.
+
+        The first reminders are sent on Dec 1 and Dec 2. After that they repeat
+        weekly, unless the user explicitly asks to be reminded in three days.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT * FROM tax_obligations
+            WHERE active = 1
+              AND tax_type IN ('Налог на имущество', 'Транспортный налог', 'Земельный налог')
+              AND due_date IS NOT NULL
+            ORDER BY telegram_id, id
+            """
+        ).fetchall()
+        today_date = date.fromisoformat(today)
+        result = []
+        for row in rows:
+            due = date.fromisoformat(row["due_date"])
+            if today_date < due:
+                continue
+            paid = self.tax_obligation_paid_amount(int(row["telegram_id"]), int(row["id"]))
+            target = string_to_decimal(row["target_amount"])
+            remaining = max(Decimal("0"), target - paid)
+            if remaining <= Decimal("0"):
+                continue
+
+            next_raw = row["next_payment_reminder_date"]
+            last_raw = row["last_payment_reminder_at"]
+            if next_raw:
+                should_send = date.fromisoformat(next_raw) <= today_date
+            elif not last_raw:
+                should_send = True
+            else:
+                last_date = date.fromisoformat(last_raw[:10])
+                first_followup = due + timedelta(days=1)
+                if last_date <= due and today_date >= first_followup:
+                    should_send = True
+                else:
+                    should_send = today_date >= last_date + timedelta(days=7)
+            if not should_send:
+                continue
+            result.append({
+                "id": int(row["id"]),
+                "telegram_id": int(row["telegram_id"]),
+                "tax_type": row["tax_type"],
+                "object_name": row["object_name"],
+                "target_amount": target,
+                "paid_amount": paid,
+                "remaining_amount": remaining,
+                "due_date": row["due_date"],
+            })
+        return result
+
+    def mark_tax_payment_reminder_sent(
+        self, telegram_id: int, obligation_id: int, sent_on: str | None = None,
+    ) -> None:
+        sent_on = sent_on or date.today().isoformat()
+        self.connection.execute(
+            """
+            UPDATE tax_obligations
+            SET last_payment_reminder_at = ?, next_payment_reminder_date = NULL
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (sent_on, telegram_id, obligation_id),
+        )
+        self.connection.commit()
+
+    def snooze_tax_payment_reminders(self, telegram_id: int, days: int = 3) -> None:
+        next_date = (date.today() + timedelta(days=max(1, days))).isoformat()
+        self.connection.execute(
+            """
+            UPDATE tax_obligations
+            SET next_payment_reminder_date = ?
+            WHERE telegram_id = ? AND active = 1
+              AND tax_type IN ('Налог на имущество', 'Транспортный налог', 'Земельный налог')
+            """,
+            (next_date, telegram_id),
         )
         self.connection.commit()
 
@@ -2707,7 +2902,9 @@ class Database:
                 self.connection.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (telegram_id,))
             self.connection.execute(
                 "UPDATE tax_obligations SET opening_amount = '0', saved_before = '0', "
-                "ready_reminder_sent_at = NULL WHERE telegram_id = ?", (telegram_id,))
+                "ready_reminder_sent_at = NULL, last_notice_reminder_at = NULL, "
+                "last_payment_reminder_at = NULL, next_payment_reminder_date = NULL "
+                "WHERE telegram_id = ?", (telegram_id,))
             self.connection.execute(
                 "UPDATE planned_payments SET saved_amount = '0' WHERE telegram_id = ?", (telegram_id,))
 

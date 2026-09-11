@@ -18,7 +18,18 @@ def chart_items(values, preserve_order=False):
     return items
 
 
-def make_chart(values, title, subtitle='', colors=None, percentages_only=False, *, preserve_order=False, center_amount=None):
+def make_chart(
+    values,
+    title,
+    subtitle='',
+    colors=None,
+    percentages_only=False,
+    *,
+    preserve_order=False,
+    center_amount=None,
+    center_label='Доход за период',
+    center_suffix='₽ до налогов',
+):
     from PIL import Image, ImageDraw, ImageFont
     items = chart_items(values, preserve_order)
     if not items:
@@ -50,9 +61,9 @@ def make_chart(values, title, subtitle='', colors=None, percentages_only=False, 
         size = 44
         while draw.textlength(center, font=font(size, True)) > 258 and size > 14:
             size -= 1
-        draw.text((540, 435), 'Доход за период', anchor='mm', font=font(27), fill='#D0C2D8')
+        draw.text((540, 435), center_label, anchor='mm', font=font(27), fill='#D0C2D8')
         draw.text((540, 485), center, anchor='mm', font=font(size, True), fill='#F9F4ED')
-        draw.text((540, 530), '₽ до налогов', anchor='mm', font=font(27), fill='#D0C2D8')
+        draw.text((540, 530), center_suffix, anchor='mm', font=font(27), fill='#D0C2D8')
     for i, (label, value) in enumerate(items):
         col, row = divmod(i, legend_rows)
         x = 48 + col * 520

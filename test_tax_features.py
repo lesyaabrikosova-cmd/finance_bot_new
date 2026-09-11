@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import date
@@ -52,6 +53,8 @@ from taxes import (  # noqa: E402
     annual_tax_due_date,
     apply_planned_tax_allocation,
     calculate_notice_plan,
+    calculate_payment_progress,
+    collect_tax_statistics,
     make_pie_chart,
     refresh_planned_tax_targets,
     report_text,
@@ -64,6 +67,7 @@ from taxes import (  # noqa: E402
 )
 from financial_engine import AllocatorState, FinancialAllocator, Goal, PhaseLifeBudget, UserSettings  # noqa: E402
 from storage import (  # noqa: E402
+    Database,
     db,
     deserialize_income_rhythm,
     deserialize_income_types,
@@ -73,6 +77,42 @@ from storage import (  # noqa: E402
 
 
 class TaxFeatureTests(unittest.TestCase):
+    def test_legacy_tax_tables_receive_cycle_and_reminder_columns(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            database_path = os.path.join(data_dir, "legacy.db")
+            connection = sqlite3.connect(database_path)
+            connection.execute(
+                "CREATE TABLE tax_payments (id INTEGER PRIMARY KEY, telegram_id INTEGER, "
+                "tax_name TEXT, amount TEXT, paid_at TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE tax_obligations (id INTEGER PRIMARY KEY, telegram_id INTEGER, "
+                "tax_type TEXT, object_name TEXT, target_amount TEXT, opening_amount TEXT, "
+                "saved_before TEXT, months INTEGER, monthly_amount TEXT, "
+                "annual_monthly_amount TEXT, notice_received INTEGER, "
+                "ready_reminder_sent_at TEXT, due_date TEXT, active INTEGER)"
+            )
+            connection.commit()
+            connection.close()
+
+            migrated = Database(database_path)
+            payment_columns = {
+                row["name"] for row in migrated.connection.execute(
+                    "PRAGMA table_info(tax_payments)"
+                ).fetchall()
+            }
+            obligation_columns = {
+                row["name"] for row in migrated.connection.execute(
+                    "PRAGMA table_info(tax_obligations)"
+                ).fetchall()
+            }
+            migrated.close()
+            self.assertIn("obligation_id", payment_columns)
+            self.assertIn("tax_due_year", payment_columns)
+            self.assertIn("last_notice_reminder_at", obligation_columns)
+            self.assertIn("last_payment_reminder_at", obligation_columns)
+            self.assertIn("next_payment_reminder_date", obligation_columns)
+
     def test_onboarding_goal_monthly_amounts_become_exact_percentages(self):
         goals = normalized_onboarding_goals([
             {"name": "Подарки", "monthly": "3500"},
@@ -1027,7 +1067,7 @@ class TaxFeatureTests(unittest.TestCase):
             Decimal("583.34"),
         )
 
-    def test_tax_report_leaves_amounts_to_diagram_and_uses_current_years(self):
+    def test_tax_report_leaves_amounts_to_diagram_and_explains_shared_envelope(self):
         groups = {
             name: {"total": Decimal("0"), "details": {}}
             for name in (
@@ -1038,10 +1078,8 @@ class TaxFeatureTests(unittest.TestCase):
             )
         }
         text = report_text(groups, Decimal("0"), 2026, Decimal("0"), None, True)
-        due_year = annual_tax_due_date().year
-        self.assertIn("Налог на доход</b> платите", text)
-        self.assertIn(f"за <b>{due_year - 1}</b> год", text)
-        self.assertIn(f"до 1 декабря {due_year} года", text)
+        self.assertIn("Все налоги храним на одном накопительном счёте", text)
+        self.assertIn("суммы не смешаются", text)
         self.assertNotIn("0 ₽", text)
         self.assertEqual(TAX_COLORS["Налог на доход"], "#7656D8")
         self.assertEqual(TAX_COLORS["Транспортный налог"], "#7A7F87")
@@ -1305,9 +1343,129 @@ class TaxFeatureTests(unittest.TestCase):
         )
         rows = db.due_tax_readiness_reminders("2026-11-01")
         self.assertTrue(any(row["id"] == obligation_id for row in rows))
-        db.mark_tax_readiness_reminder_sent(telegram_id, obligation_id)
+        db.mark_tax_readiness_reminder_sent(telegram_id, obligation_id, "2026-11-01")
         rows = db.due_tax_readiness_reminders("2026-11-01")
         self.assertFalse(any(row["id"] == obligation_id for row in rows))
+
+        rows = db.due_tax_readiness_reminders("2026-11-15")
+        self.assertTrue(any(row["id"] == obligation_id for row in rows))
+        db.mark_tax_readiness_reminder_sent(telegram_id, obligation_id, "2026-11-15")
+        rows = db.due_tax_readiness_reminders("2026-11-25")
+        self.assertTrue(any(row["id"] == obligation_id for row in rows))
+
+    def test_partial_tax_payment_stays_open_until_full_amount(self):
+        paid, remaining, closed = calculate_payment_progress(
+            Decimal("12000"), Decimal("0"), Decimal("4000"),
+        )
+        self.assertEqual(paid, Decimal("4000"))
+        self.assertEqual(remaining, Decimal("8000"))
+        self.assertFalse(closed)
+
+        paid, remaining, closed = calculate_payment_progress(
+            Decimal("12000"), paid, Decimal("8000"),
+        )
+        self.assertEqual(paid, Decimal("12000"))
+        self.assertEqual(remaining, Decimal("0"))
+        self.assertTrue(closed)
+
+    def test_tax_payment_is_linked_to_obligation_and_due_year(self):
+        telegram_id = 880026
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Транспортный налог", "Автомобиль", Decimal("12000"),
+            Decimal("12000"), 1, Decimal("0"), "2026-12-01",
+        )
+        db.save_tax_payment(
+            telegram_id,
+            "Транспортный налог · Автомобиль",
+            Decimal("4000"),
+            obligation_id=obligation_id,
+            tax_due_year=2026,
+        )
+        self.assertEqual(
+            db.tax_obligation_paid_amount(telegram_id, obligation_id), Decimal("4000"),
+        )
+        payment = db.load_tax_payments(telegram_id)[0]
+        self.assertEqual(payment["obligation_id"], obligation_id)
+        self.assertEqual(payment["tax_due_year"], 2026)
+
+    def test_tax_chart_uses_current_balance_after_partial_payment(self):
+        telegram_id = 880028
+        key = "Транспортный налог · Автомобиль"
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Транспортный налог", "Автомобиль", Decimal("12000"),
+            Decimal("0"), 1, Decimal("0"), "2026-12-01",
+        )
+        db.save_operation(telegram_id, "income_distribution", {
+            "type": "income_distribution",
+            "date": "2026-10-01",
+            "planned_tax_details": {key: "12000"},
+            "allocations": {"КЖ:Налоги": "12000"},
+        })
+        db.save_tax_payment(
+            telegram_id, key, Decimal("4000"),
+            obligation_id=obligation_id, tax_due_year=2026,
+        )
+        groups, current_total, _ = collect_tax_statistics(telegram_id, 2026)
+        self.assertEqual(groups["Транспортный налог"]["total"], Decimal("8000"))
+        self.assertEqual(current_total, Decimal("8000"))
+
+    def test_fns_notice_keeps_payments_linked_to_same_obligation(self):
+        telegram_id = 880029
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Налог на имущество", "Квартира", Decimal("15000"),
+            Decimal("8000"), 2, Decimal("3500"), "2026-12-01",
+        )
+        db.save_tax_payment(
+            telegram_id, "Налог на имущество · Квартира", Decimal("4000"),
+            obligation_id=obligation_id, tax_due_year=2026,
+        )
+        db.update_tax_obligation_notice(
+            telegram_id,
+            obligation_id,
+            target_amount=Decimal("14400"),
+            saved_before=Decimal("8000"),
+            months=1,
+            monthly_amount=Decimal("6400"),
+            annual_monthly_amount=Decimal("1200"),
+            due_date="2026-12-01",
+        )
+        item = next(
+            row for row in db.load_tax_obligations(telegram_id)
+            if row["id"] == obligation_id
+        )
+        self.assertTrue(item["notice_received"])
+        self.assertEqual(item["target_amount"], Decimal("14400"))
+        self.assertEqual(
+            db.tax_obligation_paid_amount(telegram_id, obligation_id), Decimal("4000"),
+        )
+
+    def test_tax_payment_reminders_repeat_after_deadline(self):
+        telegram_id = 880027
+        obligation_id = db.add_tax_obligation(
+            telegram_id, "Налог на имущество", "Квартира", Decimal("900"),
+            Decimal("900"), 1, Decimal("0"), "2026-12-01",
+            notice_received=True,
+        )
+        self.assertFalse(any(
+            row["id"] == obligation_id
+            for row in db.due_tax_payment_reminders("2026-11-30")
+        ))
+        rows = db.due_tax_payment_reminders("2026-12-01")
+        self.assertTrue(any(row["id"] == obligation_id for row in rows))
+        db.mark_tax_payment_reminder_sent(telegram_id, obligation_id, "2026-12-01")
+        self.assertFalse(any(
+            row["id"] == obligation_id
+            for row in db.due_tax_payment_reminders("2026-12-01")
+        ))
+        rows = db.due_tax_payment_reminders("2026-12-02")
+        self.assertTrue(any(row["id"] == obligation_id for row in rows))
+        db.mark_tax_payment_reminder_sent(telegram_id, obligation_id, "2026-12-02")
+        self.assertFalse(any(
+            row["id"] == obligation_id
+            for row in db.due_tax_payment_reminders("2026-12-08")
+        ))
+        rows = db.due_tax_payment_reminders("2026-12-09")
+        self.assertTrue(any(row["id"] == obligation_id for row in rows))
 
     def test_notice_received_does_not_trigger_preliminary_reminder(self):
         telegram_id = 880024

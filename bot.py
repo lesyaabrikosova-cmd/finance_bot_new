@@ -779,7 +779,7 @@ async def period_reminder_worker(bot: Bot):
             heading = (
                 "К этому моменту ФНС должна направить налоговое уведомление. "
                 "Проверьте его в личном кабинете ФНС или на Госуслугах.\n\n"
-                "Затем нажмите «Получено уведомление» и введите полную сумму из него. "
+                "Затем нажмите «Получено уведомление ФНС» и введите полную сумму из него. "
                 "Аллокатор сам учтёт деньги, которые уже отнёс на этот налог."
             )
             try:
@@ -788,14 +788,49 @@ async def period_reminder_worker(bot: Bot):
                     "<b>ПРОВЕРЬТЕ НАЛОГОВОЕ УВЕДОМЛЕНИЕ</b>\n\n"
                     + heading + "\n\n" + "\n".join(lines),
                     reply_markup=keyboard([
-                        [("Получено уведомление", "taxes:notice")],
+                        [("Получено уведомление ФНС", "taxes:notice")],
                         [("← В главное меню", "taxes:back")],
                     ]),
                 )
                 for item in items:
-                    db.mark_tax_readiness_reminder_sent(telegram_id, item["id"])
+                    db.mark_tax_readiness_reminder_sent(telegram_id, item["id"], today)
             except Exception:
                 logging.exception("Не удалось отправить напоминание о налогах пользователю %s", telegram_id)
+
+        payment_rows = db.due_tax_payment_reminders(today)
+        payment_by_user: dict[int, list[dict]] = {}
+        for item in payment_rows:
+            payment_by_user.setdefault(item["telegram_id"], []).append(item)
+        for telegram_id, items in payment_by_user.items():
+            lines = [
+                f"• {escape(item['tax_type'])} · {escape(item['object_name'])} — "
+                f"осталось оплатить {fmt_money(item['remaining_amount'])} ₽"
+                for item in items
+            ]
+            overdue = any(today > item["due_date"] for item in items)
+            title = "НАЛОГ ЕЩЁ НЕ ОТМЕЧЕН КАК ОПЛАЧЕННЫЙ" if overdue else "СЕГОДНЯ СРОК ОПЛАТЫ НАЛОГА"
+            body = (
+                "Если вы уже заплатили налог полностью или частично, внесите фактическую "
+                "сумму. Пока вся сумма не отмечена как оплаченная, налог останется активным."
+            )
+            try:
+                await bot.send_message(
+                    telegram_id,
+                    f"<b>{title}</b>\n\n" + "\n".join(lines) + "\n\n" + body,
+                    reply_markup=keyboard([
+                        [
+                            ("Налог оплачен", "taxes:payment"),
+                            ("Оплачен частично", "taxes:payment"),
+                        ],
+                        [("Ещё не оплачен", "taxreminder:not_paid")],
+                        [("Напомнить через 3 дня", "taxreminder:snooze")],
+                        [("← В главное меню", "taxes:back")],
+                    ]),
+                )
+                for item in items:
+                    db.mark_tax_payment_reminder_sent(telegram_id, item["id"], today)
+            except Exception:
+                logging.exception("Не удалось отправить напоминание об оплате налогов пользователю %s", telegram_id)
         await asyncio.sleep(3600)
 
 
