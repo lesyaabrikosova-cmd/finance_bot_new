@@ -1098,26 +1098,13 @@ async def send_balances(
         settings.critical_life
     )
 
-    sustainable_life = (
-        D(settings.critical_life)
-        + D(settings.household_reserve)
-    )
-
-    life_balance = D(
-        state.life_balance
-    )
-
     until_kzh = max(
         Decimal("0"),
         critical_minimum
-        - life_balance,
+        - allocator.critical_life_progress,
     )
 
-    until_uzh = max(
-        Decimal("0"),
-        sustainable_life
-        - life_balance,
-    )
+    until_uzh = allocator.sustainable_life_remaining
 
     next_info = (
         allocator.next_mode_info()

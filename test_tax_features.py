@@ -98,6 +98,7 @@ class TaxFeatureTests(unittest.TestCase):
             "target_amount": Decimal("12000"),
             "monthly_amount": Decimal("6000"),
             "annual_monthly_amount": Decimal("1000"),
+            "notice_received": True,
             "due_date": "2026-12-01",
         }
         text = tax_obligation_card_text(item, Decimal("0"))
@@ -230,6 +231,7 @@ class TaxFeatureTests(unittest.TestCase):
             self.assertIn("last_notice_reminder_at", obligation_columns)
             self.assertIn("last_payment_reminder_at", obligation_columns)
             self.assertIn("next_payment_reminder_date", obligation_columns)
+            self.assertIn("applied_annual_monthly_amount", obligation_columns)
 
     def test_onboarding_goal_monthly_amounts_become_exact_percentages(self):
         goals = normalized_onboarding_goals([
@@ -379,9 +381,9 @@ class TaxFeatureTests(unittest.TestCase):
             },
         ])
         self.assertIn("<b><u>ЗДОРОВЬЕ</u></b>", text)
-        self.assertIn("<b>Медицинские услуги</b> — 32 970,00 ₽ / год", text)
+        self.assertIn("<b>Медицинские услуги</b> — 32 970 ₽ / год", text)
         self.assertIn("<b><u>ОДЕЖДА</u></b>", text)
-        self.assertIn("<b>Одежда</b> — 55 452,00 ₽ / 7 мес.", text)
+        self.assertIn("<b>Одежда</b> — 55 452 ₽ / 7 мес.", text)
         self.assertNotIn("Обязательная жизнь", text)
 
     def test_life_summary_displays_week_instead_of_internal_month_fraction(self):
@@ -394,7 +396,7 @@ class TaxFeatureTests(unittest.TestCase):
             "monthly": "455",
         }])
 
-        self.assertIn("<b>Питьевая вода</b> — 105,00 ₽ / неделю", text)
+        self.assertIn("<b>Питьевая вода</b> — 105 ₽ / неделю", text)
         self.assertNotIn("0.230769", text)
 
     def test_reserve_progress_block_marks_only_reached_target(self):
@@ -1042,7 +1044,7 @@ class TaxFeatureTests(unittest.TestCase):
         self.assertEqual(storage["storage"], "separate")
         self.assertEqual(storage["envelope_name"], "Налоги")
 
-    def test_tax_cannot_leave_common_tax_envelope(self):
+    def test_unconfirmed_tax_does_not_enter_life_categories(self):
         legacy_or_manually_changed = {
             "category": "transport",
             "subcategory": "tax",
@@ -1052,7 +1054,7 @@ class TaxFeatureTests(unittest.TestCase):
             "envelope_name": "Транспортный налог",
         }
         categories = life_categories_from_storage([legacy_or_manually_changed])
-        self.assertEqual(categories, {"Налоги": Decimal("1000.00")})
+        self.assertEqual(categories, {})
 
     def test_contract_obligations_can_select_one_phone_but_not_another(self):
         data = {
@@ -1152,19 +1154,21 @@ class TaxFeatureTests(unittest.TestCase):
                 "item_name": "Двушка",
                 "amount": "6000",
                 "monthly": "500",
+                "annual_norm_active": True,
             },
             {
                 "subcategory": "property_tax",
                 "item_name": "Однушка",
                 "amount": "3600",
                 "monthly": "300",
+                "annual_norm_active": True,
             },
         ]
         result = planned_taxes_from_storage(items)
         self.assertEqual(result["Налог на имущество · Двушка"], Decimal("500.00"))
         self.assertEqual(result["Налог на имущество · Однушка"], Decimal("300.00"))
 
-    def test_onboarding_uses_annual_tax_norm_in_life_and_keeps_catchup_separate(self):
+    def test_onboarding_keeps_first_tax_out_of_life_until_payment(self):
         item = {
             "category": "housing",
             "category_label": "Недвижимость",
@@ -1175,15 +1179,12 @@ class TaxFeatureTests(unittest.TestCase):
             "monthly": "3500",
             "due_date": "2026-12-01",
         }
-        self.assertEqual(km_group_totals([item])["Недвижимость"], Decimal("583.34"))
+        self.assertEqual(km_group_totals([item]), {})
         storage = build_default_km_storage([item])
         self.assertEqual(storage[0]["monthly"], "3500.00")
-        self.assertEqual(storage[0]["annual_monthly"], "583.34")
-        self.assertEqual(life_categories_from_storage(storage)["Налоги"], Decimal("583.34"))
-        self.assertEqual(
-            planned_taxes_from_storage(storage)["Налог на имущество · Квартира"],
-            Decimal("583.34"),
-        )
+        self.assertEqual(storage[0]["annual_monthly"], "0")
+        self.assertEqual(life_categories_from_storage(storage), {})
+        self.assertEqual(planned_taxes_from_storage(storage), {})
 
     def test_tax_report_leaves_amounts_to_diagram_and_explains_shared_envelope(self):
         groups = {

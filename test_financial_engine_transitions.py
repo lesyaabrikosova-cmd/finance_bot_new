@@ -51,7 +51,7 @@ class ModeTransitionTests(unittest.TestCase):
             self.assert_money(allocations["Инвестиции"], "35.00")
             self.assert_money(allocations["Цели:Цель"], "35.00")
 
-    def test_stage_b_splits_children_into_the_same_named_envelope(self):
+    def test_stage_b_keeps_household_reserve_in_one_envelope(self):
         settings = UserSettings(
             has_debts=False,
             employment_type="Наёмный",
@@ -64,8 +64,8 @@ class ModeTransitionTests(unittest.TestCase):
         )
         allocator = FinancialAllocator(settings, AllocatorState(life_balance=D("100")))
         result = allocator.process_income(D("100"), "Зарплата", tax_override=D("0"))
-        self.assertEqual(result.allocations["БР:Дети"], D("40"))
-        self.assertEqual(result.allocations["Бытовой резерв"], D("60"))
+        self.assertNotIn("БР:Дети", result.allocations)
+        self.assertEqual(result.allocations["Бытовой резерв"], D("100"))
         self.assertEqual(allocator.state.life_balance, D("200"))
 
     def test_profile_specific_mode_scales(self):
@@ -605,12 +605,55 @@ class ModeTransitionTests(unittest.TestCase):
         )
         state = AllocatorState(
             life_balance=D(life),
+            accumulated_minimum_payments=(
+                D("10") if debt is not None and D(life) >= D("1000") else D("0")
+            ),
             pillow_minimum=D(minimum),
             pillow_force_majeure=max(D("0"), D(force) - D(minimum)),
             pillow_stabilizer=D(stabilizer),
             goal_balances={"Цель": D("0")},
         )
         return FinancialAllocator(settings, state)
+
+    def test_critical_target_change_does_not_reclassify_household_reserve(self):
+        allocator = FinancialAllocator(
+            UserSettings(
+                has_debts=False,
+                employment_type="Наёмный",
+                critical_life=D("90000"),
+                household_reserve=D("20000"),
+                average_income=D("200000"),
+                life_categories={"Жильё и обязательное": D("90000")},
+                bracket_a=D("0"),
+                bracket_b=D("0"),
+            ),
+            AllocatorState(
+                life_balance=D("110000"),
+                household_reserve_progress=D("20000"),
+            ),
+        )
+
+        allocator.settings.critical_life = D("95000")
+        self.assertEqual(allocator.critical_life_progress, D("90000"))
+        self.assertEqual(allocator.household_reserve_progress, D("20000"))
+        self.assertEqual(allocator.sustainable_life_remaining, D("5000"))
+
+        result = allocator.process_income(
+            D("5000"), "Повышение аренды", tax_override=D("0"),
+        )
+
+        self.assertEqual(
+            sum(
+                value
+                for key, value in result.allocations.items()
+                if key.startswith("КЖ:")
+            ),
+            D("5000"),
+        )
+        self.assertEqual(result.allocations["Бытовой резерв"], D("0"))
+        self.assertEqual(allocator.critical_life_progress, D("95000"))
+        self.assertEqual(allocator.household_reserve_progress, D("20000"))
+        self.assertEqual(allocator.state.life_balance, D("115000"))
 
     def assert_money(self, actual, expected):
         self.assertEqual(money(actual), D(expected))

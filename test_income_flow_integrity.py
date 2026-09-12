@@ -98,7 +98,7 @@ class IncomeFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.answer.await_args.args[0], "Доход распределён")
         self.assertIs(message.answer.await_args.kwargs["reply_markup"], markup)
 
-    async def test_live_report_merges_taxes_and_shows_household_subcategories(self):
+    async def test_live_report_merges_taxes_and_shows_household_reserve(self):
         allocator = FinancialAllocator(UserSettings(
             has_debts=False,
             employment_type="Фрилансер",
@@ -120,8 +120,7 @@ class IncomeFlowTests(unittest.IsolatedAsyncioTestCase):
             tax=Decimal("10"),
             allocations={
                 "КЖ:Налоги": Decimal("20"),
-                "БР:Продукты": Decimal("30"),
-                "Бытовой резерв": Decimal("0"),
+                "Бытовой резерв": Decimal("30"),
                 "Фонд Зарплаты": Decimal("5"),
                 "Подушка": Decimal("4"),
                 "Стабилизатор дохода": Decimal("3"),
@@ -145,7 +144,7 @@ class IncomeFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text.count("🏛️ <b>Налоги</b>"), 1)
         self.assertIn("🏛️ <b>Налоги</b> — 30", text)
         self.assertNotIn("🏛️ <b>Налог</b>", text)
-        self.assertIn("💚 <b>Продукты</b> — 30", text)
+        self.assertIn("💚 <b>Бытовой резерв</b> — 30", text)
         self.assertLess(text.index("🏦 <b>Фонд Зарплаты</b>"), text.index("🛡️ <b>Подушка</b>"))
 
 

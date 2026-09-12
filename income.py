@@ -1939,15 +1939,6 @@ async def send_distribution_report(
         3,
     )
 
-    household_items = [
-        (key[3:], Decimal(str(value)))
-        for key, value in allocations.items()
-        if key.startswith("БР:")
-    ]
-    for name, value in sorted(
-        household_items, key=lambda item: item[1], reverse=True,
-    ):
-        add_distribution_line("💚", name, value, 4)
     add_distribution_line(
         "💚", "Бытовой резерв",
         allocations.get("Бытовой резерв", ZERO), 4,
@@ -2008,14 +1999,10 @@ async def send_distribution_report(
     life_remaining = max(
         ZERO,
         settings.critical_life
-        - state.life_balance,
+        - allocator.critical_life_progress,
     )
 
-    sustainable_remaining = max(
-        ZERO,
-        settings.household_life
-        - state.life_balance,
-    )
+    sustainable_remaining = allocator.sustainable_life_remaining
 
     lines.extend([
         "————————————",

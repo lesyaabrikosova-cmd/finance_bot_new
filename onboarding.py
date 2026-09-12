@@ -827,10 +827,13 @@ def recalculate_item_monthly(item: dict, months: Decimal | None = None) -> Decim
 def km_group_totals(items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in items:
+        amount = km_active_monthly(item)
+        if amount <= Decimal("0"):
+            continue
         label = item["category_label"]
         result[label] = money2(
             result.get(label, Decimal("0"))
-            + km_effective_monthly(item)
+            + amount
         )
     return result
 
@@ -849,6 +852,16 @@ def km_effective_monthly(item: dict) -> Decimal:
                 )
             )
     return money2(Decimal(str(item.get("monthly", "0"))))
+
+
+def km_active_monthly(item: dict) -> Decimal:
+    """Amount currently included in KМ; a first annual tax activates after payment."""
+    if (
+        item.get("subcategory") in ANNUAL_TAX_SUBCATEGORIES
+        and not item.get("annual_norm_active", False)
+    ):
+        return Decimal("0")
+    return km_effective_monthly(item)
 
 
 def km_item_display_name(item: dict) -> str:
@@ -1070,7 +1083,12 @@ def default_km_storage(item: dict) -> dict:
     }
     if subtype in ANNUAL_TAX_SUBCATEGORIES:
         result["amount"] = str(money2(Decimal(str(item.get("amount", "0")))))
-        result["annual_monthly"] = str(km_effective_monthly(item))
+        result["annual_monthly"] = str(
+            km_effective_monthly(item)
+            if item.get("annual_norm_active", False)
+            else Decimal("0")
+        )
+        result["annual_norm_active"] = bool(item.get("annual_norm_active", False))
     if item.get("due_date"):
         result["due_date"] = item["due_date"]
     if item.get("one_time"):
@@ -1094,6 +1112,8 @@ def life_categories_from_storage(storage_items: list[dict]) -> dict[str, Decimal
     result: dict[str, Decimal] = {}
     for item in storage_items:
         is_tax = item.get("subcategory") in {"tax", "property_tax", "land_tax"}
+        if is_tax and not item.get("annual_norm_active", False):
+            continue
         if item.get("storage") != "separate" and not is_tax:
             continue
         if is_tax:
@@ -1119,6 +1139,8 @@ def planned_taxes_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
     for item in storage_items:
         subtype = item.get("subcategory")
         if subtype not in labels:
+            continue
+        if not item.get("annual_norm_active", False):
             continue
         object_name = (item.get("item_name") or labels[subtype]).strip()
         key = f"{labels[subtype]} · {object_name}"
@@ -1305,9 +1327,11 @@ def life_result_breakdown_lines(
                 )
         else:
             total = money2(sum(
-                (km_effective_monthly(item) for item in items),
+                (km_active_monthly(item) for item in items),
                 Decimal("0"),
             ))
+            if total <= Decimal("0"):
+                continue
             lines.append(f"• {escape(label)} — {rub(total)}")
     return lines
 
@@ -2088,7 +2112,7 @@ async def show_km_menu(
     data = await state.get_data()
     items = data.get("km_items", [])
     br_items = data.get("br_items", [])
-    exact = money2(sum((km_effective_monthly(item) for item in items), Decimal("0")))
+    exact = money2(sum((km_active_monthly(item) for item in items), Decimal("0")))
     br_exact = money2(sum((Decimal(item["monthly"]) for item in br_items), Decimal("0")))
 
     all_items = [*items, *br_items]
@@ -4532,7 +4556,13 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
 async def show_life_classification(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    km_items = list(data.get("km_items", []))
+    all_km_items = list(data.get("km_items", []))
+    pending_taxes = [
+        item for item in all_km_items
+        if item.get("subcategory") in ANNUAL_TAX_SUBCATEGORIES
+        and not item.get("annual_norm_active", False)
+    ]
+    km_items = [item for item in all_km_items if item not in pending_taxes]
     br_items = [
         item for item in data.get("br_items", [])
         if not is_deferred_life_expense(item)
@@ -4548,6 +4578,18 @@ async def show_life_classification(callback: CallbackQuery, state: FSMContext):
         "Если расход оказался не в той части жизни, выберите его и перенесите.",
     ]
     blocks.extend(life_classification_section_blocks("КРИТИЧЕСКИЙ МИНИМУМ", km_items, "km"))
+    if pending_taxes:
+        tax_lines = [
+            f"• {escape(km_item_display_name(item))} — временно "
+            f"{rub(Decimal(str(item.get('monthly', '0'))))} / мес."
+            for item in pending_taxes
+        ]
+        blocks.append(
+            "<b><u>НАЛОГИ ДО ПЕРВОЙ ОПЛАТЫ</u></b>\n\n"
+            "Сейчас это отдельное срочное накопление. Оно не увеличивает КМ "
+            "и долгосрочные резервы.\n"
+            + "\n".join(tax_lines)
+        )
     blocks.extend(life_classification_section_blocks("БЫТОВОЙ РЕЗЕРВ", br_items, "br"))
     if deferred_items:
         blocks.extend(life_classification_section_blocks("БУДУЩИЕ ЦЕЛИ", deferred_items, "goal"))
@@ -4686,7 +4728,16 @@ async def km_edit_list(callback: CallbackQuery, state: FSMContext):
     if not items:
         await callback.message.answer("Пока нечего редактировать.")
         return
-    rows = [[(f"{km_item_display_name(item)} — {rub(km_effective_monthly(item))}", f"kmedit:item:{i}")] for i, item in enumerate(items)]
+    rows = [[(
+        f"{km_item_display_name(item)} — "
+        + (
+            f"временно {rub(Decimal(str(item.get('monthly', '0'))))} / мес."
+            if item.get("subcategory") in ANNUAL_TAX_SUBCATEGORIES
+            and not item.get("annual_norm_active", False)
+            else rub(km_effective_monthly(item))
+        ),
+        f"kmedit:item:{i}",
+    )] for i, item in enumerate(items)]
     rows.append([("← К расчёту КМ", "kmedit:back")])
     await callback.message.answer("<b>ЧТО ИЗМЕНИТЬ?</b>", reply_markup=keyboard(rows))
 
@@ -4806,8 +4857,9 @@ async def km_edit_item(callback: CallbackQuery, state: FSMContext):
         )
         + period_line
         + (
-            f"В Критическом минимуме — <b>{rub(km_effective_monthly(item))} / мес.</b>\n"
-            f"Временно до ближайшего срока — <b>{rub(Decimal(item['monthly']))} / мес.</b>"
+            "Критический минимум и долгосрочные резервы пока не меняются.\n"
+            f"Временно до ближайшего срока — <b>{rub(Decimal(item['monthly']))} / мес.</b>\n"
+            "Годовая норма включится после подтверждённой оплаты."
             if is_tax else
             f"В расчёте — <b>{rub(Decimal(item['monthly']))} / мес.</b>"
         ),
@@ -5197,8 +5249,13 @@ async def km_storage_item(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         f"<b>{escape(km_storage_item_display_name(item).upper())}</b>\n\n"
-        f"Среднемесячно — <b>{rub(km_effective_monthly(item))}</b>\n"
-        f"Сейчас: <b>{current}</b>."
+        + (
+            f"Сейчас откладываем — <b>{rub(Decimal(str(item.get('monthly', '0'))))} / мес.</b>\n"
+            "До первой подтверждённой оплаты КМ и резервы не меняются.\n"
+            if is_tax and not item.get("annual_norm_active", False)
+            else f"Среднемесячно — <b>{rub(km_effective_monthly(item))}</b>\n"
+        )
+        + f"Сейчас: <b>{current}</b>."
         + (
             "\n\nВсе налоговые обязательства хранятся только в общем конверте «Налоги»."
             if is_tax
@@ -5638,7 +5695,7 @@ async def move_br_item_to_critical_minimum(callback: CallbackQuery, state: FSMCo
     item["category_label"] = "Связь и подписки"
     km_items = list(data.get("km_items", []))
     km_items.append(item)
-    exact = money2(sum((km_effective_monthly(item) for item in km_items), Decimal("0")))
+    exact = money2(sum((km_active_monthly(item) for item in km_items), Decimal("0")))
     storage_items = build_default_km_storage(km_items)
     categories = life_categories_from_storage(storage_items)
     await state.update_data(
@@ -5890,7 +5947,7 @@ async def show_contract_obligations(message: Message, state: FSMContext):
 async def show_contract_obligations_confirmation(message: Message, state: FSMContext):
     data = await state.get_data()
     km_items, br_items = recalculate_cyclic_expense_rates(data)
-    km_exact = money2(sum((km_effective_monthly(item) for item in km_items), Decimal("0")))
+    km_exact = money2(sum((km_active_monthly(item) for item in km_items), Decimal("0")))
     br_groups = br_group_totals(br_items)
     br_exact = money2(sum(br_groups.values(), Decimal("0")))
     historical_gifts_monthly = gift_history_monthly(br_items)
@@ -9164,8 +9221,9 @@ async def confirm_save(
         allocator,
     )
 
-    # Налоги на имущество, землю и транспорт уже входят в КЖ,
-    # но дополнительно сохраняются как понятные накопительные цели.
+    # Первый имущественный налог остаётся срочной накопительной целью.
+    # В КМ и долгосрочные резервы его годовая норма войдёт только после
+    # подтверждённой оплаты и запуска следующего годового цикла.
     if not db.load_tax_obligations(telegram_id):
         tax_labels = {
             "tax": "Транспортный налог",
@@ -9187,6 +9245,8 @@ async def confirm_save(
                 months=months,
                 monthly_amount=Decimal(str(item.get("monthly", "0"))),
                 due_date=item.get("due_date"),
+                annual_monthly_amount=Decimal("0"),
+                applied_annual_monthly_amount=Decimal("0"),
             )
 
     db.deactivate_all_planned_payments(telegram_id)

@@ -12,7 +12,8 @@ _TEST_DATA_DIR = tempfile.TemporaryDirectory()
 os.environ["ALLOCATOR_DATA_DIR"] = _TEST_DATA_DIR.name
 
 from brackets import (overview_text, bracket_rows, simulate, preview_text, rates_of,
-                      receive_rates, receive_amount, save_brackets, open_brackets, show_preview)
+                      receive_rates, receive_amount, save_brackets, open_brackets,
+                      show_bracket_card, show_preview)
 from financial_engine import FinancialAllocator, UserSettings, Goal
 from planned_payments import refresh_planned_payment_targets
 from taxes import refresh_planned_tax_targets
@@ -100,17 +101,31 @@ class BracketPresentationTests(unittest.TestCase):
             refresh_planned_payment_targets(42, a, date(2026, 9, 9), persist=False)
             db.update_planned_payment_monthly.assert_not_called()
             self.assertEqual(a.settings.life_categories["Связь"], D(95))
-        with patch("taxes.db") as db, patch("taxes.tax_months_remaining", return_value=1):
-            db.load_tax_obligations.return_value = [{"id": 1, "due_date": "2026-09-10", "tax_type": "Налог",
+        with patch("taxes.db") as db:
+            db.load_tax_obligations.return_value = [{"id": 1, "due_date": "2026-09-10", "tax_type": "Налог на имущество",
                                                      "object_name": "Дом", "target_amount": D(100),
                                                      "saved_before": D(0), "monthly_amount": D(5)}]
             refresh_planned_tax_targets(42, a, date(2026, 9, 9), persist=False)
             db.update_tax_obligation_monthly.assert_not_called()
-            self.assertEqual(a.settings.planned_taxes["Налог · Дом"], D(5))
-            self.assertEqual(a.settings.tax_catchups["Налог · Дом"], D(100))
+            self.assertNotIn("Налог на имущество · Дом", a.settings.planned_taxes)
+            self.assertEqual(a.settings.tax_catchups["Налог на имущество · Дом"], D(50))
 
 
 class BracketSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_developer_mode_shows_text_with_bracket_card(self):
+        a = allocator()
+        a.settings.developer_mode = True
+        msg = message()
+
+        with patch("brackets.render_bracket_card", return_value=b"card"):
+            await show_bracket_card(msg, a)
+
+        msg.answer_photo.assert_awaited_once()
+        self.assertEqual(msg.answer.await_count, 1)
+        text = msg.answer.await_args.args[0]
+        self.assertIn("ТЕКСТОВАЯ ВЕРСИЯ ДЛЯ ПРОВЕРКИ", text)
+        self.assertIn("<b>БРАКЕТЫ</b>", text)
+
     async def test_invalid_rates_do_not_write_or_change_pending(self):
         for text in ("20/10/30/35", "100/100/100/100", "10/10/NaN/20", "10/10/15", "1/2/3/Infinity"):
             state = State(bracket_base_rates=rates_of(allocator()))

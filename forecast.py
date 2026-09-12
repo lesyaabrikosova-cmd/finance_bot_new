@@ -165,8 +165,11 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
                       f"Период без дохода — <b>{months} мес.</b>"])
     lines.extend(["", "<b>ПРЕДПОЛАГАЕМОЕ РАСПРЕДЕЛЕНИЕ</b>", "",
                   "<blockquote>" + forecast_allocation_text(source, result.allocations if result else {}, plain=True) + "</blockquote>"])
-    critical = max(Decimal("0"), simulated.settings.critical_life - simulated.state.life_balance)
-    sustainable = max(Decimal("0"), simulated.settings.household_life - simulated.state.life_balance)
+    critical = max(
+        Decimal("0"),
+        simulated.settings.critical_life - simulated.critical_life_progress,
+    )
+    sustainable = simulated.sustainable_life_remaining
     lines.extend(["", "<b>ОЖИДАЕМЫЙ УРОВЕНЬ</b>", "",
                   f"{'🏆' * simulated.active_mode()}", "",
                   "—————————",
@@ -222,6 +225,7 @@ def simulate_cyclic_forecast(
     # повторно забирать деньги на российскую жизнь: её плановая нехватка уже
     # целиком представлена Фондом Зарплаты.
     simulated.state.life_balance = simulated.settings.household_life
+    simulated.state.household_reserve_progress = simulated.settings.household_reserve
     simulated.state.period_income = Decimal("0")
     simulated.state.period_allocations = {}
     simulated.state.period_life_topups = {}

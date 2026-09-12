@@ -102,6 +102,24 @@ def _settings_from_snapshot(snapshot: dict) -> UserSettings:
         ) from error
 
 
+def _normalize_legacy_state_snapshot(
+    snapshot: dict,
+    settings_snapshot: dict,
+) -> dict:
+    """Add independent БР progress to snapshots saved by the old model."""
+
+    result = deepcopy(snapshot)
+    if "household_reserve_progress" in result:
+        return result
+    settings = _settings_from_snapshot(settings_snapshot)
+    life = Decimal(str(result.get("life_balance", ZERO)))
+    result["household_reserve_progress"] = min(
+        settings.household_reserve,
+        max(ZERO, life - settings.critical_life),
+    )
+    return result
+
+
 def _merge_replayed_settings(
     replayed: UserSettings,
     expected_after: UserSettings,
@@ -588,6 +606,14 @@ def delete_income_safely(
 
     replay_chain = [target, *later_incomes]
     contexts = [_require_replay_context(item) for item in replay_chain]
+    for operation, context in zip(replay_chain, contexts):
+        payload = operation.get("payload") or {}
+        payload["state_before"] = _normalize_legacy_state_snapshot(
+            payload["state_before"], context["settings_before"],
+        )
+        context["state_after"] = _normalize_legacy_state_snapshot(
+            context["state_after"], context["settings_after"],
+        )
     current_payments = _payment_snapshot(database, telegram_id)
     current_taxes = _tax_snapshot(database, telegram_id)
     _validate_external_rows(

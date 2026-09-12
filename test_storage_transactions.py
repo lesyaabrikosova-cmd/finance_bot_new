@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal
@@ -126,6 +127,65 @@ class StorageTransactionTests(unittest.TestCase):
             self.assertEqual(reopened.operation_count(self.telegram_id), 1)
         finally:
             reopened.close()
+
+    def test_household_reserve_progress_survives_state_round_trip(self):
+        state = AllocatorState(
+            life_balance=Decimal("110000"),
+            household_reserve_progress=Decimal("20000"),
+        )
+        self.db.save_state(self.telegram_id, state)
+
+        restored = self.db.load_state(self.telegram_id)
+
+        self.assertEqual(restored.life_balance, Decimal("110000"))
+        self.assertEqual(
+            restored.household_reserve_progress,
+            Decimal("20000"),
+        )
+
+    def test_legacy_state_migration_separates_existing_household_progress(self):
+        path = Path(self.temp.name) / "legacy-household.db"
+        database = Database(path)
+        allocator = FinancialAllocator(
+            UserSettings(
+                has_debts=False,
+                employment_type="Наёмный",
+                critical_life=Decimal("90000"),
+                household_reserve=Decimal("20000"),
+                average_income=Decimal("150000"),
+            ),
+            AllocatorState(
+                life_balance=Decimal("110000"),
+                household_reserve_progress=Decimal("20000"),
+            ),
+        )
+        database.save_allocator(777, allocator)
+        database.save_operation(777, "income_distribution", {
+            "type": "income_distribution",
+            "income": "110000",
+            "allocations": {
+                "КЖ:Жильё и обязательное": "90000",
+                "БР:Одежда и прочее": "20000",
+            },
+        })
+        allocator.settings.critical_life = Decimal("95000")
+        database.save_settings(777, allocator.settings)
+        database.close()
+
+        raw = sqlite3.connect(path)
+        raw.execute("ALTER TABLE state DROP COLUMN household_reserve_progress")
+        raw.commit()
+        raw.close()
+
+        migrated = Database(path)
+        try:
+            restored = migrated.load_allocator(777)
+            self.assertEqual(
+                restored.state.household_reserve_progress,
+                Decimal("20000"),
+            )
+        finally:
+            migrated.close()
 
     def test_save_allocator_joins_transaction_and_rolls_back(self):
         allocator = FinancialAllocator(UserSettings(

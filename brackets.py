@@ -127,6 +127,11 @@ async def show_bracket_card(message, allocator):
                                        allocator.mode_display_name(), bracket_rows(allocator), variant)
         await message.answer_photo(photo=BufferedInputFile(data, filename="brackets.png"),
                                    caption=card_caption(allocator), reply_markup=markup)
+        if allocator.settings.developer_mode:
+            await message.answer(
+                "<b>🛠 ТЕКСТОВАЯ ВЕРСИЯ ДЛЯ ПРОВЕРКИ</b>\n\n"
+                + overview_text(allocator),
+            )
     except (OSError, ValueError, ImportError, TelegramBadRequest, TelegramNetworkError):
         logger.warning("Bracket card unavailable; using text version", exc_info=True)
         await message.answer(overview_text(allocator), reply_markup=markup)
@@ -156,7 +161,12 @@ def preview_text(source, simulated, result, income_type, strategy, pending):
              *[f"• {escape(label)} — <b>{rub(value)}</b>" for label, value in groups.items() if value > 0], "",
              f"Уровень: {result.mode_before} → {result.mode_after}",
              "Свободная часть: " + ("защита и планы" if strategy == "balanced" else "приоритет защите") + "."]
-    missing = max(ZERO, simulated.settings.total_critical_life - simulated.state.life_balance - simulated.state.accumulated_minimum_payments)
+    missing = max(
+        ZERO,
+        simulated.settings.total_critical_life
+        - simulated.critical_life_progress
+        - simulated.state.accumulated_minimum_payments,
+    )
     if missing > 0:
         lines += ["", f"⚠️ После этого поступления до Критического минимума остаётся <b>{rub(missing)}</b>.",
                   "Можно уменьшить первый бракет или учесть другие ожидаемые поступления. Ставки сами не меняются."]

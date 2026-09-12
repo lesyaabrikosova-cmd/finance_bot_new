@@ -37,6 +37,116 @@ class TaxAccountingIntegrityTests(unittest.TestCase):
         self.db.close()
         self.tempdir.cleanup()
 
+    def test_first_annual_tax_activates_life_targets_only_after_payment(self):
+        user = 114
+        key = "Транспортный налог · Автомобиль"
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            income_rhythm="irregular",
+            critical_life=Decimal("90000"),
+            base_critical_life=Decimal("90000"),
+            household_reserve=Decimal("20000"),
+            average_income=Decimal("150000"),
+            force_majeure_months=Decimal("4"),
+            stabilizer_target_months=Decimal("1"),
+        ))
+        self.db.save_allocator(user, allocator)
+        obligation_id = self.db.add_tax_obligation(
+            user, "Транспортный налог", "Автомобиль", Decimal("12000"),
+            Decimal("0"), 2, Decimal("6000"), "2026-12-01",
+            Decimal("1000"), notice_received=True,
+            applied_annual_monthly_amount=Decimal("0"),
+        )
+
+        before = self.db.load_allocator(user)
+        self.assertEqual(before.settings.critical_life, Decimal("90000"))
+        self.assertEqual(before.settings.household_reserve, Decimal("20000"))
+        self.assertEqual(before.settings.tax_catchups[key], Decimal("6000"))
+        self.assertNotIn(key, before.settings.planned_taxes)
+
+        data = {
+            "tax_payment_name": key,
+            "tax_payment_amount": "12000",
+            "tax_payment_obligation_id": obligation_id,
+            "tax_payment_type": "Транспортный налог",
+            "tax_payment_object": "Автомобиль",
+            "tax_payment_adjust_target": False,
+        }
+        with patch.object(taxes, "db", self.db), patch.object(
+            taxes, "moscow_today", return_value=date(2026, 12, 1),
+        ):
+            _, _, next_cycle = taxes._apply_tax_payment(user, data)
+
+        after = self.db.load_allocator(user)
+        self.assertEqual(after.settings.critical_life, Decimal("91000"))
+        self.assertEqual(after.settings.household_reserve, Decimal("20000"))
+        self.assertEqual(after.settings.force_majeure_limit, Decimal("364000"))
+        self.assertEqual(after.settings.stabilizer_full_limit, Decimal("111000"))
+        self.assertEqual(after.settings.planned_taxes[key], Decimal("1000"))
+        child = next(
+            row for row in self.db.load_tax_obligations(user)
+            if row["id"] == next_cycle["id"]
+        )
+        self.assertEqual(child["applied_annual_monthly_amount"], Decimal("1000"))
+        self.assertEqual(next_cycle["targets_before"]["critical_life"], Decimal("90000"))
+        self.assertEqual(next_cycle["targets_after"]["critical_life"], Decimal("91000"))
+
+    def test_new_notice_keeps_last_confirmed_norm_until_payment(self):
+        user = 115
+        key = "Налог на имущество · Квартира"
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Наёмный",
+            critical_life=Decimal("91000"),
+            base_critical_life=Decimal("90000"),
+            household_reserve=Decimal("20000"),
+            average_income=Decimal("150000"),
+            planned_taxes={key: Decimal("1000")},
+        ))
+        self.db.save_allocator(user, allocator)
+        obligation_id = self.db.add_tax_obligation(
+            user, "Налог на имущество", "Квартира", Decimal("12000"),
+            Decimal("0"), 12, Decimal("1000"), "2026-12-01",
+            Decimal("1000"), applied_annual_monthly_amount=Decimal("1000"),
+        )
+        self.db.update_tax_obligation_notice(
+            user, obligation_id,
+            target_amount=Decimal("14400"),
+            saved_before=Decimal("0"),
+            months=1,
+            monthly_amount=Decimal("14400"),
+            annual_monthly_amount=Decimal("1200"),
+            due_date="2026-12-01",
+        )
+
+        before_payment = self.db.load_allocator(user)
+        self.assertEqual(before_payment.settings.critical_life, Decimal("91000"))
+        self.assertEqual(before_payment.settings.planned_taxes[key], Decimal("1000"))
+        current = next(
+            row for row in self.db.load_tax_obligations(user)
+            if row["id"] == obligation_id
+        )
+        self.assertEqual(current["annual_monthly_amount"], Decimal("1200"))
+        self.assertEqual(current["applied_annual_monthly_amount"], Decimal("1000"))
+
+        data = {
+            "tax_payment_name": key,
+            "tax_payment_amount": "14400",
+            "tax_payment_obligation_id": obligation_id,
+            "tax_payment_type": "Налог на имущество",
+            "tax_payment_object": "Квартира",
+            "tax_payment_adjust_target": False,
+        }
+        with patch.object(taxes, "db", self.db), patch.object(
+            taxes, "moscow_today", return_value=date(2026, 12, 1),
+        ):
+            taxes._apply_tax_payment(user, data)
+
+        after_payment = self.db.load_allocator(user)
+        self.assertEqual(after_payment.settings.critical_life, Decimal("91200"))
+        self.assertEqual(after_payment.settings.planned_taxes[key], Decimal("1200"))
+
     def test_shared_account_payment_consumes_other_virtual_buckets_once(self):
         user = 101
         first = self.db.add_tax_obligation(

@@ -551,6 +551,7 @@ class Database:
                 telegram_id INTEGER PRIMARY KEY,
 
                 life_balance TEXT NOT NULL,
+                household_reserve_progress TEXT NOT NULL DEFAULT '0',
                 accumulated_minimum_payments TEXT NOT NULL,
 
                 pillow_minimum TEXT NOT NULL,
@@ -675,6 +676,7 @@ class Database:
                 monthly_amount TEXT NOT NULL,
                 monthly_period TEXT,
                 annual_monthly_amount TEXT NOT NULL DEFAULT '0',
+                applied_annual_monthly_amount TEXT NOT NULL DEFAULT '0',
                 notice_received INTEGER NOT NULL DEFAULT 0,
                 ready_reminder_sent_at TEXT,
                 last_notice_reminder_at TEXT,
@@ -759,6 +761,22 @@ class Database:
             )
         if "source_obligation_id" not in tax_columns:
             cursor.execute("ALTER TABLE tax_obligations ADD COLUMN source_obligation_id INTEGER")
+        if "applied_annual_monthly_amount" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN "
+                "applied_annual_monthly_amount TEXT NOT NULL DEFAULT '0'"
+            )
+            # До появления отдельного поля годовая норма применялась сразу.
+            # Для уже созданного ботом следующего цикла сохраняем её активной;
+            # первый ещё не подтверждённый цикл переводим на новую безопасную
+            # модель: только срочное накопление до фактической оплаты.
+            cursor.execute(
+                """
+                UPDATE tax_obligations
+                SET applied_annual_monthly_amount = annual_monthly_amount
+                WHERE source_obligation_id IS NOT NULL
+                """
+            )
         if "tracking_started_operation_id" not in tax_columns:
             cursor.execute(
                 "ALTER TABLE tax_obligations ADD COLUMN "
@@ -788,6 +806,70 @@ class Database:
             row["name"]
             for row in cursor.execute("PRAGMA table_info(state)").fetchall()
         }
+        if "household_reserve_progress" not in state_columns:
+            cursor.execute(
+                "ALTER TABLE state ADD COLUMN household_reserve_progress "
+                "TEXT NOT NULL DEFAULT '0'"
+            )
+            # В старой модели БР был верхним слоем общего Баланса жизни.
+            # Зафиксируем этот слой один раз по действующим на момент миграции
+            # целям. После этого изменение КМ не меняет уже направленный БР.
+            legacy_rows = cursor.execute(
+                """
+                SELECT state.telegram_id, state.life_balance,
+                       settings.critical_life, settings.household_reserve
+                FROM state
+                JOIN settings USING (telegram_id)
+                """
+            ).fetchall()
+            for legacy in legacy_rows:
+                life = string_to_decimal(legacy["life_balance"])
+                critical = string_to_decimal(legacy["critical_life"])
+                target = string_to_decimal(legacy["household_reserve"])
+                inferred_progress = min(
+                    target, max(Decimal("0"), life - critical)
+                )
+                # Если КМ уже редактировали после распределения, старая
+                # формула могла занизить БР. Журнал текущего периода даёт
+                # более точную нижнюю границу; выплаты из Фонда Зарплаты,
+                # которые раньше не журналировались, всё ещё покрывает
+                # консервативная оценка из общего Баланса жизни.
+                recorded_progress = Decimal("0")
+                operations = cursor.execute(
+                    "SELECT operation_type, payload FROM operation_log "
+                    "WHERE telegram_id = ? ORDER BY id",
+                    (legacy["telegram_id"],),
+                ).fetchall()
+                for operation in operations:
+                    payload = deserialize_json(operation["payload"])
+                    if operation["operation_type"] == "period_reset":
+                        recorded_progress = Decimal("0")
+                        if payload.get("salary_remainder_target") == "Бытовой резерв":
+                            recorded_progress += string_to_decimal(
+                                payload.get("salary_remainder", "0")
+                            )
+                        continue
+                    if operation["operation_type"] != "income_distribution":
+                        continue
+                    allocations = payload.get("allocations", {}) or {}
+                    recorded_progress += sum(
+                        (
+                            string_to_decimal(amount)
+                            for name, amount in allocations.items()
+                            if str(name).startswith("БР:")
+                            or name == "Бытовой резерв"
+                        ),
+                        Decimal("0"),
+                    )
+                progress = min(
+                    life,
+                    max(inferred_progress, recorded_progress),
+                )
+                cursor.execute(
+                    "UPDATE state SET household_reserve_progress = ? "
+                    "WHERE telegram_id = ?",
+                    (decimal_to_string(progress), legacy["telegram_id"]),
+                )
         if "intercontract_reserve" not in state_columns:
             cursor.execute(
                 "ALTER TABLE state ADD COLUMN intercontract_reserve TEXT NOT NULL DEFAULT '0'"
@@ -1722,6 +1804,7 @@ class Database:
                 telegram_id,
 
                 life_balance,
+                household_reserve_progress,
                 accumulated_minimum_payments,
 
                 pillow_minimum,
@@ -1760,7 +1843,7 @@ class Database:
 
             VALUES (
                 ?,
-                ?, ?,
+                ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?,
                 ?, ?,
@@ -1773,6 +1856,9 @@ class Database:
 
                 life_balance =
                     excluded.life_balance,
+
+                household_reserve_progress =
+                    excluded.household_reserve_progress,
 
                 accumulated_minimum_payments =
                     excluded.accumulated_minimum_payments,
@@ -1853,6 +1939,10 @@ class Database:
 
                 decimal_to_string(
                     state.life_balance
+                ),
+
+                decimal_to_string(
+                    state.household_reserve_progress or Decimal("0")
                 ),
 
                 decimal_to_string(
@@ -1960,6 +2050,11 @@ class Database:
             life_balance=
                 string_to_decimal(
                     row["life_balance"]
+                ),
+
+            household_reserve_progress=
+                string_to_decimal(
+                    row["household_reserve_progress"]
                 ),
 
             accumulated_minimum_payments=
@@ -2619,17 +2714,19 @@ class Database:
         for item in active_tax_obligations:
             if item["tax_type"] not in annual_property_taxes:
                 continue
-            annual_monthly = item["annual_monthly_amount"]
-            if annual_monthly <= Decimal("0"):
-                annual_monthly = (item["target_amount"] / Decimal("12")).quantize(
-                    Decimal("0.01"), rounding=ROUND_CEILING,
-                )
-                self.update_tax_obligation_annual_monthly(
-                    telegram_id, item["id"], annual_monthly,
-                )
-            settings.planned_taxes[
-                f"{item['tax_type']} · {item['object_name']}"
-            ] = annual_monthly
+            applied_annual = item["applied_annual_monthly_amount"]
+            key = f"{item['tax_type']} · {item['object_name']}"
+            if applied_annual > Decimal("0"):
+                settings.planned_taxes[key] = applied_annual
+            else:
+                settings.planned_taxes.pop(key, None)
+        active_tax_automatic_keys = {
+            f"tax:{name}" for name in settings.planned_taxes
+        }
+        for key in list(settings.automatic_life_obligations):
+            if key.startswith("tax:") and key not in active_tax_automatic_keys:
+                settings.automatic_life_obligations.pop(key, None)
+        settings.recalculate_critical_life()
 
         # ``monthly_amount`` is the remaining accelerated contribution for
         # the current calendar month.  It belongs to the obligation ledger,
@@ -2945,6 +3042,7 @@ class Database:
         opening_amount: Decimal | None = None,
         source_obligation_id: int | None = None,
         monthly_period: str | None = None,
+        applied_annual_monthly_amount: Decimal | None = None,
     ) -> int:
         self.ensure_user(telegram_id)
         if annual_monthly_amount is None:
@@ -2956,6 +3054,11 @@ class Database:
                 )
             else:
                 annual_monthly_amount = monthly_amount
+        if applied_annual_monthly_amount is None:
+            # Сохраняем совместимость низкоуровневого API. Пользовательские
+            # сценарии первого цикла явно передают 0, а цикл после оплаты —
+            # подтверждённую годовую норму.
+            applied_annual_monthly_amount = annual_monthly_amount
         operation_row = self.connection.execute(
             "SELECT COALESCE(MAX(id), 0) AS max_id FROM operation_log WHERE telegram_id = ?",
             (telegram_id,),
@@ -2966,9 +3069,9 @@ class Database:
             INSERT INTO tax_obligations (
                 telegram_id, tax_type, object_name, target_amount,
                 opening_amount, saved_before, months, monthly_amount, annual_monthly_amount,
-                notice_received, due_date, source_obligation_id,
+                applied_annual_monthly_amount, notice_received, due_date, source_obligation_id,
                 tracking_started_operation_id, monthly_period, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 telegram_id,
@@ -2982,6 +3085,7 @@ class Database:
                 months,
                 decimal_to_string(monthly_amount),
                 decimal_to_string(annual_monthly_amount),
+                decimal_to_string(applied_annual_monthly_amount),
                 int(notice_received),
                 due_date,
                 source_obligation_id,
@@ -3011,6 +3115,9 @@ class Database:
                 "monthly_amount": string_to_decimal(row["monthly_amount"]),
                 "monthly_period": row["monthly_period"],
                 "annual_monthly_amount": string_to_decimal(row["annual_monthly_amount"]),
+                "applied_annual_monthly_amount": string_to_decimal(
+                    row["applied_annual_monthly_amount"]
+                ),
                 "notice_received": bool(row["notice_received"]),
                 "due_date": row["due_date"],
                 "ready_reminder_sent_at": row["ready_reminder_sent_at"],
@@ -3039,7 +3146,8 @@ class Database:
             SET tax_type = ?, object_name = ?, target_amount = ?,
                 opening_amount = ?, saved_before = ?, months = ?,
                 monthly_amount = ?, monthly_period = ?,
-                annual_monthly_amount = ?, notice_received = ?, due_date = ?,
+                annual_monthly_amount = ?, applied_annual_monthly_amount = ?,
+                notice_received = ?, due_date = ?,
                 ready_reminder_sent_at = ?, last_notice_reminder_at = ?,
                 last_payment_reminder_at = ?, next_payment_reminder_date = ?,
                 source_obligation_id = ?, tracking_started_operation_id = ?,
@@ -3055,6 +3163,13 @@ class Database:
                 decimal_to_string(string_to_decimal(row.get("monthly_amount"))),
                 row.get("monthly_period"),
                 decimal_to_string(string_to_decimal(row.get("annual_monthly_amount"))),
+                decimal_to_string(string_to_decimal(
+                    row.get(
+                        "applied_annual_monthly_amount",
+                        row.get("annual_monthly_amount", "0")
+                        if row.get("source_obligation_id") is not None else "0",
+                    )
+                )),
                 int(bool(row.get("notice_received"))), row.get("due_date"),
                 row.get("ready_reminder_sent_at"), row.get("last_notice_reminder_at"),
                 row.get("last_payment_reminder_at"), row.get("next_payment_reminder_date"),
@@ -3745,12 +3860,8 @@ class Database:
                 monthly = (target / Decimal(months)).quantize(
                     Decimal("0.01"), rounding=ROUND_CEILING,
                 ) if target > Decimal("0") else Decimal("0")
-                annual = (
-                    (target / Decimal("12")).quantize(
-                        Decimal("0.01"), rounding=ROUND_CEILING,
-                    )
-                    if item["tax_type"] in annual_types else Decimal("0")
-                )
+                annual = item["annual_monthly_amount"]
+                applied_annual = item["applied_annual_monthly_amount"]
                 self.connection.execute(
                     """
                     UPDATE tax_obligations
@@ -3764,7 +3875,7 @@ class Database:
                         telegram_id, item["id"],
                     ),
                 )
-                refreshed.append((item, monthly, annual))
+                refreshed.append((item, monthly, applied_annual))
 
             allocator = self.load_allocator(telegram_id)
             if allocator is not None:
@@ -3774,11 +3885,13 @@ class Database:
                         settings.set_automatic_life_obligation(source, Decimal("0"))
                 settings.planned_taxes = {}
                 settings.tax_catchups = {}
-                for item, monthly, annual in refreshed:
+                for item, monthly, applied_annual in refreshed:
                     key = f"{item['tax_type']} · {item['object_name']}"
-                    if annual > Decimal("0"):
-                        settings.planned_taxes[key] = annual
-                        settings.set_automatic_life_obligation(f"tax:{key}", annual)
+                    if applied_annual > Decimal("0"):
+                        settings.planned_taxes[key] = applied_annual
+                        settings.set_automatic_life_obligation(
+                            f"tax:{key}", applied_annual,
+                        )
                     if monthly > Decimal("0"):
                         settings.tax_catchups[key] = monthly
                 total_annual = sum(settings.planned_taxes.values(), Decimal("0"))

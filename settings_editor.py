@@ -690,6 +690,7 @@ async def confirm_full_reset(
 
     # Баланс жизни и резерв минимальных платежей
     st.life_balance = Decimal("0")
+    st.household_reserve_progress = Decimal("0")
     st.accumulated_minimum_payments = Decimal("0")
 
     # Подушка

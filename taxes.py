@@ -11,7 +11,8 @@ from secrets import token_urlsafe
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, Message
 try:
     from PIL import Image, ImageDraw
 except ImportError:  # Диаграмма не должна мешать работе налогового учёта.
@@ -19,6 +20,7 @@ except ImportError:  # Диаграмма не должна мешать раб�
     ImageDraw = None
 
 from financial_engine import fmt_money
+from mode_presentation import mode_image_path
 from storage import db
 from time_utils import moscow_today
 from ui import keyboard, main_menu_keyboard
@@ -76,6 +78,16 @@ def annual_tax_monthly_norm(item: dict) -> Decimal:
         return stored
     return (item["target_amount"] / Decimal("12")).quantize(
         Decimal("0.01"), rounding=ROUND_CEILING,
+    )
+
+
+def applied_annual_tax_monthly_norm(item: dict) -> Decimal:
+    """Confirmed annual norm currently included in KМ and reserve targets."""
+    if item["tax_type"] not in ANNUAL_PROPERTY_TAXES:
+        return ZERO
+    return max(
+        ZERO,
+        Decimal(str(item.get("applied_annual_monthly_amount", ZERO))),
     )
 
 TAX_GROUPS = (
@@ -398,6 +410,7 @@ def start_next_annual_tax_cycle(
     today: date,
 ) -> dict:
     """Continue saving after payment and schedule next autumn's reminder."""
+    targets_before = tax_financial_targets(allocator)
     key = tax_obligation_key(item["tax_type"], item["object_name"])
     try:
         previous_due = date.fromisoformat(item.get("due_date") or "")
@@ -433,17 +446,44 @@ def start_next_annual_tax_cycle(
         opening_amount=ZERO,
         source_obligation_id=item.get("id"),
         monthly_period=today.strftime("%Y-%m"),
+        applied_annual_monthly_amount=annual_monthly,
     )
     set_tax_monthly_target(allocator, key, annual_monthly)
     if monthly > ZERO:
         allocator.settings.tax_catchups[key] = monthly
     else:
         allocator.settings.tax_catchups.pop(key, None)
+    targets_after = tax_financial_targets(allocator)
     return {
         "id": obligation_id,
         "due_date": next_due,
         "monthly_amount": monthly,
         "saved_before": saved_for_next_cycle,
+        "annual_monthly_amount": annual_monthly,
+        "targets_before": targets_before,
+        "targets_after": targets_after,
+    }
+
+
+def tax_financial_targets(allocator) -> dict[str, Decimal | int | str]:
+    """Long-term targets affected when a confirmed annual norm is activated."""
+    settings = allocator.settings
+    priority = allocator.current_protection_priority()
+    return {
+        "critical_life": settings.critical_life,
+        "household_life": settings.household_life,
+        "household_reserve": settings.household_reserve,
+        "minimum_pillow": settings.minimum_reserve_limit,
+        "force_majeure": settings.force_majeure_limit,
+        "stabilizer": (
+            settings.stabilizer_full_limit if settings.needs_stabilizer else ZERO
+        ),
+        "salary_fund": (
+            allocator.intercontract_current_limit
+            if settings.needs_intercontract_reserve else ZERO
+        ),
+        "mode": allocator.active_mode(),
+        "priority": str(priority["name"]) if priority else "Все защитные нормативы сформированы",
     }
 
 
@@ -570,7 +610,18 @@ def refresh_planned_tax_targets(
     monthly_period = today.strftime("%Y-%m")
     allocator.settings.tax_catchups = {}
     for item in obligations:
-        annual_monthly = annual_tax_monthly_norm(item)
+        annual_monthly = Decimal(str(item.get("annual_monthly_amount", ZERO)))
+        if (
+            item["tax_type"] in ANNUAL_PROPERTY_TAXES
+            and annual_monthly <= ZERO
+            and (
+                item.get("notice_received")
+                or applied_annual_tax_monthly_norm(item) > ZERO
+            )
+        ):
+            annual_monthly = (item["target_amount"] / Decimal("12")).quantize(
+                Decimal("0.01"), rounding=ROUND_CEILING,
+            )
         if persist and annual_monthly != item.get("annual_monthly_amount", ZERO):
             db.update_tax_obligation_annual_monthly(
                 telegram_id, item["id"], annual_monthly,
@@ -578,7 +629,7 @@ def refresh_planned_tax_targets(
         set_tax_monthly_target(
             allocator,
             tax_obligation_key(item['tax_type'], item['object_name']),
-            annual_monthly,
+            applied_annual_tax_monthly_norm(item),
         )
         if item.get("due_date"):
             due = date.fromisoformat(item["due_date"])
@@ -707,6 +758,7 @@ def tax_obligation_card_text(
     target = Decimal(str(item["target_amount"]))
     monthly = Decimal(str(item["monthly_amount"]))
     annual_monthly = annual_tax_monthly_norm(item)
+    applied_annual = applied_annual_tax_monthly_norm(item)
     due = date.fromisoformat(item["due_date"]) if item.get("due_date") else None
     lines = [
         f"<b>{escape(tax_type.upper())}</b>",
@@ -719,7 +771,10 @@ def tax_obligation_card_text(
     ]
 
     if tax_type in ANNUAL_PROPERTY_TAXES:
-        if monthly > annual_monthly:
+        if (
+            monthly > annual_monthly
+            and (item.get("notice_received") or applied_annual > ZERO)
+        ):
             lines.extend([
                 "",
                 "ℹ️ Если бы копили весь год, было бы достаточно "
@@ -746,7 +801,7 @@ def tax_obligation_card_text(
                 )
             if today <= due:
                 lines.append(f"До {tax_date_words(due)} — налог должен быть оплачен.")
-        if show_changes and allocator is not None:
+        if show_changes and allocator is not None and applied_annual > ZERO:
             settings = allocator.settings
             lines.extend([
                 "————————————",
@@ -764,6 +819,14 @@ def tax_obligation_card_text(
                 lines.append(
                     f"🏦 Фонд Зарплаты увеличен до {money(allocator.intercontract_current_limit)}."
                 )
+        elif show_changes:
+            lines.extend([
+                "————————————",
+                "<b>СТОИМОСТЬ ЖИЗНИ И РЕЗЕРВЫ</b>",
+                "",
+                "Критический минимум и долгосрочные резервы пока не изменились. "
+                "Годовая норма включится после подтверждённой оплаты этого налога.",
+            ])
     else:
         if due is not None:
             noun = "патент" if tax_type == "Патент" else "налог"
@@ -862,8 +925,8 @@ async def taxes_help(callback: CallbackQuery):
         "<b>➤ Копим заранее</b>\n"
         f"Сейчас, в {current_year} году, мы копим на налоги за квартиру, машину "
         f"и землю за {tax_year} год.\n"
-        "<b>С января по октябрь</b> понемногу откладываем примерную сумму. "
-        "За ориентир берём налог прошлого года.\n\n"
+        "Для нового налога это отдельная срочная задача: до первой подтверждённой "
+        "оплаты она не увеличивает Критический минимум и долгосрочные резервы.\n\n"
         "<b>➤ Сверяем с ФНС</b>\n"
         "<b>1 ноября</b> я напомню проверить налоговое уведомление. Нажмите\n"
         "Получено уведомление\n"
@@ -879,7 +942,9 @@ async def taxes_help(callback: CallbackQuery):
         "<b>➤ Повторяем</b>\n"
         "После оплаты нажмите\n"
         "Налог оплачен\n"
-        "— и начнём копить на следующий платёж.",
+        "— и начнём копить на следующий платёж. Только после этой отметки "
+        "последняя подтверждённая сумма делится на 12 и включается в Критический "
+        "минимум, Подушку, Стабилизатор или Фонд Зарплаты по правилам вашего профиля.",
         reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
@@ -918,18 +983,13 @@ async def taxes_details(callback: CallbackQuery):
 
 
 def latest_annual_tax_items(telegram_id: int) -> list[dict]:
-    allocator = db.load_allocator(telegram_id)
-    configured = set(allocator.settings.planned_taxes) if allocator is not None else set()
-    latest: dict[str, dict] = {}
-    for item in db.load_tax_obligations(telegram_id, active_only=False):
-        if item["tax_type"] not in ANNUAL_PROPERTY_TAXES:
-            continue
-        key = tax_obligation_key(item["tax_type"], item["object_name"])
-        # Оплаченный ежегодный налог остаётся в плане на следующий год;
-        # удалённый пользователем налог больше не предлагаем обновлять.
-        if key in configured:
-            latest[key] = item
-    return list(latest.values())
+    # Первый налог ещё не входит в КМ, поэтому его нельзя искать через
+    # settings.planned_taxes. Канонический источник — активный налоговый цикл.
+    return [
+        item
+        for item in db.load_tax_obligations(telegram_id)
+        if item["tax_type"] in ANNUAL_PROPERTY_TAXES
+    ]
 
 
 def tax_due_year(item: dict) -> int | None:
@@ -1363,7 +1423,42 @@ async def tax_payment_confirm(callback: CallbackQuery, state: FSMContext):
     ]
     if item is not None and next_cycle is not None:
         due = next_cycle["due_date"]
+        before = next_cycle["targets_before"]
+        after = next_cycle["targets_after"]
+        annual_monthly = next_cycle["annual_monthly_amount"]
         lines.extend([
+            "", "————————————",
+            "<b>ГОДОВАЯ НОРМА АКТИВИРОВАНА</b>",
+            f"На следующий цикл — <b>{money(annual_monthly)}</b> в месяц.",
+            "",
+            f"➤ Критический минимум: {money(before['critical_life'])} → "
+            f"<b>{money(after['critical_life'])}</b>",
+            f"➤ Устойчивая жизнь: {money(before['household_life'])} → "
+            f"<b>{money(after['household_life'])}</b>",
+            f"➤ Бытовой резерв: <b>{money(after['household_reserve'])}</b> — не изменился.",
+            f"🛡️ Подушка: {money(before['force_majeure'])} → "
+            f"<b>{money(after['force_majeure'])}</b>",
+        ])
+        if after["minimum_pillow"] > ZERO:
+            lines.append(
+                f"🛡️ Минимальная подушка: {money(before['minimum_pillow'])} → "
+                f"<b>{money(after['minimum_pillow'])}</b>"
+            )
+        if after["stabilizer"] > ZERO:
+            lines.append(
+                f"🛟 Стабилизатор: {money(before['stabilizer'])} → "
+                f"<b>{money(after['stabilizer'])}</b>"
+            )
+        if after["salary_fund"] > ZERO:
+            lines.append(
+                f"🏦 Фонд Зарплаты: {money(before['salary_fund'])} → "
+                f"<b>{money(after['salary_fund'])}</b>"
+            )
+        reward = "🏆" * int(after["mode"])
+        lines.extend([
+            "",
+            f"Текущий уровень — <b>{reward}</b>",
+            f"Текущий приоритет — <b>{escape(str(after['priority']))}</b>.",
             "", "————————————",
             f"Следующий платёж — до <b>{due.strftime('%d.%m.%Y')}</b>.",
             f"Он относится к налоговому периоду <b>{due.year - 1}</b> года.",
@@ -1377,6 +1472,23 @@ async def tax_payment_confirm(callback: CallbackQuery, state: FSMContext):
             tax_navigation("menu:taxes"),
         ]),
     )
+    if item is not None and next_cycle is not None:
+        updated = db.load_allocator(callback.from_user.id)
+        if updated is not None:
+            mode = updated.active_mode()
+            image_path = mode_image_path(updated.profile_id, mode)
+            if image_path is not None and image_path.exists():
+                caption = (
+                    f"<b>{'🏆' * mode}</b>\n"
+                    f"{escape(updated.mode_display_name(mode))} · "
+                    f"{escape(updated.mode_title(mode))}"
+                )
+                try:
+                    await callback.message.answer_photo(
+                        photo=FSInputFile(image_path), caption=caption,
+                    )
+                except TelegramBadRequest:
+                    pass
 
 
 def _tax_payment_reversal_problem(telegram_id: int, payment: dict) -> str | None:
@@ -1610,14 +1722,12 @@ async def save_next_tax_amount(message: Message, state: FSMContext):
                 notice_received=True,
                 opening_amount=ZERO,
                 monthly_period=moscow_today().strftime("%Y-%m"),
+                applied_annual_monthly_amount=ZERO,
             )
         allocator = db.load_allocator(message.from_user.id)
         if allocator is not None:
-            set_tax_monthly_target(
-                allocator,
-                key,
-                annual_monthly,
-            )
+            # Уведомление задаёт точную норму будущего цикла, но не меняет
+            # КМ и долгосрочные резервы до подтверждённой оплаты.
             if monthly > ZERO:
                 allocator.settings.tax_catchups[key] = monthly
             else:
@@ -1650,7 +1760,8 @@ async def save_next_tax_amount(message: Message, state: FSMContext):
         f"Осталось накопить — <b>{money(remaining)}</b>\n\n"
         f"Оплатить до — <b>{due.strftime('%d.%m.%Y')}</b>\n"
         f"Временно направлять в «Налоги» — <b>{money(monthly)}</b> в месяц\n"
-        f"Годовая норма для Критического минимума — <b>{money(annual_monthly)}</b> в месяц.",
+        f"Будущая годовая норма — <b>{money(annual_monthly)}</b> в месяц. "
+        "Она включится в Критический минимум и долгосрочные резервы только после оплаты.",
         reply_markup=keyboard([tax_navigation("menu:taxes")]),
     )
 
@@ -1978,22 +2089,19 @@ async def save_tax_obligation(
     monthly = ((target - saved) / Decimal(months)).quantize(
         Decimal("0.01"), rounding=ROUND_CEILING,
     )
-    annual_monthly = (
-        (target / Decimal("12")).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
-        if tax_type in ANNUAL_PROPERTY_TAXES else ZERO
-    )
-    # The obligation row and the corresponding hidden Критический минимум /
-    # catch-up settings are one logical edit.  A failure in either half must
-    # not leave the profile and the obligation ledger disagreeing.
+    # До первого уведомления это только предварительный текущий план. Точную
+    # будущую годовую норму и её влияние на КМ определим по уведомлению/оплате.
+    annual_monthly = ZERO
     with db.transaction():
         obligation_id = db.add_tax_obligation(
             telegram_id, tax_type, object_name, target, saved, months, monthly, due_date,
             annual_monthly, opening_amount=opening_amount,
             monthly_period=moscow_today().strftime("%Y-%m"),
+            applied_annual_monthly_amount=ZERO,
         )
         allocator = db.load_allocator(telegram_id)
         if allocator is not None:
-            set_tax_monthly_target(allocator, key, annual_monthly)
+            set_tax_monthly_target(allocator, key, ZERO)
             allocator.settings.tax_catchups[key] = monthly
             db.save_allocator(telegram_id, allocator)
         item = next(
@@ -2139,7 +2247,7 @@ async def tax_obligation_save_name(message: Message, state: FSMContext):
         )
         allocator = db.load_allocator(message.from_user.id)
         if allocator is not None:
-            annual_monthly = annual_tax_monthly_norm(item)
+            annual_monthly = applied_annual_tax_monthly_norm(item)
             catchup = allocator.settings.tax_catchups.pop(old_key, item["monthly_amount"])
             set_tax_monthly_target(allocator, old_key, ZERO)
             set_tax_monthly_target(allocator, new_key, annual_monthly)
@@ -2232,7 +2340,9 @@ async def tax_obligation_save_amount(message: Message, state: FSMContext):
         allocator = db.load_allocator(message.from_user.id)
         if allocator is not None:
             key = tax_obligation_key(item["tax_type"], item["object_name"])
-            set_tax_monthly_target(allocator, key, annual_monthly)
+            # Исправление текущего уведомления не активирует новую годовую
+            # норму раньше фактической оплаты. load_allocator уже сохранил
+            # последнюю подтверждённую норму, если она была.
             if monthly > ZERO:
                 allocator.settings.tax_catchups[key] = monthly
             else:
@@ -2300,7 +2410,8 @@ async def tax_obligation_delete(callback: CallbackQuery):
                 allocator.settings.tax_catchups.pop(key, None)
             else:
                 set_tax_monthly_target(
-                    allocator, key, annual_tax_monthly_norm(remaining_same_tax),
+                    allocator, key,
+                    applied_annual_tax_monthly_norm(remaining_same_tax),
                 )
                 if remaining_same_tax["monthly_amount"] > ZERO:
                     allocator.settings.tax_catchups[key] = remaining_same_tax["monthly_amount"]

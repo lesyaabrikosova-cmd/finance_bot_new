@@ -1262,6 +1262,11 @@ class AllocatorState:
 
     life_balance: Decimal = ZERO
 
+    # Сколько алгоритм направил в единый Бытовой резерв за текущий период.
+    # Это не фактический остаток банковского конверта: расходы бот не ведёт.
+    # None используется только при восстановлении старых снимков состояния.
+    household_reserve_progress: Optional[Decimal] = None
+
     # Накоплено из обязательных платежей
     # внутри текущего расчётного периода.
     accumulated_minimum_payments: Decimal = ZERO
@@ -1358,6 +1363,10 @@ class AllocatorState:
 
     def __post_init__(self):
         self.life_balance = D(self.life_balance)
+        if self.household_reserve_progress is not None:
+            self.household_reserve_progress = max(
+                ZERO, D(self.household_reserve_progress)
+            )
         self.accumulated_minimum_payments = D(
             self.accumulated_minimum_payments
         )
@@ -1564,6 +1573,7 @@ class AllocatorState:
         """
 
         self.life_balance = ZERO
+        self.household_reserve_progress = ZERO
 
         self.accumulated_minimum_payments = ZERO
 
@@ -1639,6 +1649,18 @@ class FinancialAllocator:
         self.settings = settings
         self.state = state or AllocatorState()
 
+        # Старые снимки знали только общий прогресс КМ + БР. При первом
+        # восстановлении отделяем БР по тем целям, которые действовали в этот
+        # момент. Дальше два прогресса меняются независимо.
+        if self.state.household_reserve_progress is None:
+            self.state.household_reserve_progress = min(
+                self.settings.household_reserve,
+                max(
+                    ZERO,
+                    self.state.life_balance - self.settings.critical_life,
+                ),
+            )
+
         errors = self.settings.validate()
 
         if errors:
@@ -1660,6 +1682,41 @@ class FinancialAllocator:
         snapshot["operation_log"] = []
         snapshot["distribution_history"] = []
         return snapshot
+
+    @property
+    def critical_life_progress(self) -> Decimal:
+        """Плановое покрытие КМ в текущем периоде, отдельно от БР."""
+        return max(
+            ZERO,
+            D(self.state.life_balance)
+            - D(self.state.household_reserve_progress or ZERO),
+        )
+
+    @property
+    def household_reserve_progress(self) -> Decimal:
+        """Сумма, направленная в единый БР за текущий период."""
+        return max(ZERO, D(self.state.household_reserve_progress or ZERO))
+
+    @property
+    def life_plan_is_funded(self) -> bool:
+        return (
+            self.critical_life_progress >= self.settings.critical_life
+            and self.household_reserve_progress >= self.settings.household_reserve
+        )
+
+    @property
+    def sustainable_life_remaining(self) -> Decimal:
+        return (
+            max(
+                ZERO,
+                self.settings.critical_life - self.critical_life_progress,
+            )
+            + max(
+                ZERO,
+                self.settings.household_reserve
+                - self.household_reserve_progress,
+            )
+        )
 
     def rollback_income_operation(
         self,
@@ -1695,6 +1752,14 @@ class FinancialAllocator:
             if missing_credits:
                 raise ValueError("Настройки долгов изменились; удалить это поступление безопасно нельзя.")
             self.state = AllocatorState(**snapshot)
+            if self.state.household_reserve_progress is None:
+                self.state.household_reserve_progress = min(
+                    self.settings.household_reserve,
+                    max(
+                        ZERO,
+                        self.state.life_balance - self.settings.critical_life,
+                    ),
+                )
             for credit in self.settings.credits:
                 before = old_credit_state[credit.name]
                 credit.principal_balance = D(before["principal_balance"])
@@ -1744,6 +1809,15 @@ class FinancialAllocator:
             ZERO,
         )
         subtract("life_balance", life_total)
+        household_total = sum(
+            (
+                amount
+                for key, amount in allocations.items()
+                if key.startswith("БР:") or key == "Бытовой резерв"
+            ),
+            ZERO,
+        )
+        subtract("household_reserve_progress", household_total)
         subtract("accumulated_minimum_payments", allocations.get("Мин. платеж", ZERO))
 
         for key, amount in allocations.items():
@@ -1793,6 +1867,7 @@ class FinancialAllocator:
         preserve_fields = set(rollback_context.get("preserve_state_fields") or [])
         scalar_fields = (
             "life_balance",
+            "household_reserve_progress",
             "accumulated_minimum_payments",
             "pillow_minimum",
             "intercontract_reserve",
@@ -1808,7 +1883,21 @@ class FinancialAllocator:
         for field_name in scalar_fields:
             if field_name in preserve_fields:
                 continue
-            delta = D(after.get(field_name, ZERO)) - D(before.get(field_name, ZERO))
+            if (
+                field_name == "household_reserve_progress"
+                and field_name not in before
+                and field_name not in after
+            ):
+                delta = sum(
+                    (
+                        D(value)
+                        for key, value in (operation.get("allocations") or {}).items()
+                        if str(key).startswith("БР:") or key == "Бытовой резерв"
+                    ),
+                    ZERO,
+                )
+            else:
+                delta = D(after.get(field_name, ZERO)) - D(before.get(field_name, ZERO))
             current = D(getattr(self.state, field_name))
             if delta < ZERO or delta > current:
                 raise ValueError(
@@ -2324,6 +2413,7 @@ class FinancialAllocator:
         result: Dict[str, Decimal] = {}
 
         st.life_balance = ZERO
+        st.household_reserve_progress = ZERO
         st.accumulated_minimum_payments = ZERO
         st.contract_obligations_reserve = ZERO
         st.pillow_minimum = ZERO
@@ -2333,6 +2423,10 @@ class FinancialAllocator:
 
         life_part = min(total, s.household_life)
         st.life_balance = life_part
+        st.household_reserve_progress = min(
+            s.household_reserve,
+            max(ZERO, life_part - s.critical_life),
+        )
         result["Текущая жизнь"] = life_part
         total -= life_part
 
@@ -2395,7 +2489,7 @@ class FinancialAllocator:
             months = self.state.intercontract_months_remaining
             if (
                 self.state.intercontract_break_active
-                and self.state.life_balance >= self.settings.household_life
+                and self.life_plan_is_funded
                 and not self.state.break_period_salary_paid
             ):
                 months = max(ZERO, months - ONE)
@@ -2410,7 +2504,7 @@ class FinancialAllocator:
             months = self.state.intercontract_months_remaining
             if (
                 self.state.intercontract_break_active
-                and self.state.life_balance >= self.settings.household_life
+                and self.life_plan_is_funded
                 and not self.state.break_period_salary_paid
             ):
                 months = max(ZERO, months - ONE)
@@ -2441,7 +2535,15 @@ class FinancialAllocator:
             raise ValueError("Сначала начните межконтрактный период.")
         if self.state.intercontract_months_remaining <= ZERO:
             raise ValueError("Все месяцы перерыва уже проведены. Начните новую рабочую часть.")
-        missing_life = max(ZERO, self.settings.household_life - self.state.life_balance)
+        critical_missing = max(
+            ZERO,
+            self.settings.critical_life - self.critical_life_progress,
+        )
+        household_missing = max(
+            ZERO,
+            self.settings.household_reserve - self.household_reserve_progress,
+        )
+        missing_life = critical_missing + household_missing
         requested = self.intercontract_monthly_salary if requested_amount is None else D(requested_amount)
         if requested < ZERO:
             raise ValueError("Сумма выплаты не может быть отрицательной.")
@@ -2453,6 +2555,11 @@ class FinancialAllocator:
         self.state.intercontract_reserve -= amount
         life_part = min(amount, missing_life)
         self.state.life_balance += life_part
+        household_part = min(
+            max(ZERO, life_part - critical_missing),
+            household_missing,
+        )
+        self.state.household_reserve_progress += household_part
         remaining = amount - life_part
 
         obligation_missing = max(
@@ -2528,6 +2635,7 @@ class FinancialAllocator:
             return "Фонд Зарплаты"
         if target == "household":
             self.state.life_balance += amount
+            self.state.household_reserve_progress += amount
             return "Бытовой резерв"
         if target == "pillow":
             if any(c.active for c in self.settings.credits) and not self.minimum_pillow_is_funded():
@@ -3333,7 +3441,7 @@ class FinancialAllocator:
 
         target = s.total_critical_life
         accumulated_kzh = (
-            st.life_balance
+            self.critical_life_progress
             + st.accumulated_minimum_payments
         )
 
@@ -3529,14 +3637,12 @@ class FinancialAllocator:
         s = self.settings
         st = self.state
 
-        if not (
-            s.critical_life
-            <= st.life_balance
-            < s.household_life
-        ):
+        if self.critical_life_progress < s.critical_life:
+            return amount
+        if self.household_reserve_progress >= s.household_reserve:
             return amount
 
-        missing = s.household_life - st.life_balance
+        missing = s.household_reserve - self.household_reserve_progress
         bracket = s.bracket_b
         required_base = (
             missing
@@ -3582,16 +3688,13 @@ class FinancialAllocator:
 
         reserve_part = part_b - up_calculated
         st.life_balance += reserve_part
-        reserve_total = s.household_reserve
-        detailed = ZERO
-        if reserve_total > ZERO:
-            for name, target in s.household_reserve_categories.items():
-                part = reserve_part * target / reserve_total
-                detailed += part
-                allocations[f"БР:{name}"] = allocations.get(f"БР:{name}", ZERO) + part
+        st.household_reserve_progress += reserve_part
+        # Бытовой резерв — единый конверт. Категории из старых профилей
+        # остаются только исторической расшифровкой расходов и не создают
+        # отдельные направления для новых поступлений.
         allocations["Бытовой резерв"] = (
             allocations.get("Бытовой резерв", ZERO)
-            + reserve_part - detailed
+            + reserve_part
         )
 
         steps.append(
@@ -3622,9 +3725,7 @@ class FinancialAllocator:
         if amount <= ZERO:
             return ZERO
 
-        if self.state.life_balance < (
-            self.settings.household_life
-        ):
+        if not self.life_plan_is_funded:
             return amount
 
         return self._allocate_policy(amount, mode, "C", steps, allocations)
@@ -4296,8 +4397,8 @@ class FinancialAllocator:
             "status": "ok",
             "message": (
                 "Расчётный период сброшен. "
-                "Баланс жизни и накопление минимальных "
-                "платежей обнулены. Подушка сохранена."
+                "Прогресс Критического минимума, Бытового резерва "
+                "и минимальных платежей обнулён. Подушка сохранена."
             ),
         }
 
@@ -4343,6 +4444,9 @@ class FinancialAllocator:
 
             "life_balance":
                 self.state.life_balance,
+
+            "household_reserve_progress":
+                self.household_reserve_progress,
 
             "cycle_income": self.state.cycle_income,
             "cycle_regular_income_limit": self.settings.cycle_regular_income_limit,
