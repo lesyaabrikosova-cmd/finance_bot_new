@@ -33,7 +33,12 @@ from financial_engine import (
 from storage import db
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 from ui import main_menu_keyboard, button_text
-from taxes import apply_planned_tax_allocation, refresh_planned_tax_targets
+from taxes import (
+    apply_planned_tax_allocation,
+    compact_income_tax_profile,
+    is_income_tax_profile_label,
+    refresh_planned_tax_targets,
+)
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets
 from income_deletion import (
     attach_income_rollback_context,
@@ -435,7 +440,14 @@ async def show_income_types(message: Message, state: FSMContext, settings=None) 
         )
         return
     await state.set_state(IncomeStates.income_type)
-    types = list(settings.income_type_tax_rates)
+    profile_names = {
+        compact_income_tax_profile(name)
+        for name in getattr(settings, "income_tax_profiles", {})
+    }
+    types = [
+        name for name in settings.income_type_tax_rates
+        if not is_income_tax_profile_label(name, profile_names)
+    ]
     await state.update_data(available_income_types=types)
     flow_id = await current_flow_id(state)
     rows = [
@@ -1137,6 +1149,15 @@ async def edit_income_tax(
         return
     await callback.answer()
 
+    await show_income_tax_edit_menu(
+        callback.message, state, callback.from_user.id,
+    )
+
+
+async def show_income_tax_edit_menu(
+    message: Message, state: FSMContext, telegram_id: int,
+) -> None:
+    """Show only the top-level choices for a one-off income tax."""
     data = await state.get_data()
 
     amount = Decimal(
@@ -1147,9 +1168,7 @@ async def edit_income_tax(
         "income_type"
     ]
 
-    allocator = db.load_allocator(
-        callback.from_user.id
-    )
+    allocator = db.load_allocator(telegram_id)
 
     automatic_tax = (
         allocator.calculate_tax(
@@ -1167,7 +1186,7 @@ async def edit_income_tax(
     )
     flow_id = data.get("income_flow_id")
 
-    await callback.message.answer(
+    await message.answer(
         "🏛️ <b>НАЛОГ ЭТОГО ПОСТУПЛЕНИЯ</b>\n\n"
         f"{escape(income_type)} — {rub(amount)}\n"
         "————————————\n"
@@ -1178,11 +1197,12 @@ async def edit_income_tax(
         "настройки профиля. Патент здесь не выбирается: это отдельный "
         "плановый платёж, а не процент с поступления.",
         reply_markup=keyboard([
-            [("НПД · ФЛ · 4%", flow_callback("taxedit:npd:physical:4", flow_id)), ("НПД · ФЛ · 3%", flow_callback("taxedit:npd:physical:3", flow_id))],
-            [("НПД · ЮЛ · 6%", flow_callback("taxedit:npd:business:6", flow_id)), ("НПД · ЮЛ · 4%", flow_callback("taxedit:npd:business:4", flow_id))],
-            [("ИП · УСН · 6%", flow_callback("taxedit:usn:6", flow_id))],
-            [("Без налога", flow_callback("taxedit:none", flow_id))],
             [
+                ("Самозанятость", flow_callback("taxedit:subject:self", flow_id)),
+                ("ИП", flow_callback("taxedit:subject:ip", flow_id)),
+            ],
+            [
+                ("Без налога", flow_callback("taxedit:none", flow_id)),
                 (
                     "Ввести свой %",
                     flow_callback("taxedit:custom_percent", flow_id),
@@ -1200,6 +1220,60 @@ async def edit_income_tax(
             ],
         ]),
     )
+
+
+@router.callback_query(
+    StateFilter(
+        IncomeStates.tax_edit,
+        IncomeStates.tax_custom_percent,
+        IncomeStates.tax_custom_amount,
+    ),
+    (F.data == "taxedit:menu") | F.data.startswith("taxedit:menu|"),
+)
+async def tax_edit_menu(callback: CallbackQuery, state: FSMContext):
+    if not await require_current_flow(callback, state):
+        return
+    await callback.answer()
+    await show_income_tax_edit_menu(callback.message, state, callback.from_user.id)
+
+
+@router.callback_query(
+    StateFilter(IncomeStates.tax_edit, IncomeStates.tax_custom_percent),
+    F.data.startswith("taxedit:subject:"),
+)
+async def tax_edit_subject(callback: CallbackQuery, state: FSMContext):
+    if not await require_current_flow(callback, state):
+        return
+    await callback.answer()
+    subject = callback_base(callback.data).rsplit(":", 1)[1]
+    flow_id = await current_flow_id(state)
+    await state.set_state(IncomeStates.tax_edit)
+    if subject == "self":
+        text = (
+            "<b>САМОЗАНЯТОСТЬ</b>\n\n"
+            "НПД — налог на профессиональный доход; ФЛ — физлица, ЮЛ — юрлица."
+        )
+        rows = [
+            [("НПД · ФЛ · 4%", flow_callback("taxedit:npd:physical:4", flow_id)), ("НПД · ЮЛ · 6%", flow_callback("taxedit:npd:business:6", flow_id))],
+            [("НПД · ФЛ · 3%", flow_callback("taxedit:npd:physical:3", flow_id)), ("НПД · ЮЛ · 4%", flow_callback("taxedit:npd:business:4", flow_id))],
+        ]
+    elif subject == "ip":
+        text = (
+            "<b>ИП</b>\n\n"
+            "УСН — упрощённая система налогообложения."
+        )
+        rows = [[
+            ("УСН · 6%", flow_callback("taxedit:usn:6", flow_id)),
+            ("Своя ставка", flow_callback("taxedit:ip_custom_percent", flow_id)),
+        ]]
+    else:
+        await show_income_tax_edit_menu(callback.message, state, callback.from_user.id)
+        return
+    rows.append([
+        ("← Главное меню", "menu:back"),
+        ("← Назад", flow_callback("taxedit:menu", flow_id)),
+    ])
+    await callback.message.answer(text, reply_markup=keyboard(rows))
 
 
 @router.callback_query(
@@ -1347,7 +1421,10 @@ async def tax_edit_profile(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(
     IncomeStates.tax_edit,
-    (F.data == "taxedit:custom_percent") | F.data.startswith("taxedit:custom_percent|")
+    (F.data == "taxedit:custom_percent")
+    | F.data.startswith("taxedit:custom_percent|")
+    | (F.data == "taxedit:ip_custom_percent")
+    | F.data.startswith("taxedit:ip_custom_percent|")
 )
 async def ask_custom_tax_percent(
     callback: CallbackQuery,
@@ -1361,11 +1438,17 @@ async def ask_custom_tax_percent(
         IncomeStates.tax_custom_percent
     )
 
+    return_callback = (
+        "taxedit:subject:ip"
+        if callback_base(callback.data) == "taxedit:ip_custom_percent"
+        else "taxedit:menu"
+    )
+    await state.update_data(tax_edit_custom_return=return_callback)
     await callback.message.answer(
         "Введите процент налога для этого "
         "поступления.\n\n"
         "Например: <code>7,5</code>",
-        reply_markup=await income_navigation(state, "taxedit:back"),
+        reply_markup=await income_navigation(state, return_callback),
     )
 
 
@@ -1385,9 +1468,12 @@ async def save_custom_tax_percent(
         or percent < 0
         or percent > 100
     ):
+        return_callback = (await state.get_data()).get(
+            "tax_edit_custom_return", "taxedit:menu",
+        )
         await message.answer(
             "Введите процент от 0 до 100.",
-            reply_markup=await income_navigation(state, "taxedit:back"),
+            reply_markup=await income_navigation(state, return_callback),
         )
         return
 
@@ -1432,12 +1518,13 @@ async def ask_custom_tax_amount(
     await state.set_state(
         IncomeStates.tax_custom_amount
     )
+    await state.update_data(tax_edit_custom_return="taxedit:menu")
 
     await callback.message.answer(
         "Введите точную сумму налога, которую "
         "нужно зарезервировать из этого поступления.\n\n"
         "Например: <code>8450</code>",
-        reply_markup=await income_navigation(state, "taxedit:back"),
+        reply_markup=await income_navigation(state, "taxedit:menu"),
     )
 
 
@@ -1466,7 +1553,7 @@ async def save_custom_tax_amount(
         await message.answer(
             "Введите сумму от 0 ₽ до суммы "
             f"поступления {rub(amount)}.",
-            reply_markup=await income_navigation(state, "taxedit:back"),
+            reply_markup=await income_navigation(state, "taxedit:menu"),
         )
         return
 

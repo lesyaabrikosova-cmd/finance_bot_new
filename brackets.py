@@ -17,7 +17,11 @@ from bracket_card import render_bracket_card
 
 from financial_engine import FinancialAllocator, fmt_money
 from planned_payments import refresh_planned_payment_targets
-from taxes import refresh_planned_tax_targets
+from taxes import (
+    compact_income_tax_profile,
+    is_income_tax_profile_label,
+    refresh_planned_tax_targets,
+)
 from storage import db
 from ui import keyboard
 
@@ -308,7 +312,14 @@ async def choose_example_type(callback, state: FSMContext):
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is None:
         return
-    names = list(allocator.settings.income_type_tax_rates) or ["Доход"]
+    known_profiles = {
+        compact_income_tax_profile(name)
+        for name in allocator.settings.income_tax_profiles
+    }
+    names = [
+        name for name in allocator.settings.income_type_tax_rates
+        if not is_income_tax_profile_label(name, known_profiles)
+    ] or ["Доход"]
     await state.update_data(bracket_type_choices=names)
     await callback.message.answer("<b>КАКОЕ ПОСТУПЛЕНИЕ ПОСЧИТАТЬ?</b>\nТип дохода определяет налог в примере.",
                                   reply_markup=keyboard([[(name, f"brackets:type:{i}")] for i, name in enumerate(names)] + [[("Отмена", "brackets:open")]]))

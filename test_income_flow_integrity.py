@@ -26,6 +26,14 @@ class FakeState:
         return dict(self.data)
 
 
+class MutableFakeState(FakeState):
+    async def set_state(self, value):
+        self.value = getattr(value, "state", value)
+
+    async def update_data(self, **values):
+        self.data.update(values)
+
+
 class IncomeInputTests(unittest.TestCase):
     def test_parser_accepts_russian_and_international_grouping(self):
         self.assertEqual(income.parse_decimal("1,234.56"), Decimal("1234.56"))
@@ -54,6 +62,84 @@ class IncomeInputTests(unittest.TestCase):
 
 
 class IncomeFlowTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def button_rows(message):
+        markup = message.answer.await_args.kwargs["reply_markup"]
+        return [[button.text for button in row] for row in markup.inline_keyboard]
+
+    async def test_income_type_picker_hides_legacy_tax_profile_records(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("100"),
+            income_type_tax_rates={
+                "Зарплата": Decimal("6"),
+                "Самозанятость · Физики · 3%": Decimal("3"),
+                "ИП · УСН · 6%": Decimal("6"),
+                "Халтура": Decimal("0"),
+            },
+            income_tax_profiles={
+                "НПД · ФЛ · 3%": {"rate": "3"},
+                "ИП · УСН · 6%": {"rate": "6"},
+            },
+        )
+        message = SimpleNamespace(answer=AsyncMock())
+        state = MutableFakeState(data={"income_flow_id": "flow"})
+
+        await income.show_income_types(message, state, settings)
+
+        rows = self.button_rows(message)
+        self.assertEqual(rows[:1], [["Зарплата", "Халтура"]])
+        self.assertNotIn("Самозанятость · Физики · 3%", sum(rows, []))
+        self.assertNotIn("ИП · УСН · 6%", sum(rows, []))
+        self.assertEqual(state.data["available_income_types"], ["Зарплата", "Халтура"])
+
+    async def test_one_off_tax_editor_uses_compact_nested_menus(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("100"),
+            income_type_tax_rates={"Зарплата": Decimal("6")},
+        ))
+        message = SimpleNamespace(answer=AsyncMock())
+        state = MutableFakeState(data={
+            "income_flow_id": "flow",
+            "income_amount": "1000",
+            "income_type": "Зарплата",
+        })
+        with patch.object(income.db, "load_allocator", return_value=allocator):
+            await income.show_income_tax_edit_menu(message, state, 42)
+        self.assertEqual(self.button_rows(message), [
+            ["Самозанятость", "ИП"],
+            ["Без налога", "Ввести свой %"],
+            ["Ввести сумму налога"],
+            ["← Главное меню", "← Назад"],
+        ])
+
+        callback = SimpleNamespace(
+            data="taxedit:subject:self|flow",
+            answer=AsyncMock(),
+            from_user=SimpleNamespace(id=42),
+            message=message,
+        )
+        await income.tax_edit_subject(callback, state)
+        self.assertEqual(self.button_rows(message), [
+            ["НПД · ФЛ · 4%", "НПД · ЮЛ · 6%"],
+            ["НПД · ФЛ · 3%", "НПД · ЮЛ · 4%"],
+            ["← Главное меню", "← Назад"],
+        ])
+
+        callback.data = "taxedit:subject:ip|flow"
+        await income.tax_edit_subject(callback, state)
+        self.assertEqual(self.button_rows(message), [
+            ["УСН · 6%", "Своя ставка"],
+            ["← Главное меню", "← Назад"],
+        ])
+
     async def test_stale_cancel_cannot_clear_another_wizard(self):
         state = FakeState("Taxes:amount", {"income_flow_id": "current"})
         callback = SimpleNamespace(

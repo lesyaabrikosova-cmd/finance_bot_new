@@ -13,6 +13,7 @@ from financial_engine import goal_display_name, is_system_envelope_name
 from storage import db
 from time_utils import moscow_now
 from ui import keyboard, main_menu_keyboard
+from taxes import compact_income_tax_profile, is_income_tax_profile_label
 
 router = Router()
 
@@ -204,7 +205,12 @@ async def show_settings_menu(message: Message, telegram_id: int):
             name = goal_display_name(goal.name, goal.is_chest)
             lines.append(f"{icon} <b>{escape(name)}</b> — {goal.percentage}%")
     lines.extend(["————————————", "<b>НАЛОГИ С ДОХОДА</b>", ""])
+    known_profiles = {
+        compact_income_tax_profile(name) for name in s.income_tax_profiles
+    }
     for income_name, rate in s.income_type_tax_rates.items():
+        if is_income_tax_profile_label(income_name, known_profiles):
+            continue
         lines.append(f"{escape(income_name)} — {'без налога' if rate == 0 else f'{rate}%'}")
     lines.extend([
         "————————————",
@@ -1019,7 +1025,15 @@ async def save_average_income(message: Message, state: FSMContext):
 
 async def show_income_types_settings(message: Message, telegram_id: int):
     allocator = db.load_allocator(telegram_id)
-    rates = allocator.settings.income_type_tax_rates
+    all_rates = allocator.settings.income_type_tax_rates
+    known_profiles = {
+        compact_income_tax_profile(name)
+        for name in allocator.settings.income_tax_profiles
+    }
+    rates = {
+        name: rate for name, rate in all_rates.items()
+        if not is_income_tax_profile_label(name, known_profiles)
+    }
     lines = [
         f"• {escape(name)} — " + (
             escape(allocator.settings.income_type_tax_profiles.get(name, f"налог {rate}%"))
@@ -1027,10 +1041,10 @@ async def show_income_types_settings(message: Message, telegram_id: int):
         )
         for name, rate in rates.items()
     ]
-    standalone_profiles = [
-        name for name in allocator.settings.income_tax_profiles
-        if name not in rates
-    ]
+    standalone_profiles = list(dict.fromkeys(
+        compact_income_tax_profile(name)
+        for name in allocator.settings.income_tax_profiles
+    ))
     if standalone_profiles:
         lines.extend(["", "<b>Добавленные налоговые правила</b>"])
         lines.extend(f"• {escape(name)}" for name in standalone_profiles)
@@ -1360,7 +1374,14 @@ async def income_type_view(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     index = int(callback.data.rsplit(":", 1)[1])
     allocator = db.load_allocator(callback.from_user.id)
-    names = list(allocator.settings.income_type_tax_rates)
+    known_profiles = {
+        compact_income_tax_profile(name)
+        for name in allocator.settings.income_tax_profiles
+    }
+    names = [
+        name for name in allocator.settings.income_type_tax_rates
+        if not is_income_tax_profile_label(name, known_profiles)
+    ]
     if not 0 <= index < len(names):
         await show_income_types_settings(callback.message, callback.from_user.id)
         return

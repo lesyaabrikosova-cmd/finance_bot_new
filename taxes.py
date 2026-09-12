@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING
@@ -554,6 +555,20 @@ def compact_income_tax_profile(profile: str) -> str:
         if value.startswith(old):
             return new + value[len(old):]
     return value
+
+
+def is_income_tax_profile_label(
+    name: str, known_profiles: set[str] | None = None,
+) -> bool:
+    """Identify legacy tax rules that were stored as income-type names."""
+    compact = compact_income_tax_profile(name)
+    if known_profiles and compact in known_profiles:
+        return True
+    return bool(re.fullmatch(
+        r"(?:НПД · (?:ФЛ|ЮЛ)|ИП · УСН) · [0-9]+(?:[.,][0-9]+)?%",
+        compact,
+        flags=re.IGNORECASE,
+    ))
 
 
 def income_tax_detail_label(payload: dict, source: str, tax: Decimal, settings=None) -> str:
