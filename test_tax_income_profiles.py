@@ -9,15 +9,23 @@ _DATA = tempfile.TemporaryDirectory()
 os.environ["ALLOCATOR_DATA_DIR"] = _DATA.name
 
 import taxes
+from income import save_custom_tax_percent, show_income_confirmation
 from onboarding import profile_income_save, profile_income_tax_choice
 from financial_engine import FinancialAllocator, UserSettings
+from settings_editor import (
+    income_tax_rule_select_patent,
+    income_type_add_named_rule,
+    income_type_add_rate,
+)
 from taxes import (
     LAND_TAX_BROWNS,
     PROPERTY_TAX_YELLOWS,
     TRANSPORT_TAX_GRAYS,
     TaxStates,
     income_tax_menu_back,
+    income_tax_profile_choice,
     income_tax_profile_delete,
+    patent_save,
     save_income_tax_profile,
     show_income_tax_profile_menu,
     show_ip_usn_rate_menu,
@@ -67,18 +75,172 @@ class MemoryState:
 
 
 class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
-    async def test_profile_menu_deduplicates_old_and_compact_names(self):
+    async def test_one_off_custom_usn_rate_keeps_usn_label(self):
         current = allocator()
+        current.settings.income_type_tax_rates = {"Зарплата": Decimal("0")}
+        state = MemoryState(
+            income_amount="100000",
+            income_type="Зарплата",
+            income_date="2026-09-13",
+            income_flow_id="flow-1",
+            tax_edit_custom_profile_prefix="ИП · УСН",
+        )
+        message = SimpleNamespace(
+            text="5", from_user=SimpleNamespace(id=42), answer=AsyncMock(),
+        )
+        with patch("income.db") as income_db:
+            income_db.load_allocator.return_value = current
+            await save_custom_tax_percent(message, state)
+
+        self.assertEqual(state.data["tax_override_profile"], "ИП · УСН · 5%")
+        self.assertIn("Налог • 5% — 5 000", message.answer.await_args.args[0])
+
+    async def test_custom_usn_rate_keeps_usn_label(self):
+        state = MemoryState(
+            income_type_action="add",
+            income_type_draft_name="Зарплата",
+            income_rule_target="new",
+        )
+        callback = SimpleNamespace(
+            data="incomesettings:newrule:custom_ip_usn",
+            answer=AsyncMock(), message=SimpleNamespace(answer=AsyncMock()),
+        )
+        await income_type_add_named_rule(callback, state)
+        message = SimpleNamespace(
+            text="5", from_user=SimpleNamespace(id=42), answer=AsyncMock(),
+        )
+        await income_type_add_rate(message, state)
+
+        self.assertEqual(state.data["income_type_draft_rate"], "5")
+        self.assertEqual(
+            state.data["income_type_draft_profile"], "ИП · УСН · 5%",
+        )
+        self.assertIn("ИП · УСН · 5%", message.answer.await_args.args[0])
+
+    async def test_stale_profile_button_redirects_without_writing_catalog(self):
+        current = allocator()
+        callback = SimpleNamespace(
+            data="taxincome:npd:physical:3",
+            answer=AsyncMock(), from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        state = MemoryState(old="draft")
+        with patch("settings_editor.db") as settings_db:
+            settings_db.load_allocator.return_value = current
+            await income_tax_profile_choice(callback, state)
+
+        self.assertEqual(current.settings.income_tax_profiles, {})
+        self.assertNotIn("old", state.data)
+        self.assertEqual(state.data["income_types_return"], "taxes:add")
+        rendered = "\n".join(call.args[0] for call in callback.message.answer.await_args_list)
+        self.assertIn("старой версии", rendered)
+        self.assertIn("<b>ТИПЫ ДОХОДОВ</b>", rendered)
+
+    async def test_existing_patent_is_confirmed_before_new_income_type_is_saved(self):
+        state = MemoryState(
+            available_patent_names=["Музыкальные занятия"],
+            income_rule_target="new",
+            income_type_action="add",
+            income_type_draft_name="Зарплата",
+        )
+        callback = SimpleNamespace(
+            data="incomesettings:psn_select:0",
+            answer=AsyncMock(), from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        await income_tax_rule_select_patent(callback, state)
+
+        self.assertEqual(state.data["income_type_draft_rate"], "0")
+        self.assertEqual(
+            state.data["income_type_draft_profile"],
+            "ИП · ПСН · Музыкальные занятия · по плану",
+        )
+        self.assertIn(
+            "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>",
+            callback.message.answer.await_args.args[0],
+        )
+
+    async def test_patent_income_confirmation_explains_zero_withholding(self):
+        current = allocator()
+        current.settings.income_type_tax_rates = {"Зарплата": Decimal("0")}
+        current.settings.income_type_tax_profiles = {
+            "Зарплата": "ИП · ПСН · Музыкальные занятия · по плану",
+        }
+        message = SimpleNamespace(answer=AsyncMock())
+        state = MemoryState(
+            income_amount="100000",
+            income_type="Зарплата",
+            income_date="2026-09-13",
+            tax_override=None,
+            income_flow_id="flow-1",
+        )
+        with patch("income.db") as income_db:
+            income_db.load_allocator.return_value = current
+            await show_income_confirmation(message, state, 42)
+
+        text = message.answer.await_args.args[0]
+        self.assertIn("Налог с этого поступления — <b>не удерживается</b>", text)
+        self.assertIn("Патент копится отдельно по плану", text)
+
+    async def test_two_patent_payments_and_income_binding_save_together(self):
+        current = allocator()
+        state = MemoryState(
+            tax_goal_name="Музыкальные занятия",
+            patent_payment_count=2,
+            patent_first_amount="30000",
+            patent_first_due_date="2027-04-01",
+            patent_second_amount="60000",
+            patent_second_due_date="2027-12-28",
+            patent_attach_income_type=True,
+            patent_types_return="settings:open",
+            income_rule_target="new",
+            income_type_draft_name="Зарплата",
+        )
+        callback = SimpleNamespace(
+            answer=AsyncMock(), from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        transaction = MagicMock()
+        transaction.__enter__.return_value = None
+        transaction.__exit__.return_value = False
+        with patch("taxes.db") as db:
+            db.load_tax_obligations.return_value = []
+            db.load_allocator.return_value = current
+            db.add_tax_obligation.side_effect = [101, 102]
+            db.transaction.return_value = transaction
+            await patent_save(callback, state)
+
+        self.assertEqual(db.add_tax_obligation.call_count, 2)
+        names = [call.args[2] for call in db.add_tax_obligation.call_args_list]
+        self.assertEqual(names, [
+            "Музыкальные занятия — 1-й платёж",
+            "Музыкальные занятия — 2-й платёж",
+        ])
+        self.assertEqual(current.settings.income_type_tax_rates["Зарплата"], Decimal("0"))
+        self.assertEqual(
+            current.settings.income_type_tax_profiles["Зарплата"],
+            "ИП · ПСН · Музыкальные занятия · по плану",
+        )
+        self.assertEqual(state.data, {})
+        self.assertEqual(button_rows(callback.message)[0], ["✓ Готово"])
+
+    async def test_income_tax_entry_opens_types_without_standalone_profiles(self):
+        current = allocator()
+        current.settings.income_type_tax_rates = {"Зарплата": Decimal("3")}
+        current.settings.income_type_tax_profiles = {"Зарплата": "НПД · ФЛ · 3%"}
         current.settings.income_tax_profiles = {
             "Самозанятость · Физики · 3%": {"rate": "3"},
             "НПД · ФЛ · 3%": {"rate": "3"},
         }
         message = SimpleNamespace(answer=AsyncMock())
-        with patch("taxes.db") as db:
-            db.load_allocator.return_value = current
+        with patch("settings_editor.db") as settings_db:
+            settings_db.load_allocator.return_value = current
             await show_income_tax_profile_menu(message, 42)
         text = message.answer.await_args.args[0]
-        self.assertEqual(text.count("• НПД · ФЛ · 3%"), 1)
+        self.assertIn("<b>ТИПЫ ДОХОДОВ</b>", text)
+        self.assertIn("• Зарплата · НПД · ФЛ · 3%", text)
+        self.assertNotIn("Добавленные налоговые правила", text)
+        self.assertNotIn("Налоговый профиль", sum(button_rows(message), []))
 
     async def test_deleting_rule_removes_legacy_duplicate_and_default_binding(self):
         current = allocator()
@@ -171,16 +333,14 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
         report.assert_awaited_once()
         self.assertEqual(report.await_args.kwargs["legend_columns"], 1)
 
-    async def test_income_tax_menu_has_fixed_navigation(self):
+    async def test_income_tax_menu_has_type_and_patent_actions(self):
         message = SimpleNamespace(answer=AsyncMock())
-        with patch("taxes.db") as db:
+        with patch("settings_editor.db") as db:
             db.load_allocator.return_value = allocator()
             await show_income_tax_profile_menu(message, 42)
         self.assertEqual(button_rows(message), [
-            ["Самозанятость (НПД)"],
-            ["ИП на УСН «Доходы»"],
-            ["ИП на ПСН (патент)"],
-            ["✓ Готово"],
+            ["＋ Добавить тип дохода"],
+            ["＋ Настроить патент (ПСН)"],
             ["← Главное меню", "← Назад"],
         ])
 
@@ -236,12 +396,13 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
             from_user=SimpleNamespace(id=42),
             message=SimpleNamespace(answer=AsyncMock()),
         )
-        state = SimpleNamespace(clear=AsyncMock(), set_state=AsyncMock())
-        with patch("taxes.db") as db:
+        state = MemoryState(old="value")
+        with patch("settings_editor.db") as db:
             db.load_allocator.return_value = allocator()
             await income_tax_menu_back(callback, state)
-        state.clear.assert_awaited_once()
-        state.set_state.assert_awaited_once_with(TaxStates.obligation_type)
+        self.assertEqual(state.data["income_types_return"], "taxes:add")
+        self.assertNotIn("old", state.data)
+        self.assertIn("<b>ТИПЫ ДОХОДОВ</b>", callback.message.answer.await_args.args[0])
 
     async def test_profile_save_is_idempotent(self):
         current = allocator()
@@ -282,6 +443,57 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
 
 
 class TaxIncomeChartColours(unittest.TestCase):
+    def test_old_tax_is_not_relabelled_as_current_patent_rule(self):
+        current = allocator()
+        current.settings.income_type_tax_rates = {"Зарплата": Decimal("0")}
+        current.settings.income_type_tax_profiles = {
+            "Зарплата": "ИП · ПСН · Музыкальные занятия · по плану",
+        }
+        operations = [{
+            "id": 1,
+            "payload": {
+                "type": "income_distribution", "income_type": "Зарплата",
+                "income": "100000", "tax": "6000",
+            },
+        }]
+        with patch("taxes.db") as db:
+            db.load_allocator.return_value = current
+            db.load_tax_obligations.return_value = []
+            db.load_operations.return_value = operations
+            db.load_tax_payments.return_value = []
+            groups, _, _ = taxes.collect_tax_statistics(42, 2026)
+
+        self.assertEqual(
+            groups["Налог на доход"]["details"],
+            {"Зарплата": Decimal("6000")},
+        )
+
+    def test_legacy_profile_used_as_source_is_not_repeated_in_legend(self):
+        current = allocator()
+        current.settings.income_tax_profiles = {
+            "Самозанятость · Физики · 3%": {"rate": "3"},
+        }
+        operations = [{
+            "id": 1,
+            "payload": {
+                "type": "income_distribution",
+                "income_type": "Самозанятость · Физики · 3%",
+                "income": "10000",
+                "tax": "300",
+            },
+        }]
+        with patch("taxes.db") as db:
+            db.load_allocator.return_value = current
+            db.load_tax_obligations.return_value = []
+            db.load_operations.return_value = operations
+            db.load_tax_payments.return_value = []
+            groups, _, _ = taxes.collect_tax_statistics(42, 2026)
+
+        self.assertEqual(
+            groups["Налог на доход"]["details"],
+            {"НПД · ФЛ · 3%": Decimal("300")},
+        )
+
     def test_legacy_income_operations_keep_their_source_names(self):
         operations = [
             {"id": 1, "payload": {"type": "income_distribution", "income_type": "Зарплата", "income": "100000", "tax": "6000"}},

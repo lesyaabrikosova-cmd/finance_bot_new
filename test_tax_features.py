@@ -133,7 +133,7 @@ class TaxFeatureTests(unittest.TestCase):
         telegram_id = 990001
         self.assertEqual(
             tax_obligations_overview([]),
-            "<b>НАЛОГИ В АЛЛОКАТОРЕ</b>\n\nПока нет настроенных или накопленных налогов.",
+            "<b>НАЛОГИ В АЛЛОКАТОРЕ</b>\n\nПока нет накопленных или плановых налогов.",
         )
         obligation_id = db.add_tax_obligation(
             telegram_id, "Налог на имущество", "Квартира", Decimal("12000"),

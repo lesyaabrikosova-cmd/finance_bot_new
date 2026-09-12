@@ -37,6 +37,7 @@ from taxes import (
     apply_planned_tax_allocation,
     compact_income_tax_profile,
     is_income_tax_profile_label,
+    is_psn_plan_rule,
     refresh_planned_tax_targets,
 )
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets
@@ -984,10 +985,8 @@ async def show_income_confirmation(
             income_type,
         )
 
-        tax_rule = (
-            "по настройкам профиля"
-        )
         tax_percent = allocator.settings.income_type_tax_rates.get(income_type, Decimal("0"))
+        tax_profile = allocator.settings.income_type_tax_profiles.get(income_type)
 
     else:
 
@@ -995,11 +994,8 @@ async def show_income_confirmation(
             str(tax_override)
         )
 
-        tax_rule = data.get(
-            "tax_override_label",
-            "изменён вручную",
-        )
         tax_percent = data.get("tax_override_percent")
+        tax_profile = data.get("tax_override_profile")
 
     after_tax = (
         amount
@@ -1010,6 +1006,13 @@ async def show_income_confirmation(
         IncomeStates.confirmation
     )
     flow_id = data.get("income_flow_id")
+
+    tax_text = tax_display_line(tax, tax_percent)
+    if is_psn_plan_rule(tax_profile) and tax == Decimal("0"):
+        tax_text = (
+            "🏛️ Налог с этого поступления — <b>не удерживается</b>\n"
+            "Патент копится отдельно по плану."
+        )
 
     await message.answer(
         "<b>ПРОВЕРЬТЕ ПОСТУПЛЕНИЕ</b>\n\n"
@@ -1024,7 +1027,7 @@ async def show_income_confirmation(
         )
         +
         "————————————\n"
-        f"{tax_display_line(tax, tax_percent)}\n"
+        f"{tax_text}\n"
         "————————————\n"
         f"К распределению — {fmt_money(after_tax)}",
 
@@ -1178,8 +1181,16 @@ async def show_income_tax_edit_menu(
     )
     shown_tax = Decimal(str(data["tax_override"])) if data.get("tax_override") is not None else automatic_tax
     shown_percent = data.get("tax_override_percent")
+    shown_profile = data.get("tax_override_profile")
     if shown_percent is None and data.get("tax_override") is None:
         shown_percent = allocator.settings.income_type_tax_rates.get(income_type, Decimal("0"))
+        shown_profile = allocator.settings.income_type_tax_profiles.get(income_type)
+    shown_tax_text = tax_display_line(shown_tax, shown_percent)
+    if is_psn_plan_rule(shown_profile) and shown_tax == Decimal("0"):
+        shown_tax_text = (
+            "🏛️ Налог с этого поступления — <b>не удерживается</b>\n"
+            "Патент продолжает копиться отдельно по плану."
+        )
 
     await state.set_state(
         IncomeStates.tax_edit
@@ -1190,11 +1201,11 @@ async def show_income_tax_edit_menu(
         "🏛️ <b>НАЛОГ ЭТОГО ПОСТУПЛЕНИЯ</b>\n\n"
         f"{escape(income_type)} — {rub(amount)}\n"
         "————————————\n"
-        f"{tax_display_line(shown_tax, shown_percent)}\n"
+        f"{shown_tax_text}\n"
         "————————————\n"
         "Изменение ниже действует <b>только на это "
-        "поступление</b> и не меняет налоговые "
-        "настройки профиля. Патент здесь не выбирается: это отдельный "
+        "поступление</b> и не меняет налог по умолчанию для типа дохода. "
+        "Патент здесь не выбирается: это отдельный "
         "плановый платёж, а не процент с поступления.",
         reply_markup=keyboard([
             [
@@ -1251,7 +1262,9 @@ async def tax_edit_subject(callback: CallbackQuery, state: FSMContext):
     if subject == "self":
         text = (
             "<b>САМОЗАНЯТОСТЬ</b>\n\n"
-            "НПД — налог на профессиональный доход; ФЛ — физлица, ЮЛ — юрлица."
+            "<b>НПД</b> — налог на профессиональный доход;\n"
+            "<b>ФЛ</b> — физлица,\n"
+            "<b>ЮЛ</b> — юрлица."
         )
         rows = [
             [("НПД · ФЛ · 4%", flow_callback("taxedit:npd:physical:4", flow_id)), ("НПД · ЮЛ · 6%", flow_callback("taxedit:npd:business:6", flow_id))],
@@ -1290,7 +1303,7 @@ async def tax_edit_auto(
 
     await state.update_data(
         tax_override=None,
-        tax_override_label="по настройкам профиля",
+        tax_override_label="по настройкам типа дохода",
         tax_override_percent=None,
         tax_override_profile=None,
     )
@@ -1407,7 +1420,7 @@ async def tax_edit_profile(callback: CallbackQuery, state: FSMContext):
             rate = Decimal(parts[2])
             profile = f"ИП · УСН · {rate}%"
     except (IndexError, InvalidOperation):
-        await callback.message.answer("Не удалось определить налоговый профиль.")
+        await callback.message.answer("Не удалось определить налоговое правило.")
         return
     amount = Decimal((await state.get_data())["income_amount"])
     await state.update_data(
@@ -1443,7 +1456,12 @@ async def ask_custom_tax_percent(
         if callback_base(callback.data) == "taxedit:ip_custom_percent"
         else "taxedit:menu"
     )
-    await state.update_data(tax_edit_custom_return=return_callback)
+    await state.update_data(
+        tax_edit_custom_return=return_callback,
+        tax_edit_custom_profile_prefix=(
+            "ИП · УСН" if return_callback == "taxedit:subject:ip" else None
+        ),
+    )
     await callback.message.answer(
         "Введите процент налога для этого "
         "поступления.\n\n"
@@ -1461,18 +1479,19 @@ async def save_custom_tax_percent(
     state: FSMContext,
 ):
 
-    percent = parse_decimal(message.text, allow_zero=True)
+    percent = parse_decimal(message.text)
 
     if (
         percent is None
-        or percent < 0
+        or percent <= 0
         or percent > 100
     ):
         return_callback = (await state.get_data()).get(
             "tax_edit_custom_return", "taxedit:menu",
         )
         await message.answer(
-            "Введите процент от 0 до 100.",
+            "Введите процент больше 0 и не больше 100. Для нулевого налога "
+            "вернитесь назад и выберите «Без налога».",
             reply_markup=await income_navigation(state, return_callback),
         )
         return
@@ -1489,11 +1508,15 @@ async def save_custom_tax_percent(
         / Decimal("100")
     )
 
+    profile_prefix = data.get("tax_edit_custom_profile_prefix")
+    profile = (
+        f"{profile_prefix} · {fmt_money(percent)}%" if profile_prefix else None
+    )
     await state.update_data(
         tax_override=str(tax),
-        tax_override_label=f"вручную {percent}%",
+        tax_override_label=profile or f"вручную {fmt_money(percent)}%",
         tax_override_percent=str(percent),
-        tax_override_profile=None,
+        tax_override_profile=profile,
     )
 
     await show_income_confirmation(

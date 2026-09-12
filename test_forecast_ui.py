@@ -1,13 +1,14 @@
 import os
 import tempfile
 import unittest
+from datetime import date
 from decimal import Decimal as D
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 _DATA=tempfile.TemporaryDirectory()
 os.environ['ALLOCATOR_DATA_DIR']=_DATA.name
-from forecast import save_available_forecast, forecast_allocation_text, parse_decimal
-from financial_engine import Goal, goal_display_name
+from forecast import render_forecast, save_available_forecast, forecast_allocation_text, parse_decimal
+from financial_engine import FinancialAllocator, Goal, UserSettings, goal_display_name
 
 class ForecastTextTests(unittest.TestCase):
     def test_groups_omit_zero_and_household_details(self):
@@ -23,6 +24,42 @@ class ForecastTextTests(unittest.TestCase):
         self.assertIsNone(parse_decimal('NaN'))
 
 class ForecastFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forecast_shows_applicable_reserve_limits_for_every_profile(self):
+        for profile, rhythm in (
+            ('stable', 'monthly'), ('piecework', 'irregular'), ('cyclic', 'cyclic'),
+        ):
+            with self.subTest(profile=profile):
+                source = FinancialAllocator(UserSettings(
+                    has_debts=False,
+                    profile_type=profile,
+                    employment_type='Наёмный' if profile == 'stable' else 'Фрилансер',
+                    income_rhythm=rhythm,
+                    critical_life=D('100'),
+                    household_reserve=D('50'),
+                    average_income=D('1000'),
+                    force_majeure_months=D('4'),
+                    stabilizer_target_months=D('2'),
+                    income_gap_months=D('1'),
+                ))
+                source.state.activate_budget_period(date.today())
+                message = SimpleNamespace(from_user=SimpleNamespace(id=42), answer=AsyncMock())
+                state = SimpleNamespace(
+                    get_data=AsyncMock(return_value={
+                        'forecast_user_id': 42, 'forecast_available': '1000',
+                    }),
+                    clear=AsyncMock(),
+                )
+                with patch('forecast.db') as db:
+                    db.load_allocator.return_value = source
+                    await render_forecast(message, state, D('1') if profile == 'cyclic' else None)
+                text = message.answer.await_args.args[0]
+                self.assertIn(
+                    f"/ {source.settings.force_majeure_limit}"
+                    .replace('.00', ''), text,
+                )
+                self.assertEqual('🛟 Стабилизатор' in text, profile != 'stable')
+                self.assertEqual('🏦 Фонд Зарплаты' in text, profile == 'cyclic')
+
     async def test_entering_amount_goes_straight_to_result(self):
         message=SimpleNamespace(text='100 000',from_user=SimpleNamespace(id=42),answer=AsyncMock())
         state=AsyncMock()

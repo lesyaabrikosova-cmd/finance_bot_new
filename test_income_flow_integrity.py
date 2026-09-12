@@ -127,6 +127,12 @@ class IncomeFlowTests(unittest.IsolatedAsyncioTestCase):
             message=message,
         )
         await income.tax_edit_subject(callback, state)
+        self.assertEqual(message.answer.await_args.args[0], (
+            "<b>САМОЗАНЯТОСТЬ</b>\n\n"
+            "<b>НПД</b> — налог на профессиональный доход;\n"
+            "<b>ФЛ</b> — физлица,\n"
+            "<b>ЮЛ</b> — юрлица."
+        ))
         self.assertEqual(self.button_rows(message), [
             ["НПД · ФЛ · 4%", "НПД · ЮЛ · 6%"],
             ["НПД · ФЛ · 3%", "НПД · ЮЛ · 4%"],

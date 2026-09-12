@@ -177,11 +177,21 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
                   f"↺ <b>Баланс жизни</b> — {rub_plain(simulated.state.life_balance)}",
                   f"➤ До <b>Критич. минимума</b> — {rub_plain(critical)}",
                   f"➤ До <b>Устойч. жизни</b> — {rub_plain(sustainable)}", "",
-                  f"🛡️ Подушка — <b>{rub_plain(simulated.state.pillow_balance)}</b>"])
+                  "🛡️ Подушка — "
+                  f"<b>{rub_plain(simulated.state.pillow_balance)} / "
+                  f"{rub_plain(simulated.settings.force_majeure_limit)}</b>"])
     if simulated.settings.needs_stabilizer:
-        lines.append(f"🛟 Стабилизатор — <b>{rub_plain(simulated.state.stabilizer_balance)}</b>")
+        lines.append(
+            "🛟 Стабилизатор — "
+            f"<b>{rub_plain(simulated.state.stabilizer_balance)} / "
+            f"{rub_plain(simulated.settings.stabilizer_full_limit)}</b>"
+        )
     if simulated.profile_id == "cyclic":
-        lines.append(f"🏦 Фонд Зарплаты — <b>{rub_plain(simulated.state.intercontract_reserve)}</b>")
+        lines.append(
+            "🏦 Фонд Зарплаты — "
+            f"<b>{rub_plain(simulated.state.intercontract_reserve)} / "
+            f"{rub_plain(simulated.intercontract_current_limit)}</b>"
+        )
     await state.clear()
     await message.answer(
         "\n".join(lines),
