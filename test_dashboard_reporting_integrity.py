@@ -319,7 +319,7 @@ class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(label), 64)
         self.assertTrue(label.endswith(" · 100"))
 
-    def test_note_editor_has_delete_back_cancel_and_main_menu(self):
+    def test_note_editor_has_delete_main_menu_and_back(self):
         markup = dashboard.income_note_edit_keyboard(17, has_note=True)
         buttons = [
             button.text
@@ -328,9 +328,8 @@ class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(buttons, [
             "🗑️ Удалить заметку",
-            "← Назад",
-            "✗ Отмена",
             "← Главное меню",
+            "← Назад",
         ])
 
     async def test_delete_note_clears_only_note_and_returns_to_income(self):
@@ -360,7 +359,7 @@ class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(shown)
         markup = message.answer.await_args.kwargs["reply_markup"]
         buttons = [button.text for row in markup.inline_keyboard for button in row]
-        self.assertEqual(buttons, ["← К истории", "← Главное меню"])
+        self.assertEqual(buttons, ["← Главное меню", "← Назад"])
 
 
 class IncomeAnalysisDeliveryTests(unittest.IsolatedAsyncioTestCase):

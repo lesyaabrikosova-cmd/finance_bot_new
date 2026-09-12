@@ -658,9 +658,13 @@ async def menu_summary(
 )
 async def menu_back(
     callback: CallbackQuery,
+    state: FSMContext,
 ):
 
     await callback.answer()
+    # Going to the root menu closes any unfinished form.  This is the only
+    # exit shown in several flows, so it must not leave a hidden draft behind.
+    await state.clear()
 
     await callback.message.answer(
         "🧪 <b>ФИНАНСОВЫЙ АЛЛОКАТОР</b>\n\n"

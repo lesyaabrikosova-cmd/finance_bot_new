@@ -1366,8 +1366,10 @@ def current_period_income_ids(telegram_id: int) -> set[int]:
 
 def income_history_navigation():
     return keyboard([
-        [("← К истории", "incomehistory:open")],
-        [("← Главное меню", "menu:back")],
+        [
+            ("← Главное меню", "menu:back"),
+            ("← Назад", "incomehistory:open"),
+        ],
     ])
 
 
@@ -1379,10 +1381,9 @@ def income_note_edit_keyboard(operation_id: int, has_note: bool):
         ])
     rows.extend([
         [
+            ("← Главное меню", "menu:back"),
             ("← Назад", f"incomehistory:note_back:{operation_id}"),
-            ("✗ Отмена", f"incomehistory:note_cancel:{operation_id}"),
         ],
-        [("← Главное меню", "menu:back")],
     ])
     return keyboard(rows)
 
@@ -1400,8 +1401,10 @@ async def send_income_history(message: Message, telegram_id: int, page: int = 0)
             "<b>ИСТОРИЯ ДОХОДОВ</b>\n\n"
             "Вы ещё не добавили ни одного дохода.",
             reply_markup=keyboard([
-                [("← К анализу доходов", "menu:income_analysis")],
-                [("← Главное меню", "menu:back")],
+                [
+                    ("← Главное меню", "menu:back"),
+                    ("← Назад", "menu:income_analysis"),
+                ],
             ]),
         )
         return
@@ -1418,8 +1421,10 @@ async def send_income_history(message: Message, telegram_id: int, page: int = 0)
             navigation.append(("Старше →", f"incomehistory:page:{page + 1}"))
         rows.append(navigation)
     rows.extend([
-        [("← К анализу доходов", "menu:income_analysis")],
-        [("← Главное меню", "menu:back")],
+        [
+            ("← Главное меню", "menu:back"),
+            ("← Назад", "menu:income_analysis"),
+        ],
     ])
     await message.answer(
         "<b>ИСТОРИЯ ДОХОДОВ</b>",
@@ -1480,7 +1485,7 @@ async def send_income_history_detail(
             edit_row,
             [
                 ("← Главное меню", "menu:back"),
-                ("← К истории", "incomehistory:open"),
+                ("← Назад", "incomehistory:open"),
             ],
         ]),
     )
@@ -1745,10 +1750,7 @@ async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
         "резервы и итоги расчётного периода.\n\n"
         "Удалить это поступление безвозвратно?",
         reply_markup=keyboard([
-            [
-                ("✗ Отмена", f"incomehistory:delete_cancel:{operation_id}"),
-                ("🗑️ Удалить доход", f"incomehistory:delete_confirm:{operation_id}"),
-            ],
+            [("🗑️ Удалить доход", f"incomehistory:delete_confirm:{operation_id}")],
             [("← К доходу", f"incomehistory:detail:{operation_id}")],
             [
                 ("← Главное меню", "menu:back"),

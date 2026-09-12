@@ -151,13 +151,9 @@ async def income_navigation(
     back_callback: str | None = None,
 ) -> InlineKeyboardMarkup:
     flow_id = await current_flow_id(state)
-    rows = []
+    rows = [[("← Главное меню", "menu:back")]]
     if back_callback:
-        rows.append([("← Назад", flow_callback(back_callback, flow_id))])
-    rows.append([
-        ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-        ("← Главное меню", "menu:back"),
-    ])
+        rows[0].append(("← Назад", flow_callback(back_callback, flow_id)))
     return keyboard(rows)
 
 
@@ -372,18 +368,12 @@ async def start_income(
         await message.answer_photo(
             photo=FSInputFile(NEW_INCOME_IMAGE_PATH),
             caption=prompt,
-            reply_markup=keyboard([[ 
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-                ("← Главное меню", "menu:back"),
-            ]]),
+            reply_markup=keyboard([[("← Главное меню", "menu:back")]]),
         )
     else:
         await message.answer(
             prompt,
-            reply_markup=keyboard([[
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-                ("← Главное меню", "menu:back"),
-            ]]),
+            reply_markup=keyboard([[("← Главное меню", "menu:back")]]),
         )
 
 
@@ -461,10 +451,9 @@ async def show_income_types(message: Message, state: FSMContext, settings=None) 
     rows.extend([
         [("+ Новый тип", flow_callback("incometype:custom", flow_id))],
         [
+            ("← Главное меню", "menu:back"),
             ("← Назад", flow_callback("income:back_amount", flow_id)),
-            ("✗ Отмена", flow_callback("income:cancel", flow_id)),
         ],
-        [("← Главное меню", "menu:back")],
     ])
     await message.answer(
         "<b>ВЫБЕРИТЕ ТИП ДОХОДА</b>",
@@ -478,10 +467,7 @@ async def show_income_amount_prompt(message: Message, state: FSMContext) -> None
     await message.answer(
         "<b>Введите полную сумму поступления</b>\n\n"
         "Примеры:\n<code>50000</code>\n<code>125 000</code>\n<code>47850,50</code>",
-        reply_markup=keyboard([[
-            ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-            ("← Главное меню", "menu:back"),
-        ]]),
+        reply_markup=keyboard([[("← Главное меню", "menu:back")]]),
     )
 
 
@@ -516,13 +502,7 @@ async def income_back_to_custom_type(callback: CallbackQuery, state: FSMContext)
     flow_id = await current_flow_id(state)
     await callback.message.answer(
         "Введите название типа дохода.\n\nНапример:\n<code>Продажа техники</code>",
-        reply_markup=keyboard([
-            [("← Назад", flow_callback("income:back_types", flow_id))],
-            [
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-                ("← Главное меню", "menu:back"),
-            ],
-        ]),
+        reply_markup=await income_navigation(state, "income:back_types"),
     )
 
 
@@ -544,10 +524,9 @@ async def income_back_to_tax_choice(callback: CallbackQuery, state: FSMContext):
                 ("Есть налог", flow_callback("newincome:tax:yes", flow_id)),
                 ("Без налога", flow_callback("newincome:tax:no", flow_id)),
             ],
-            [("← Назад", flow_callback("income:back_custom_type", flow_id))],
             [
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
                 ("← Главное меню", "menu:back"),
+                ("← Назад", flow_callback("income:back_custom_type", flow_id)),
             ],
         ]),
     )
@@ -598,13 +577,7 @@ async def income_type_callback(
             "Введите название типа дохода.\n\n"
             "Например:\n"
             "<code>Продажа техники</code>",
-            reply_markup=keyboard([
-                [("← Назад", flow_callback("income:back_types", flow_id))],
-                [
-                    ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-                    ("← Главное меню", "menu:back"),
-                ],
-            ]),
+            reply_markup=await income_navigation(state, "income:back_types"),
         )
 
         return
@@ -687,10 +660,9 @@ async def custom_income_type(
                 ("Есть налог", flow_callback("newincome:tax:yes", flow_id)),
                 ("Без налога", flow_callback("newincome:tax:no", flow_id)),
             ],
-            [("← Назад", flow_callback("income:back_custom_type", flow_id))],
             [
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
                 ("← Главное меню", "menu:back"),
+                ("← Назад", flow_callback("income:back_custom_type", flow_id)),
             ],
         ]),
     )
@@ -708,13 +680,7 @@ async def custom_income_tax_choice(callback: CallbackQuery, state: FSMContext):
             "<b>СТАВКА НАЛОГА</b>\n\n—————\n"
             "<b>→ Введите число без знака %.</b>\n"
             "<b>Например:</b> <code>4</code>",
-            reply_markup=keyboard([
-                [("← Назад", flow_callback("income:back_tax_choice", flow_id))],
-                [
-                    ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-                    ("← Главное меню", "menu:back"),
-                ],
-            ]),
+            reply_markup=await income_navigation(state, "income:back_tax_choice"),
         )
         return
     await save_custom_income_type(callback.message, state, callback.from_user.id, Decimal("0"))
@@ -747,10 +713,7 @@ async def save_custom_income_type(message: Message, state: FSMContext, telegram_
                 ("✎ Исправить", flow_callback("newincome:fix", flow_id)),
                 ("✓ Сохранить", flow_callback("newincome:save", flow_id)),
             ],
-            [
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-                ("← Главное меню", "menu:back"),
-            ],
+            [("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -767,13 +730,7 @@ async def fix_custom_income_type(callback: CallbackQuery, state: FSMContext):
     flow_id = await current_flow_id(state)
     await callback.message.answer(
         "Введите исправленное название типа дохода.",
-        reply_markup=keyboard([
-            [("← Назад", flow_callback("income:back_custom_confirm", flow_id))],
-            [
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-                ("← Главное меню", "menu:back"),
-            ],
-        ]),
+        reply_markup=await income_navigation(state, "income:back_custom_confirm"),
     )
 
 
@@ -832,10 +789,9 @@ async def ask_date(
         "или нажмите <b>Сегодня</b>.",
         reply_markup=keyboard([
             [("Сегодня", flow_callback("incomedate:today", flow_id))],
-            [("← Назад", flow_callback("income:back_types", flow_id))],
             [
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
                 ("← Главное меню", "menu:back"),
+                ("← Назад", flow_callback("income:back_types", flow_id)),
             ],
         ]),
     )
@@ -887,13 +843,7 @@ async def income_date_text(
             "Не удалось распознать дату.\n\n"
             "Используйте формат:\n"
             f"<code>{moscow_today().strftime('%d.%m.%Y')}</code>",
-            reply_markup=keyboard([
-                [("← Назад", flow_callback("income:back_types", await current_flow_id(state)))],
-                [
-                    ("✗ Отмена", flow_callback("income:cancel", await current_flow_id(state))),
-                    ("← Главное меню", "menu:back"),
-                ],
-            ]),
+            reply_markup=await income_navigation(state, "income:back_types"),
         )
 
         return
@@ -903,13 +853,7 @@ async def income_date_text(
         await message.answer(
             "Дата поступления не может быть "
             "в будущем.",
-            reply_markup=keyboard([
-                [("← Назад", flow_callback("income:back_types", await current_flow_id(state)))],
-                [
-                    ("✗ Отмена", flow_callback("income:cancel", await current_flow_id(state))),
-                    ("← Главное меню", "menu:back"),
-                ],
-            ]),
+            reply_markup=await income_navigation(state, "income:back_types"),
         )
 
         return
@@ -929,13 +873,7 @@ async def income_date_text(
             await message.answer(
                 "Эта дата относится к уже закрытому расчётному периоду.\n\n"
                 f"Введите дату не раньше <b>{period_start.strftime('%d.%m.%Y')}</b>.",
-                reply_markup=keyboard([
-                    [("← Назад", flow_callback("income:back_types", await current_flow_id(state)))],
-                    [
-                        ("✗ Отмена", flow_callback("income:cancel", await current_flow_id(state))),
-                        ("← Главное меню", "menu:back"),
-                    ],
-                ]),
+                reply_markup=await income_navigation(state, "income:back_types"),
             )
             return
 
@@ -1037,10 +975,6 @@ async def show_income_confirmation(
         reply_markup=keyboard([
             [
                 (
-                    "✗ Отмена",
-                    flow_callback("income:cancel", flow_id),
-                ),
-                (
                     "✓ Распределить",
                     flow_callback("income:confirm", flow_id),
                 ),
@@ -1051,6 +985,10 @@ async def show_income_confirmation(
                     "✎ Заметка" if data.get("income_note") else "+ Заметка",
                     flow_callback("income:note", flow_id),
                 ),
+            ],
+            [
+                ("← Главное меню", "menu:back"),
+                ("← Назад", flow_callback("income:back_confirmation", flow_id)),
             ],
         ]),
     )
@@ -1080,13 +1018,7 @@ async def ask_income_note(
         "Напишите короткую пометку, по которой вы потом узнаете "
         "это поступление. Например: <i>Урок с Машей</i>.\n\n"
         "Не более 60 символов.",
-        reply_markup=keyboard([
-            [
-                ("← Назад", flow_callback("income:note_back", await current_flow_id(state))),
-                ("✗ Отмена", flow_callback("income:cancel", await current_flow_id(state))),
-            ],
-            [("← Главное меню", "menu:back")],
-        ]),
+        reply_markup=await income_navigation(state, "income:note_back"),
     )
 
 
@@ -1125,6 +1057,22 @@ async def income_note_back(
         return
     await callback.answer()
     await show_income_confirmation(callback.message, state, callback.from_user.id)
+
+
+@router.callback_query(
+    IncomeStates.confirmation,
+    (F.data == "income:back_confirmation")
+    | F.data.startswith("income:back_confirmation|"),
+)
+async def income_back_from_confirmation(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    """Return to the last editable step without discarding the draft."""
+    if not await require_current_flow(callback, state):
+        return
+    await callback.answer()
+    await ask_date(callback.message, state)
 
 
 # ============================================================
@@ -1200,13 +1148,9 @@ async def edit_income_tax(
                 )
             ],
             [
-                (
-                    "← Назад",
-                    flow_callback("taxedit:back", flow_id),
-                ),
-                ("✗ Отмена", flow_callback("income:cancel", flow_id)),
+                ("← Главное меню", "menu:back"),
+                ("← Назад", flow_callback("taxedit:back", flow_id)),
             ],
-            [("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1341,13 +1285,7 @@ async def ask_custom_tax_percent(
         "Введите процент налога для этого "
         "поступления.\n\n"
         "Например: <code>7,5</code>",
-        reply_markup=keyboard([
-            [("← Назад", flow_callback("taxedit:back", await current_flow_id(state)))],
-            [
-                ("✗ Отмена", flow_callback("income:cancel", await current_flow_id(state))),
-                ("← Главное меню", "menu:back"),
-            ],
-        ]),
+        reply_markup=await income_navigation(state, "taxedit:back"),
     )
 
 
@@ -1418,13 +1356,7 @@ async def ask_custom_tax_amount(
         "Введите точную сумму налога, которую "
         "нужно зарезервировать из этого поступления.\n\n"
         "Например: <code>8450</code>",
-        reply_markup=keyboard([
-            [("← Назад", flow_callback("taxedit:back", await current_flow_id(state)))],
-            [
-                ("✗ Отмена", flow_callback("income:cancel", await current_flow_id(state))),
-                ("← Главное меню", "menu:back"),
-            ],
-        ]),
+        reply_markup=await income_navigation(state, "taxedit:back"),
     )
 
 
@@ -1706,10 +1638,9 @@ async def _confirm_income_locked(
                         ("Без части на цели", flow_callback("income:strategy:protection", data.get("income_flow_id"))),
                     ],
                     [
+                        ("← Главное меню", "menu:back"),
                         ("← Назад", flow_callback("income:strategy:back", data.get("income_flow_id"))),
-                        ("✗ Отмена", flow_callback("income:cancel", data.get("income_flow_id"))),
                     ],
-                    [("← Главное меню", "menu:back")],
                 ]),
             )
             return
@@ -1786,10 +1717,7 @@ async def _confirm_income_locked(
             "Попробуйте ещё раз или обратитесь в поддержку.\n\n"
             f"<code>{escape(str(error))}</code>",
             reply_markup=keyboard([
-                [
-                    ("✗ Отмена", flow_callback("income:cancel", data.get("income_flow_id"))),
-                    ("✓ Повторить", flow_callback("income:confirm", data.get("income_flow_id"))),
-                ],
+                [("✓ Повторить", flow_callback("income:confirm", data.get("income_flow_id")))],
                 [("← Главное меню", "menu:back")],
             ]),
         )
@@ -1863,13 +1791,9 @@ async def income_waits_for_button(message: Message, state: FSMContext):
         IncomeStates.tax_edit.state: "taxedit:back",
         IncomeStates.strategy_choice.state: "income:strategy:back",
     }
-    rows = []
+    rows = [[("← Главное меню", "menu:back")]]
     if current in back_by_state:
-        rows.append([("← Назад", flow_callback(back_by_state[current], flow_id))])
-    rows.append([
-        ("✗ Отмена", flow_callback("income:cancel", flow_id)),
-        ("← Главное меню", "menu:back"),
-    ])
+        rows[0].append(("← Назад", flow_callback(back_by_state[current], flow_id)))
     await message.answer(
         "На этом экране нужно нажать одну из кнопок ниже.",
         reply_markup=keyboard(rows),

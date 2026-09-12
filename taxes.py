@@ -797,6 +797,14 @@ def tax_navigation(back_callback: str) -> list[tuple[str, str]]:
     ]
 
 
+def tax_completion_navigation(done_callback: str) -> list[tuple[str, str]]:
+    """Navigation after a tax change has already been saved."""
+    return [
+        ("← Главное меню", "taxes:back"),
+        ("✓ Готово", done_callback),
+    ]
+
+
 async def show_taxes(message: Message, telegram_id: int, detailed: bool = False) -> None:
     allocator = db.load_allocator(telegram_id)
     if allocator is None:
@@ -1997,7 +2005,7 @@ async def save_tax_obligation(
         tax_obligation_card_text(
             item, saved, allocator, show_changes=True,
         ),
-        reply_markup=keyboard([tax_navigation("menu:taxes")]),
+        reply_markup=keyboard([tax_completion_navigation("menu:taxes")]),
     )
 
 
@@ -2026,7 +2034,13 @@ async def tax_obligations_edit(callback: CallbackQuery, state: FSMContext):
     await show_tax_obligations_edit(callback.message, callback.from_user.id)
 
 
-async def show_tax_obligation(message: Message, telegram_id: int, obligation_id: int) -> None:
+async def show_tax_obligation(
+    message: Message,
+    telegram_id: int,
+    obligation_id: int,
+    *,
+    completed: bool = False,
+) -> None:
     item = next(
         (item for item in db.load_tax_obligations(telegram_id) if item["id"] == obligation_id),
         None,
@@ -2045,10 +2059,7 @@ async def show_tax_obligation(message: Message, telegram_id: int, obligation_id:
                 ("✎ Сумма", f"taxgoal:edit_amount:{obligation_id}"),
             ],
             [("🗑️ Удалить из плана", f"taxgoal:delete:{obligation_id}")],
-            [
-                ("← Главное меню", "taxes:back"),
-                ("← Назад", "taxes:edit"),
-            ],
+            tax_completion_navigation("taxes:edit") if completed else tax_navigation("taxes:edit"),
         ]),
     )
 
@@ -2136,7 +2147,7 @@ async def tax_obligation_save_name(message: Message, state: FSMContext):
                 allocator.settings.tax_catchups[new_key] = catchup
             db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_tax_obligation(message, message.from_user.id, obligation_id)
+    await show_tax_obligation(message, message.from_user.id, obligation_id, completed=True)
 
 
 @router.callback_query(F.data.regexp(r"^taxgoal:edit_amount:\d+$"))
@@ -2228,7 +2239,7 @@ async def tax_obligation_save_amount(message: Message, state: FSMContext):
                 allocator.settings.tax_catchups.pop(key, None)
             db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_tax_obligation(message, message.from_user.id, obligation_id)
+    await show_tax_obligation(message, message.from_user.id, obligation_id, completed=True)
 
 
 @router.callback_query(F.data.regexp(r"^taxgoal:delete:\d+$"))
