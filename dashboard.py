@@ -1253,12 +1253,25 @@ MONTH_BUTTON_NAMES = (
 
 
 def income_history_operations(telegram_id: int) -> list[dict]:
-    """Return recorded income operations, newest first, for one user only."""
-    return [
+    """Return incomes ordered by their recorded date, newest first.
+
+    The ledger itself remains append-only and is read in insertion order.  A
+    user can add a forgotten older income later, though, so the history must
+    use ``payload.date`` rather than the operation ID for its visible order.
+    """
+    operations = [
         operation
         for operation in db.load_operations(telegram_id, limit=-1)
         if operation.get("type") == "income_distribution"
     ]
+    return sorted(
+        operations,
+        key=lambda operation: (
+            income_operation_date(operation) or date.min,
+            int(operation.get("id") or 0),
+        ),
+        reverse=True,
+    )
 
 
 def income_operation_date(operation: dict) -> date | None:

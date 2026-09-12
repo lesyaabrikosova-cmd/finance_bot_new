@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from dashboard import (
     income_distribution_text,
+    income_history_operations,
     income_months_keyboard,
     income_operations_for_period,
     income_operation_card_text,
@@ -37,6 +38,17 @@ def operation(operation_id=17):
 
 
 class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
+    def test_history_is_ordered_by_income_date_not_the_later_ledger_id(self):
+        newer = operation(7)
+        newer["payload"]["date"] = "2026-09-10"
+        forgotten_older_income = operation(8)
+        forgotten_older_income["payload"]["date"] = "2026-09-02"
+        with patch("dashboard.db") as db:
+            # The later ledger ID simulates an older income entered today.
+            db.load_operations.return_value = [forgotten_older_income, newer]
+            operations = income_history_operations(42)
+        self.assertEqual([item["id"] for item in operations], [7, 8])
+
     async def test_history_lists_saved_income_with_navigation(self):
         message = SimpleNamespace(answer=AsyncMock())
         with patch("dashboard.db") as db:
