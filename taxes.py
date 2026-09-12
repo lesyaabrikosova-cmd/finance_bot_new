@@ -207,6 +207,8 @@ def _tax_ledger(telegram_id: int) -> tuple[dict[tuple, dict], Decimal]:
     selected virtual bucket contained less than the amount paid.
     """
     obligations = db.load_tax_obligations(telegram_id, active_only=False)
+    allocator = db.load_allocator(telegram_id)
+    settings = getattr(allocator, "settings", None)
     buckets: dict[tuple, dict] = {}
     total_contributed = ZERO
 
@@ -252,7 +254,7 @@ def _tax_ledger(telegram_id: int) -> tuple[dict[tuple, dict], Decimal]:
         income_tax = max(ZERO, Decimal(str(payload.get("tax", ZERO))))
         if income_tax > ZERO:
             source = str(payload.get("income_type") or "Другой доход")
-            detail = income_tax_detail_label(payload, source, income_tax)
+            detail = income_tax_detail_label(payload, source, income_tax, settings)
             bucket = ensure_bucket(
                 ("income", detail), key=f"Налог на доход · {detail}",
                 group="Налог на доход", detail=detail,
@@ -554,13 +556,37 @@ def compact_income_tax_profile(profile: str) -> str:
     return value
 
 
-def income_tax_detail_label(payload: dict, source: str, tax: Decimal) -> str:
+def income_tax_detail_label(payload: dict, source: str, tax: Decimal, settings=None) -> str:
     """Give every income-tax bucket a human-readable source and rule.
 
     Older operations did not store a named rule. They remain grouped by their
     real income source rather than being assigned a regime retrospectively.
     """
     profile = str(payload.get("tax_profile") or "").strip()
+    if not profile and settings is not None:
+        bound = getattr(settings, "income_type_tax_profiles", {})
+        if isinstance(bound, dict):
+            profile = str(bound.get(source) or "").strip()
+    if not profile and settings is not None:
+        try:
+            income = Decimal(str(payload.get("income", ZERO)))
+            effective_rate = tax * Decimal("100") / income if income > ZERO else None
+        except (ArithmeticError, ValueError, TypeError):
+            effective_rate = None
+        candidates = set()
+        catalog = getattr(settings, "income_tax_profiles", {})
+        if effective_rate is not None and isinstance(catalog, dict):
+            for name, metadata in catalog.items():
+                if not isinstance(metadata, dict):
+                    continue
+                try:
+                    profile_rate = Decimal(str(metadata.get("rate")))
+                except (ArithmeticError, ValueError, TypeError):
+                    continue
+                if profile_rate == effective_rate:
+                    candidates.add(compact_income_tax_profile(name))
+        if len(candidates) == 1:
+            profile = candidates.pop()
     if profile and profile != source:
         return f"{source} · {compact_income_tax_profile(profile)}"
     return compact_income_tax_profile(source)
@@ -864,22 +890,6 @@ def tax_obligations_overview(
         str(name) for name, amount in (income_details or {}).items()
         if Decimal(str(amount)) > ZERO
     }
-    if settings is not None:
-        bound_profiles = {
-            compact_income_tax_profile(profile)
-            for profile in getattr(settings, "income_type_tax_profiles", {}).values()
-        }
-        for name, rate in settings.income_type_tax_rates.items():
-            if rate <= ZERO:
-                continue
-            profile = getattr(settings, "income_type_tax_profiles", {}).get(name)
-            income_names.add(
-                f"{name} · {compact_income_tax_profile(profile)}" if profile else str(name)
-            )
-        for profile in getattr(settings, "income_tax_profiles", {}):
-            compact = compact_income_tax_profile(profile)
-            if compact not in bound_profiles:
-                income_names.add(compact)
     if not income_names and not obligations:
         return "<b>НАЛОГИ В АЛЛОКАТОРЕ</b>\n\nПока нет настроенных или накопленных налогов."
     lines = ["<b>НАЛОГИ В АЛЛОКАТОРЕ</b>", ""]
@@ -1097,20 +1107,16 @@ async def show_income_tax_profile_menu(message: Message, telegram_id: int | None
         compact_income_tax_profile(name)
         for name in stored_profiles
     ]
-    legacy_rules = [
-        f"{name} · {tax_rate_label(rate)}"
-        for name, rate in getattr(settings, "income_type_tax_rates", {}).items()
-        if rate > ZERO and name not in stored_profiles and not str(name).rstrip().endswith("%")
-    ]
-    known_rules = list(dict.fromkeys([*legacy_rules, *profiles]))
+    known_rules = list(dict.fromkeys(profiles))
     added = (
         "\n\n<b>Уже настроены:</b>\n" + "\n".join(f"• {escape(name)}" for name in known_rules)
         if known_rules else ""
     )
     await message.answer(
         "<b>НАЛОГ НА ДОХОД</b>\n\n"
-        "Добавьте налоговое правило. Связать его с конкретным доходом можно "
-        "при создании дохода или через изменение его налоговых настроек."
+        "Здесь хранятся налоговые правила, а не отдельные источники дохода. "
+        "При добавлении поступления одно и то же название — например, «Зарплата» — "
+        "можно провести по разным правилам; в диаграмме они станут разными секторами."
         + added,
         reply_markup=keyboard([
             [("Самозанятость (НПД)", "taxincome:self_employed")],
@@ -1125,10 +1131,17 @@ async def show_income_tax_profile_menu(message: Message, telegram_id: int | None
 async def show_self_employed_rate_menu(message: Message) -> None:
     await message.answer(
         "<b>САМОЗАНЯТОСТЬ (НПД)</b>\n\n"
-        "НПД — налог на профессиональный доход. ФЛ — физические лица, ЮЛ — "
-        "юридические лица. Обычные ставки: 4% с доходов от ФЛ и 6% от ЮЛ. "
-        "Пока действует налоговый бонус, ставки "
-        "снижаются до 3% и 4%. Аллокатор не знает остаток бонуса — после его "
+        "<b>НПД</b> — налог на профессиональный доход или самозанятость.\n"
+        "<b>ФЛ</b> — физические лица,\n"
+        "<b>ЮЛ</b> — юридические лица.\n\n"
+        "<b>Обычные ставки:</b>\n"
+        "• 4% с доходов от ФЛ\n"
+        "• 6% от ЮЛ.\n\n"
+        "<b>Пониженые ставки:</b>\n"
+        "• 3% с доходов от ФЛ\n"
+        "• 4% от ЮЛ.\n\n"
+        "<b>P.S.:</b> Ставки понижаются при приветственном налоговом бонусе "
+        "в 10 000 <b>₽</b>. Аллокатор не знает остаток бонуса — после его "
         "исчерпания выберите обычную ставку.",
         reply_markup=keyboard([
             [("НПД · ФЛ · 4%", "taxincome:npd:physical:4"), ("НПД · ФЛ · 3%", "taxincome:npd:physical:3")],
@@ -1142,9 +1155,11 @@ async def show_self_employed_rate_menu(message: Message) -> None:
 async def show_ip_usn_rate_menu(message: Message) -> None:
     await message.answer(
         "<b>ИП НА УСН «ДОХОДЫ»</b>\n\n"
-        "ИП — индивидуальный предприниматель. УСН «Доходы» — упрощённая система "
-        "налогообложения с объектом «Доходы». Выберите, сколько откладывать с каждого поступления. Базовый вариант — 6%; "
-        "если у вас действует другая ставка, укажите её вручную.",
+        "<b>ИП</b> — индивидуальный предприниматель.\n"
+        "<b>УСН «Доходы»</b> — упрощённая система налогообложения с объектом "
+        "«Доходы».\n\n"
+        "Выберите, сколько откладывать с каждого поступления.\n\n"
+        "Базовый вариант — 6%; если у вас действует другая ставка, укажите её вручную.",
         reply_markup=keyboard([
             [("ИП · УСН · 6%", "taxincome:usn:6"), ("Своя ставка", "taxincome:usn:custom")],
             [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")],
@@ -2547,21 +2562,106 @@ async def save_tax_obligation(
 
 async def show_tax_obligations_edit(message: Message, telegram_id: int, notice: str = "") -> None:
     obligations = db.load_tax_obligations(telegram_id)
+    allocator = db.load_allocator(telegram_id)
+    settings = getattr(allocator, "settings", None)
+    catalog = getattr(settings, "income_tax_profiles", {})
+    profile_names = []
+    if isinstance(catalog, dict):
+        profile_names = list(dict.fromkeys(
+            compact_income_tax_profile(name) for name in catalog
+        ))
     rows = [
+        [(f"С дохода: {name}", f"taxprofile:view:{index}")]
+        for index, name in enumerate(profile_names)
+    ]
+    rows.extend([
         [(f"{item['tax_type']}: {item['object_name']}", f"taxgoal:view:{item['id']}")]
         for item in obligations
-    ]
+    ])
     rows.append([("＋ Добавить налог", "taxes:add")])
     rows.append([
         ("← Главное меню", "taxes:back"),
         ("← Назад", "menu:taxes"),
     ])
-    body = "<b>ПЛАНОВЫЕ НАЛОГИ</b>"
+    body = "<b>ИЗМЕНИТЬ НАЛОГИ</b>"
     if notice:
         body = f"{notice}\n\n{body}"
-    if not obligations:
-        body += "\n\nПлановых налогов пока нет."
+    if profile_names:
+        body += "\n\n<b>Налоги с доходов</b>\n" + "\n".join(
+            f"• {escape(name)}" for name in profile_names
+        )
+    if obligations:
+        body += "\n\n<b>Плановые налоги</b>\n" + "\n".join(
+            f"• {escape(item['tax_type'])} · {escape(item['object_name'])}"
+            for item in obligations
+        )
+    if not profile_names and not obligations:
+        body += "\n\nДобавленных налогов пока нет."
     await message.answer(body, reply_markup=keyboard(rows))
+
+
+@router.callback_query(F.data.startswith("taxprofile:view:"))
+async def income_tax_profile_view(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    catalog = getattr(allocator.settings, "income_tax_profiles", {})
+    names = list(dict.fromkeys(compact_income_tax_profile(name) for name in catalog))
+    try:
+        name = names[int(callback.data.rsplit(":", 1)[1])]
+    except (ValueError, IndexError):
+        await show_tax_obligations_edit(callback.message, callback.from_user.id)
+        return
+    bound_sources = [
+        source for source, profile in allocator.settings.income_type_tax_profiles.items()
+        if compact_income_tax_profile(profile) == name
+    ]
+    await state.update_data(tax_profile_delete_name=name)
+    binding = (
+        "\n\nИспользуется по умолчанию: " + ", ".join(escape(source) for source in bound_sources)
+        if bound_sources else ""
+    )
+    await callback.message.answer(
+        f"<b>{escape(name)}</b>{binding}\n\n"
+        "Удаление уберёт правило из настроек будущих поступлений. Уже накопленные "
+        "суммы и история доходов сохранятся.",
+        reply_markup=keyboard([
+            [("🗑️ Удалить", "taxprofile:delete")],
+            tax_navigation("taxes:edit"),
+        ]),
+    )
+
+
+@router.callback_query(F.data == "taxprofile:delete")
+async def income_tax_profile_delete(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    target = str(data.get("tax_profile_delete_name") or "")
+    allocator = db.load_allocator(callback.from_user.id)
+    if not target or allocator is None:
+        await show_tax_obligations_edit(callback.message, callback.from_user.id)
+        return
+    stored_names = [
+        name for name in allocator.settings.income_tax_profiles
+        if compact_income_tax_profile(name) == target
+    ]
+    for name in stored_names:
+        allocator.settings.income_tax_profiles.pop(name, None)
+        # Remove only legacy pseudo-sources created by the old implementation.
+        if name in allocator.settings.income_type_tax_rates:
+            allocator.settings.income_type_tax_rates.pop(name, None)
+            allocator.settings.income_type_ids.pop(name, None)
+    for source, profile in list(allocator.settings.income_type_tax_profiles.items()):
+        if compact_income_tax_profile(profile) != target:
+            continue
+        allocator.settings.income_type_tax_profiles.pop(source, None)
+        allocator.settings.income_type_tax_rates[source] = ZERO
+    allocator.settings.taxable_income_types = [
+        name for name, rate in allocator.settings.income_type_tax_rates.items()
+        if rate > ZERO
+    ]
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_tax_obligations_edit(callback.message, callback.from_user.id, "Налоговое правило удалено.")
 
 
 @router.callback_query(F.data == "taxes:edit")

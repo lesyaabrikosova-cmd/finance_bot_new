@@ -17,6 +17,7 @@ from taxes import (
     TRANSPORT_TAX_GRAYS,
     TaxStates,
     income_tax_menu_back,
+    income_tax_profile_delete,
     save_income_tax_profile,
     show_income_tax_profile_menu,
     show_ip_usn_rate_menu,
@@ -66,6 +67,45 @@ class MemoryState:
 
 
 class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
+    async def test_profile_menu_deduplicates_old_and_compact_names(self):
+        current = allocator()
+        current.settings.income_tax_profiles = {
+            "Самозанятость · Физики · 3%": {"rate": "3"},
+            "НПД · ФЛ · 3%": {"rate": "3"},
+        }
+        message = SimpleNamespace(answer=AsyncMock())
+        with patch("taxes.db") as db:
+            db.load_allocator.return_value = current
+            await show_income_tax_profile_menu(message, 42)
+        text = message.answer.await_args.args[0]
+        self.assertEqual(text.count("• НПД · ФЛ · 3%"), 1)
+
+    async def test_deleting_rule_removes_legacy_duplicate_and_default_binding(self):
+        current = allocator()
+        old_name = "Самозанятость · Физики · 3%"
+        current.settings.income_type_tax_rates = {
+            "Зарплата": Decimal("3"), old_name: Decimal("3"),
+        }
+        current.settings.income_tax_profiles = {
+            old_name: {"rate": "3"}, "НПД · ФЛ · 3%": {"rate": "3"},
+        }
+        current.settings.income_type_tax_profiles = {
+            "Зарплата": "НПД · ФЛ · 3%",
+        }
+        state = MemoryState(tax_profile_delete_name="НПД · ФЛ · 3%")
+        callback = SimpleNamespace(
+            answer=AsyncMock(), from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        with patch("taxes.db") as db:
+            db.load_allocator.return_value = current
+            db.load_tax_obligations.return_value = []
+            await income_tax_profile_delete(callback, state)
+        self.assertEqual(current.settings.income_tax_profiles, {})
+        self.assertNotIn(old_name, current.settings.income_type_tax_rates)
+        self.assertEqual(current.settings.income_type_tax_rates["Зарплата"], Decimal("0"))
+        self.assertEqual(current.settings.income_type_tax_profiles, {})
+
     async def test_onboarding_preserves_named_rule_for_income_source(self):
         message = SimpleNamespace(answer=AsyncMock())
         state = MemoryState(
@@ -156,6 +196,21 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
     async def test_self_employed_screen_has_all_supported_rates(self):
         message = SimpleNamespace(answer=AsyncMock())
         await show_self_employed_rate_menu(message)
+        self.assertEqual(message.answer.await_args.args[0], (
+            "<b>САМОЗАНЯТОСТЬ (НПД)</b>\n\n"
+            "<b>НПД</b> — налог на профессиональный доход или самозанятость.\n"
+            "<b>ФЛ</b> — физические лица,\n"
+            "<b>ЮЛ</b> — юридические лица.\n\n"
+            "<b>Обычные ставки:</b>\n"
+            "• 4% с доходов от ФЛ\n"
+            "• 6% от ЮЛ.\n\n"
+            "<b>Пониженые ставки:</b>\n"
+            "• 3% с доходов от ФЛ\n"
+            "• 4% от ЮЛ.\n\n"
+            "<b>P.S.:</b> Ставки понижаются при приветственном налоговом бонусе "
+            "в 10 000 <b>₽</b>. Аллокатор не знает остаток бонуса — после его "
+            "исчерпания выберите обычную ставку."
+        ))
         self.assertEqual(button_rows(message)[:-1], [
             ["НПД · ФЛ · 4%", "НПД · ФЛ · 3%"],
             ["НПД · ЮЛ · 6%", "НПД · ЮЛ · 4%"],
@@ -165,6 +220,14 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
     async def test_ip_usn_screen_has_base_and_custom_rate(self):
         message = SimpleNamespace(answer=AsyncMock())
         await show_ip_usn_rate_menu(message)
+        self.assertEqual(message.answer.await_args.args[0], (
+            "<b>ИП НА УСН «ДОХОДЫ»</b>\n\n"
+            "<b>ИП</b> — индивидуальный предприниматель.\n"
+            "<b>УСН «Доходы»</b> — упрощённая система налогообложения с объектом "
+            "«Доходы».\n\n"
+            "Выберите, сколько откладывать с каждого поступления.\n\n"
+            "Базовый вариант — 6%; если у вас действует другая ставка, укажите её вручную."
+        ))
         self.assertEqual(button_rows(message)[:-1], [["ИП · УСН · 6%", "Своя ставка"]])
 
     async def test_back_clears_draft_and_restores_tax_state(self):
@@ -265,15 +328,60 @@ class TaxIncomeChartColours(unittest.TestCase):
             },
         )
 
-    def test_overview_includes_income_tax_rules(self):
+    def test_legacy_receipts_use_unique_saved_rule_with_same_rate(self):
+        current = allocator()
+        current.settings.income_tax_profiles = {
+            "ИП · УСН «Доходы» · 6%": {
+                "subject": "ИП", "mode": "УСН «Доходы»", "rate": "6",
+            },
+            "Самозанятость · Физики · 3%": {
+                "subject": "Самозанятость", "mode": "Физики", "rate": "3",
+            },
+        }
+        operations = [
+            {"id": 1, "payload": {"type": "income_distribution", "income_type": "Зарплата", "income": "100000", "tax": "6000"}},
+            {"id": 2, "payload": {"type": "income_distribution", "income_type": "Халтура", "income": "10000", "tax": "300"}},
+        ]
+        with patch("taxes.db") as db:
+            db.load_allocator.return_value = current
+            db.load_tax_obligations.return_value = []
+            db.load_operations.return_value = operations
+            db.load_tax_payments.return_value = []
+            groups, _, _ = taxes.collect_tax_statistics(42, 2026)
+        self.assertEqual(groups["Налог на доход"]["details"], {
+            "Зарплата · ИП · УСН · 6%": Decimal("6000"),
+            "Халтура · НПД · ФЛ · 3%": Decimal("300"),
+        })
+
+    def test_legacy_receipt_is_not_guessed_when_rate_is_ambiguous(self):
+        current = allocator()
+        current.settings.income_tax_profiles = {
+            "ИП · УСН · 6%": {"rate": "6"},
+            "НПД · ЮЛ · 6%": {"rate": "6"},
+        }
+        operations = [{
+            "id": 1,
+            "payload": {"type": "income_distribution", "income_type": "Зарплата", "income": "100000", "tax": "6000"},
+        }]
+        with patch("taxes.db") as db:
+            db.load_allocator.return_value = current
+            db.load_tax_obligations.return_value = []
+            db.load_operations.return_value = operations
+            db.load_tax_payments.return_value = []
+            groups, _, _ = taxes.collect_tax_statistics(42, 2026)
+        self.assertEqual(
+            groups["Налог на доход"]["details"], {"Зарплата": Decimal("6000")},
+        )
+
+    def test_overview_includes_only_accrued_income_tax_buckets(self):
         current = allocator()
         current.settings.income_type_tax_rates = {"Зарплата": Decimal("6")}
         overview = tax_obligations_overview(
             [], {"Халтура · 3%": Decimal("300")}, current.settings,
         )
         self.assertIn("<b>С доходов</b>", overview)
-        self.assertIn("Зарплата", overview)
         self.assertIn("Халтура · 3%", overview)
+        self.assertNotIn("Зарплата", overview)
         self.assertNotIn("нет добавленных", overview)
 
     def test_property_objects_get_separate_family_colours(self):
