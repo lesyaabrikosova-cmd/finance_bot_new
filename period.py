@@ -691,16 +691,67 @@ async def ask_new_period(callback: CallbackQuery, state: FSMContext):
     )
 
 
+def _review_is_current(allocator, review_date: str) -> bool:
+    return (
+        allocator is not None
+        and allocator.state.period_status == "active"
+        and allocator.state.period_ends_at == review_date
+    )
+
+
+@router.callback_query(F.data.regexp(r"^periodreview:continue:\d{4}-\d{2}-\d{2}$"))
+async def continue_current_period(callback: CallbackQuery):
+    await callback.answer()
+    review_date = callback.data.rsplit(":", 1)[1]
+    allocator = db.load_allocator(callback.from_user.id)
+    if not _review_is_current(allocator, review_date):
+        await callback.message.answer(
+            "Эта контрольная точка уже неактуальна.",
+            reply_markup=main_menu_keyboard(callback.from_user.id),
+        )
+        return
+    db.mark_period_review_sent(callback.from_user.id, review_date)
+    await callback.message.answer(
+        "Текущий расчётный период продолжается. Ничего не обнулено.\n\n"
+        "Когда решите подвести итог, нажмите «Начать новый расчётный период» в меню.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^periodreview:snooze:\d{4}-\d{2}-\d{2}$"))
+async def snooze_current_period_review(callback: CallbackQuery):
+    await callback.answer()
+    review_date = callback.data.rsplit(":", 1)[1]
+    allocator = db.load_allocator(callback.from_user.id)
+    if not _review_is_current(allocator, review_date):
+        await callback.message.answer(
+            "Эта контрольная точка уже неактуальна.",
+            reply_markup=main_menu_keyboard(callback.from_user.id),
+        )
+        return
+    next_review = db.snooze_period_review(
+        callback.from_user.id, moscow_today().isoformat(), days=7,
+    )
+    await callback.message.answer(
+        "Хорошо, напомню через 7 дней — "
+        f"<b>{date.fromisoformat(next_review).strftime('%d.%m.%Y')}</b>.\n\n"
+        "Период продолжается без изменений.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
+
 async def show_new_period_confirmation(
     message: Message, user_id: int, target_label: str = "", remainder: Decimal = Decimal("0")
 ):
     allocator = db.load_allocator(user_id)
     period_note = ""
     if allocator.state.period_status == "active" and allocator.state.period_ends_at:
-        end = date.fromisoformat(allocator.state.period_ends_at)
+        review = date.fromisoformat(allocator.state.period_ends_at)
+        start = date.fromisoformat(str(allocator.state.period_started_at)[:10])
         period_note = (
-            f"\n\nТекущий период рассчитан до <b>{end.strftime('%d.%m.%Y')}</b>. "
-            "Если начать новый период сейчас, прежний будет закрыт досрочно."
+            f"\n\nТекущий период начат <b>{start.strftime('%d.%m.%Y')}</b>. "
+            f"Контрольная точка — <b>{review.strftime('%d.%m.%Y')}</b>; она не закрывает "
+            "период автоматически."
         )
     await message.answer(
         "📅 <b>НАЧАТЬ НОВЫЙ РАСЧЁТНЫЙ ПЕРИОД?</b>\n\n"
@@ -890,7 +941,9 @@ async def confirm_new_period(callback: CallbackQuery, state: FSMContext):
         )
     confirmation_text = (
         "✅ <b>НОВЫЙ РАСЧЁТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
-        f"Период: <b>{period_start.strftime('%d.%m.%Y')} — {period_end.strftime('%d.%m.%Y')}</b>.\n\n"
+        f"Период начат: <b>{period_start.strftime('%d.%m.%Y')}</b>.\n"
+        f"Контрольная точка: <b>{period_end.strftime('%d.%m.%Y')}</b>.\n"
+        "Период не закроется сам — новый можно начать в любой удобный день.\n\n"
         "Баланс жизни и месячные категории начаты заново.\n"
         "Подушка, Цели и Сундуки, инвестиции, кредиты и история сохранены."
         + (" Фонд Зарплаты и счётчик полного финансового цикла тоже не сбрасываются."

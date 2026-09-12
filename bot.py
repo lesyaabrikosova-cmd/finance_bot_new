@@ -784,6 +784,26 @@ async def run_reminder_iteration(bot: Bot, today_value: date | None = None):
         except Exception:
             logging.exception("Не удалось отправить напоминание пользователю %s", telegram_id)
 
+    for telegram_id, started_at, review_date in db.due_period_review_reminders(today):
+        try:
+            started = date.fromisoformat(started_at[:10])
+            await bot.send_message(
+                telegram_id,
+                "<b>ПРОВЕРИТЬ РАСЧЁТНЫЙ ПЕРИОД</b>\n\n"
+                f"Текущий период начат <b>{started.strftime('%d.%m.%Y')}</b>. "
+                "Это только контрольная точка: период не закроется сам.\n\n"
+                "Если денег на жизнь ещё достаточно, продолжайте его. Новый период можно "
+                "начать в любой удобный день.",
+                reply_markup=keyboard([
+                    [("Продолжить текущий период", f"periodreview:continue:{review_date}")],
+                    [("Начать новый период", "period:new")],
+                    [("Напомнить через 7 дней", f"periodreview:snooze:{review_date}")],
+                ]),
+            )
+            db.mark_period_review_sent(telegram_id, review_date)
+        except Exception:
+            logging.exception("Не удалось отправить напоминание о периоде пользователю %s", telegram_id)
+
     # This reminder is universal: a person may have acquired property recently
     # and forgotten to create a plan in the bot.
     for telegram_id in db.due_global_tax_notice_reminders(today):

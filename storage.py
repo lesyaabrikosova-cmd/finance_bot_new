@@ -580,6 +580,7 @@ class Database:
                 period_status TEXT NOT NULL DEFAULT 'legacy',
                 period_activation_date TEXT,
                 period_reminder_sent_for TEXT,
+                period_review_sent_for TEXT,
                 initial_distribution_completed INTEGER NOT NULL DEFAULT 0,
                 break_period_salary_paid INTEGER NOT NULL DEFAULT 0,
                 fund_salary_currencies TEXT NOT NULL DEFAULT '{}',
@@ -912,6 +913,8 @@ class Database:
             cursor.execute("ALTER TABLE state ADD COLUMN period_activation_date TEXT")
         if "period_reminder_sent_for" not in state_columns:
             cursor.execute("ALTER TABLE state ADD COLUMN period_reminder_sent_for TEXT")
+        if "period_review_sent_for" not in state_columns:
+            cursor.execute("ALTER TABLE state ADD COLUMN period_review_sent_for TEXT")
         if "initial_distribution_completed" not in state_columns:
             cursor.execute("ALTER TABLE state ADD COLUMN initial_distribution_completed INTEGER NOT NULL DEFAULT 0")
         if "break_period_salary_paid" not in state_columns:
@@ -1077,6 +1080,48 @@ class Database:
             (activation_date, telegram_id),
         )
         self._commit()
+
+    def due_period_review_reminders(self, today: str) -> list[tuple[int, str, str]]:
+        """Return soft review points for periods the person has kept open."""
+        rows = self.connection.execute(
+            """
+            SELECT telegram_id, period_started_at, period_ends_at
+            FROM state
+            WHERE period_status = 'active'
+              AND period_started_at IS NOT NULL
+              AND period_ends_at IS NOT NULL
+              AND period_ends_at <= ?
+              AND (
+                    period_review_sent_for IS NULL
+                    OR period_review_sent_for != period_ends_at
+              )
+            """,
+            (today,),
+        ).fetchall()
+        return [
+            (int(row["telegram_id"]), str(row["period_started_at"]), str(row["period_ends_at"]))
+            for row in rows
+        ]
+
+    def mark_period_review_sent(self, telegram_id: int, review_date: str) -> None:
+        self.connection.execute(
+            "UPDATE state SET period_review_sent_for = ? WHERE telegram_id = ?",
+            (review_date, telegram_id),
+        )
+        self._commit()
+
+    def snooze_period_review(self, telegram_id: int, today: str, days: int = 7) -> str:
+        next_review = (date.fromisoformat(today) + timedelta(days=days)).isoformat()
+        self.connection.execute(
+            """
+            UPDATE state
+            SET period_ends_at = ?, period_review_sent_for = NULL
+            WHERE telegram_id = ? AND period_status = 'active'
+            """,
+            (next_review, telegram_id),
+        )
+        self._commit()
+        return next_review
 
     # ========================================================
     # СОХРАНЕНИЕ НАСТРОЕК
@@ -1833,6 +1878,7 @@ class Database:
                 period_status,
                 period_activation_date,
                 period_reminder_sent_for,
+                period_review_sent_for,
                 initial_distribution_completed,
                 break_period_salary_paid,
                 fund_salary_currencies,
@@ -1848,7 +1894,7 @@ class Database:
                 ?, ?,
                 ?, ?,
                 ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
 
             ON CONFLICT(telegram_id)
@@ -1927,6 +1973,7 @@ class Database:
                     excluded.period_activation_date,
 
                 period_reminder_sent_for = excluded.period_reminder_sent_for,
+                period_review_sent_for = excluded.period_review_sent_for,
                 initial_distribution_completed = excluded.initial_distribution_completed,
                 break_period_salary_paid = excluded.break_period_salary_paid,
                 fund_salary_currencies = excluded.fund_salary_currencies,
@@ -2013,6 +2060,7 @@ class Database:
                 state.period_status,
                 state.period_activation_date,
                 state.period_reminder_sent_for,
+                state.period_review_sent_for,
                 int(state.initial_distribution_completed),
                 int(state.break_period_salary_paid),
                 serialize_json(state.fund_salary_currencies),
@@ -2154,6 +2202,7 @@ class Database:
                 row["period_activation_date"],
 
             period_reminder_sent_for=row["period_reminder_sent_for"],
+            period_review_sent_for=row["period_review_sent_for"],
             initial_distribution_completed=bool(row["initial_distribution_completed"]),
             break_period_salary_paid=bool(row["break_period_salary_paid"]),
             fund_salary_currencies=deserialize_json(row["fund_salary_currencies"]),

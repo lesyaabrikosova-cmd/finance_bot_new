@@ -1350,6 +1350,8 @@ class AllocatorState:
     period_status: str = "legacy"
     period_activation_date: Optional[str] = None
     period_reminder_sent_for: Optional[str] = None
+    # ``period_ends_at`` is a soft review date, never an automatic closure.
+    period_review_sent_for: Optional[str] = None
     initial_distribution_completed: bool = False
     break_period_salary_paid: bool = False
 
@@ -1444,15 +1446,40 @@ class AllocatorState:
             for name, balance in self.period_allocations.items()
         }
 
-    def activate_budget_period(self, start: date) -> tuple[date, date]:
-        """Активирует личный финансовый месяц без сброса введённых остатков."""
+    def activate_budget_period(
+        self,
+        start: date,
+        *,
+        today: Optional[date] = None,
+    ) -> tuple[date, date]:
+        """Activate a financial period without clearing its entered balances.
+
+        ``today`` is used only for a backfilled first/reset period.  If the
+        selected start is older than a month, the period remains open through
+        the next current anchor instead of scheduling an already elapsed
+        review.  A review never closes the period automatically.
+        """
         next_start = next_anchor_date(start, start.day)
+        period_end = next_start - timedelta(days=1)
+        if today is not None and period_end < today:
+            this_month_anchor = date(
+                today.year,
+                today.month,
+                min(start.day, monthrange(today.year, today.month)[1]),
+            )
+            next_start = (
+                this_month_anchor
+                if this_month_anchor > today
+                else next_anchor_date(this_month_anchor, start.day)
+            )
+            period_end = next_start - timedelta(days=1)
         self.period_started_at = datetime.combine(start, datetime.min.time()).isoformat()
-        self.period_ends_at = (next_start - timedelta(days=1)).isoformat()
+        self.period_ends_at = period_end.isoformat()
         self.period_anchor_day = start.day
         self.period_status = "active"
         self.period_activation_date = None
-        return start, next_start - timedelta(days=1)
+        self.period_review_sent_for = None
+        return start, period_end
 
     def schedule_budget_period(self, start: date) -> None:
         self.period_status = "scheduled"

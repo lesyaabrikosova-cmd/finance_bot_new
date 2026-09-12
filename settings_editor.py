@@ -40,6 +40,19 @@ class EditSettingsStates(StatesGroup):
     life_category_amount = State()
     goal_percentages = State()
     c_split = State()
+    full_reset_period_start = State()
+
+
+def start_reset_period(allocator, start: date, today: date) -> tuple[date, date]:
+    """Start an empty accounting period from a user-selected past or current day.
+
+    A full reset deliberately permits a historical start: it lets a person
+    enter the income that has already arrived in their current period.  The
+    original date remains the beginning of the accounting history, while the
+    displayed end is extended to the next current anchor if the date is older
+    than one financial month.
+    """
+    return allocator.state.activate_budget_period(start, today=today)
 
 def parse_decimal(text: str) -> Decimal | None:
     if not text:
@@ -735,8 +748,15 @@ async def confirm_full_reset(
     st.operation_log = []
     st.distribution_history = []
 
-    # Новый отсчёт начинается сейчас
-    st.period_started_at = moscow_now().isoformat()
+    # Дату начала человек выбирает после успешного сброса. До этого момента
+    # период намеренно не активен: можно безопасно начать его сегодняшним
+    # числом или восстановить уже начавшуюся часть месяца.
+    st.period_status = "not_started"
+    st.period_started_at = None
+    st.period_ends_at = None
+    st.period_anchor_day = 0
+    st.period_activation_date = None
+    st.period_review_sent_for = None
 
     try:
         # The visible zero balances and the SQL accounting ledger are one
@@ -758,11 +778,90 @@ async def confirm_full_reset(
         )
         return
 
+    await state.set_state(EditSettingsStates.full_reset_period_start)
     await callback.message.answer(
         "✅ <b>УЧЁТ ПОЛНОСТЬЮ ОБНУЛЁН</b>\n\n"
-        "Все финансовые счётчики начаты с нуля.\n"
-        "Настройки профиля сохранены.",
-        reply_markup=main_menu_keyboard(callback.from_user.id),
+        "Настройки профиля сохранены.\n\n"
+        "<b>КОГДА НАЧАТЬ РАСЧЁТНЫЙ ПЕРИОД?</b>\n\n"
+        "Можно указать любую прошедшую дату или сегодня. Будущую дату выбрать нельзя. "
+        "После этого можно будет внести поступления, начиная с выбранного дня.\n\n"
+        "——————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
+        reply_markup=keyboard([
+            [("Начать сегодня", "settings:full_reset_start_today")],
+        ]),
+    )
+
+
+async def finish_full_reset_period_start(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+    selected: date,
+) -> None:
+    """Activate the newly reset period only while its accounting is empty."""
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await state.clear()
+        await message.answer("Финансовый профиль не найден.")
+        return
+    if allocator.state.period_status != "not_started" or db.operation_count(telegram_id) > 0:
+        await state.clear()
+        await message.answer(
+            "Расчётный период уже начат. Изменять его дату после первых операций нельзя.",
+            reply_markup=main_menu_keyboard(telegram_id),
+        )
+        return
+
+    period_start, period_end = start_reset_period(
+        allocator, selected, moscow_now().date(),
+    )
+    db.save_allocator(telegram_id, allocator)
+    await state.clear()
+    await message.answer(
+        "✅ <b>РАСЧЁТНЫЙ ПЕРИОД НАЧАТ</b>\n\n"
+        f"Начало периода: <b>{period_start.strftime('%d.%m.%Y')}</b>.\n"
+        f"Контрольная точка: <b>{period_end.strftime('%d.%m.%Y')}</b>.\n\n"
+        "В контрольную дату Аллокатор только напомнит проверить период. "
+        "Он продолжится, пока вы сами не начнёте новый.\n\n"
+        "Теперь можно добавлять поступления с выбранной даты.",
+        reply_markup=main_menu_keyboard(telegram_id),
+    )
+
+
+@router.callback_query(
+    EditSettingsStates.full_reset_period_start,
+    F.data == "settings:full_reset_start_today",
+)
+async def start_full_reset_period_today(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+    await finish_full_reset_period_start(
+        callback.message, state, callback.from_user.id, moscow_now().date(),
+    )
+
+
+@router.message(
+    EditSettingsStates.full_reset_period_start,
+    F.text & ~F.text.startswith("/"),
+)
+async def save_full_reset_period_start(
+    message: Message,
+    state: FSMContext,
+):
+    try:
+        selected = datetime.strptime(message.text.strip(), "%d.%m.%Y").date()
+    except ValueError:
+        await message.answer(
+            "Не удалось распознать дату. Введите её в формате <code>ДД.ММ.ГГГГ</code>.",
+        )
+        return
+    if selected > moscow_now().date():
+        await message.answer("Дата начала расчётного периода не может быть в будущем.")
+        return
+    await finish_full_reset_period_start(
+        message, state, message.from_user.id, selected,
     )
 
 

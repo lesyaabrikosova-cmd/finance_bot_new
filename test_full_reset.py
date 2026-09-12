@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from decimal import Decimal as D
 from types import SimpleNamespace
@@ -10,7 +11,7 @@ _DATA = tempfile.TemporaryDirectory()
 os.environ['ALLOCATOR_DATA_DIR'] = _DATA.name
 from storage import Database
 from financial_engine import FinancialAllocator, UserSettings
-from settings_editor import confirm_erase_all, confirm_full_reset
+from settings_editor import confirm_erase_all, confirm_full_reset, start_reset_period
 
 
 class ResetStorageTests(unittest.TestCase):
@@ -62,6 +63,39 @@ class ResetStorageTests(unittest.TestCase):
         self.assertTrue(self.db.user_exists(101))
         self.assertEqual(self.db.operation_count(202), 1)
 
+    def test_reset_period_can_start_from_any_past_date(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=D("1000"),
+            household_reserve=D("100"),
+            average_income=D("2000"),
+        ))
+
+        start, end = start_reset_period(
+            allocator, date(2026, 8, 28), date(2026, 9, 12),
+        )
+
+        self.assertEqual(start, date(2026, 8, 28))
+        self.assertEqual(end, date(2026, 9, 27))
+        self.assertEqual(allocator.state.period_status, "active")
+        self.assertEqual(allocator.state.period_started_at[:10], "2026-08-28")
+
+    def test_old_reset_start_extends_the_open_period_to_current_anchor(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=D("1000"),
+            household_reserve=D("100"),
+            average_income=D("2000"),
+        ))
+
+        _, end = start_reset_period(
+            allocator, date(2026, 1, 28), date(2026, 9, 12),
+        )
+
+        self.assertEqual(end, date(2026, 9, 27))
+
 
 class ResetGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_old_confirmation_without_pending_request_does_not_delete(self):
@@ -110,3 +144,37 @@ class ResetGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(restored.state.life_balance, D("777"))
         self.assertIn("данные сохранены", callback.message.answer.await_args.args[0])
+
+    async def test_full_reset_waits_for_a_user_selected_period_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "reset-start.db")
+            user = 304
+            allocator = FinancialAllocator(UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                critical_life=D("1000"),
+                household_reserve=D("100"),
+                average_income=D("2000"),
+            ))
+            allocator.state.activate_budget_period(date(2026, 9, 12))
+            database.save_allocator(user, allocator)
+            callback = SimpleNamespace(
+                answer=AsyncMock(),
+                message=SimpleNamespace(answer=AsyncMock()),
+                from_user=SimpleNamespace(id=user),
+            )
+            state = AsyncMock()
+            try:
+                with patch("settings_editor.db", database):
+                    await confirm_full_reset(callback, state)
+                reset = database.load_allocator(user)
+            finally:
+                database.close()
+
+        self.assertEqual(reset.state.period_status, "not_started")
+        self.assertIsNone(reset.state.period_started_at)
+        state.set_state.assert_awaited_once()
+        self.assertIn(
+            "КОГДА НАЧАТЬ РАСЧЁТНЫЙ ПЕРИОД",
+            callback.message.answer.await_args.args[0],
+        )

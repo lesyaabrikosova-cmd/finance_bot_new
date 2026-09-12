@@ -36,6 +36,7 @@ from financial_engine import (
 from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
 
 from storage import db
+from time_utils import moscow_today
 from ui import main_menu_keyboard, button_text
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 
@@ -9285,11 +9286,13 @@ async def confirm_save(
 
 async def show_first_period_started(message: Message, allocator: FinancialAllocator) -> None:
     start = date.fromisoformat(allocator.state.period_started_at[:10])
-    end = date.fromisoformat(allocator.state.period_ends_at)
+    review = date.fromisoformat(allocator.state.period_ends_at)
     await message.answer(
         "<b>НОВАЯ ФИНАНСОВАЯ СИСТЕМА ЗАПУЩЕНА</b>\n\n"
-        "Первый расчётный период:\n"
-        f"<b>{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}</b>\n\n"
+        f"Расчётный период начат: <b>{start.strftime('%d.%m.%Y')}</b>.\n"
+        f"Контрольная точка: <b>{review.strftime('%d.%m.%Y')}</b>.\n\n"
+        "В этот день Аллокатор только напомнит проверить период. Он не закроется сам: "
+        "новый период можно начать в любой удобный день.\n\n"
         "<b>Начинаем с чистого листа.</b>\n\n"
         "Теперь зафиксируйте деньги, которыми располагаете прямо сейчас, и сделайте первое распределение.",
         reply_markup=keyboard([
@@ -9320,6 +9323,7 @@ async def cancel_started_first_period(callback: CallbackQuery, state: FSMContext
     allocator.state.period_ends_at = None
     allocator.state.period_anchor_day = 0
     allocator.state.period_activation_date = None
+    allocator.state.period_review_sent_for = None
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
     await callback.message.answer(
@@ -9351,7 +9355,8 @@ async def ask_first_period_date(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "<b>КОГДА НАЧАТЬ ПЕРВЫЙ РАСЧЁТНЫЙ ПЕРИОД?</b>\n\n"
         "В выбранный день вы зафиксируете фактические остатки и сделаете первое распределение. "
-        "Расходы до этой даты Аллокатор учитывать не будет.\n\n"
+        "Можно указать любую прошедшую дату или сегодня. Расходы до этой даты "
+        "Аллокатор учитывать не будет.\n\n"
         "——————\n<b>→ Введите дату в формате ДД.ММ.ГГГГ.</b>",
         reply_markup=keyboard([[("✖️ Отмена", "menu:back")]]),
     )
@@ -9360,32 +9365,18 @@ async def ask_first_period_date(callback: CallbackQuery, state: FSMContext):
 @router.message(SetupStates.first_period_date)
 async def save_first_period_date(message: Message, state: FSMContext):
     selected = parse_tax_due_date(message.text)
-    if selected is None or selected < date.today():
-        await message.answer("Введите сегодняшнюю или будущую дату в формате <code>ДД.ММ.ГГГГ</code>.")
+    today = moscow_today()
+    if selected is None or selected > today:
+        await message.answer("Введите прошедшую дату или сегодня в формате <code>ДД.ММ.ГГГГ</code>.")
         return
     allocator = db.load_allocator(message.from_user.id)
     if allocator is None:
         await state.clear()
         return
-    if selected == date.today():
-        allocator.state.activate_budget_period(selected)
-        db.save_allocator(message.from_user.id, allocator)
-        await state.clear()
-        await show_first_period_started(message, allocator)
-        return
-    allocator.state.schedule_budget_period(selected)
+    allocator.state.activate_budget_period(selected, today=today)
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(
-        "<b>ПЕРВЫЙ ПЕРИОД ЗАПЛАНИРОВАН</b>\n\n"
-        f"Дата запуска — <b>{selected.strftime('%d.%m.%Y')}</b>.\n\n"
-        "До этой даты продолжайте пользоваться деньгами привычным способом. Траты до запуска "
-        "не войдут в первый расчётный период.",
-        reply_markup=keyboard([
-            [("Начать сейчас", "periodsetup:today")],
-            [("Перейти в Главное меню", "menu:back")],
-        ]),
-    )
+    await show_first_period_started(message, allocator)
 
 
 def first_allocation_preview_text(allocator: FinancialAllocator, total: Decimal) -> str:

@@ -214,6 +214,37 @@ class CurrencyFoundationTests(unittest.TestCase):
             self.assertEqual(database.due_period_reminders("2026-09-01"), [])
             database.close()
 
+    def test_active_period_review_is_soft_and_can_be_snoozed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "test.db")
+            state = AllocatorState(
+                period_status="active",
+                period_started_at="2026-08-28T00:00:00",
+                period_ends_at="2026-09-27",
+            )
+            database.save_state(991003, state)
+
+            self.assertEqual(
+                database.due_period_review_reminders("2026-09-26"), [],
+            )
+            self.assertEqual(
+                database.due_period_review_reminders("2026-09-27"),
+                [(991003, "2026-08-28T00:00:00", "2026-09-27")],
+            )
+            database.mark_period_review_sent(991003, "2026-09-27")
+            self.assertEqual(
+                database.due_period_review_reminders("2026-09-27"), [],
+            )
+            next_review = database.snooze_period_review(
+                991003, "2026-09-27", days=7,
+            )
+            self.assertEqual(next_review, "2026-10-04")
+            self.assertEqual(
+                database.due_period_review_reminders("2026-10-04"),
+                [(991003, "2026-08-28T00:00:00", "2026-10-04")],
+            )
+            database.close()
+
 
 if __name__ == "__main__":
     unittest.main()
