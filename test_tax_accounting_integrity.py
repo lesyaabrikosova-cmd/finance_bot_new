@@ -434,7 +434,7 @@ class TaxAccountingIntegrityTests(unittest.TestCase):
 
     def test_other_tax_has_its_own_group_and_input_rejects_non_finite_values(self):
         self.assertEqual(taxes.tax_group("Другой налог · Страховой взнос"), "Другой налог")
-        self.assertEqual(taxes.tax_group("Патент · Кофейня"), "Другой налог")
+        self.assertEqual(taxes.tax_group("Патент · Кофейня"), "Налог на доход")
         self.assertEqual(taxes.tax_group("Налог на доход · Зарплата"), "Налог на доход")
         for value in ("NaN", "Infinity", "-Infinity", "1000000000001", "1.001"):
             self.assertIsNone(taxes.parse_amount(value), value)

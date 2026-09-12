@@ -35,12 +35,36 @@ class EditSettingsStates(StatesGroup):
     income_type_edit_name = State()
     income_type_edit_rate = State()
     income_type_confirm = State()
+    income_tax_profile_subject = State()
+    income_tax_profile_mode = State()
     life_categories = State()
     life_category_rename = State()
     life_category_amount = State()
     goal_percentages = State()
     c_split = State()
     full_reset_period_start = State()
+
+
+TAX_PROFILE_SUBJECTS = {
+    "ip": "ИП",
+    "self_employed": "Самозанятость",
+}
+# Only regimes whose liability can be estimated from gross receipts belong in
+# a personal-finance allocator. Patent is handled as a dated fixed payment.
+IP_TAX_REGIMES = ("УСН «Доходы»",)
+SELF_EMPLOYED_CLIENTS = ("Физики", "Юрики")
+
+
+def tax_profile_name(subject: str, mode: str, rate: Decimal) -> str:
+    """One readable identity for selection, history and the tax-chart legend."""
+    return f"{subject} · {mode} · {fmt_money(rate)}%"
+
+
+def tax_profile_navigation(data: dict) -> list[tuple[str, str]]:
+    """Keep the back row identical when the builder was opened from Taxes."""
+    if data.get("income_profile_return") == "taxes:income":
+        return [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")]
+    return [("Отмена", "incomesettings:cancel")]
 
 
 def start_reset_period(allocator, start: date, today: date) -> tuple[date, date]:
@@ -189,7 +213,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         "\n".join(lines),
         reply_markup=keyboard([
             [(f"Профиль: { {'stable': 'Стабильный', 'piecework': 'Сдельный', 'cyclic': 'Циклический'}.get(allocator.profile_id, allocator.profile_id)}", "settings:rhythm")],
-            [("Средний доход", "settings:income"), ("Типы доходов", "settings:income_types")],
+            [("Средний доход", "settings:income"), ("Доходы и налоги", "settings:income_types")],
             [("Настройки Подушки", "settings:force_months")],
             [("Баланс Подушки", "settings:pillow")],
             *([
@@ -997,10 +1021,11 @@ async def show_income_types_settings(message: Message, telegram_id: int):
         for name, rate in rates.items()
     ]
     rows = [[(name, f"incomesettings:view:{index}")] for index, name in enumerate(rates)]
-    rows.append([("Добавить доход", "incomesettings:add")])
+    rows.append([("+ Налоговый профиль", "incomesettings:add")])
+    rows.append([("+ Свой тип дохода", "incomesettings:add_custom")])
     rows.append([("← Назад", "settings:open")])
     await message.answer(
-        "<b>ТИПЫ ДОХОДОВ</b>\n\n"
+        "<b>НАЛОГОВЫЕ ПРОФИЛИ И ТИПЫ ДОХОДОВ</b>\n\n"
         + ("\n".join(lines) if lines else "Пока ничего не добавлено."),
         reply_markup=keyboard(rows),
     )
@@ -1016,12 +1041,94 @@ async def income_types_settings(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "incomesettings:add")
 async def income_type_add(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    await start_income_tax_profile(callback.message, state)
+
+
+async def start_income_tax_profile(
+    message: Message,
+    state: FSMContext,
+    *,
+    return_to: str | None = None,
+    subject_key: str | None = None,
+) -> None:
+    """Open the shared profile builder from Settings or the Taxes menu."""
+    await state.update_data(income_type_action="add_profile")
+    if return_to:
+        await state.update_data(income_profile_return=return_to)
+    if subject_key:
+        await choose_income_tax_profile_subject(message, state, subject_key)
+        return
+    await state.set_state(EditSettingsStates.income_tax_profile_subject)
+    await message.answer(
+        "<b>НОВЫЙ НАЛОГОВЫЙ ПРОФИЛЬ</b>\n\n"
+        "1 из 3 · Кто получает доход?\n\n"
+        "Профиль будет отдельной строкой при добавлении дохода и отдельным "
+        "фиолетовым сектором в диаграмме налогов.",
+        reply_markup=keyboard([
+            [("ИП", "incomesettings:subject:ip"), ("Самозанятость", "incomesettings:subject:self_employed")],
+            [("Отмена", "incomesettings:cancel")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "incomesettings:add_custom")
+async def income_type_add_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     await state.update_data(income_type_action="add")
     await state.set_state(EditSettingsStates.income_type_name)
     await callback.message.answer(
-        "<b>НОВЫЙ ТИП ДОХОДА</b>\n\n—————\n"
-        "<b>→ Введите короткое название.</b>",
+        "<b>СВОЙ ТИП ДОХОДА</b>\n\n—————\nВведите короткое название.",
         reply_markup=keyboard([[("Отмена", "incomesettings:cancel")]]),
+    )
+
+
+@router.callback_query(EditSettingsStates.income_tax_profile_subject, F.data.startswith("incomesettings:subject:"))
+async def income_tax_profile_subject(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    subject_key = callback.data.rsplit(":", 1)[1]
+    await choose_income_tax_profile_subject(callback.message, state, subject_key)
+
+
+async def choose_income_tax_profile_subject(message: Message, state: FSMContext, subject_key: str) -> None:
+    subject = TAX_PROFILE_SUBJECTS.get(subject_key)
+    if subject is None:
+        await message.answer("Выберите налоговый профиль ещё раз.")
+        return
+    await state.update_data(income_tax_profile_subject=subject)
+    await state.set_state(EditSettingsStates.income_tax_profile_mode)
+    choices = SELF_EMPLOYED_CLIENTS if subject_key == "self_employed" else IP_TAX_REGIMES
+    rows = [[(choice, f"incomesettings:profile_mode:{index}")] for index, choice in enumerate(choices)]
+    rows.append(tax_profile_navigation(await state.get_data()))
+    word = "для кого заказ" if subject_key == "self_employed" else "налоговый режим"
+    await message.answer(
+        f"<b>{escape(subject.upper())}</b>\n\n2 из 3 · Выберите {word}.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(EditSettingsStates.income_tax_profile_mode, F.data.startswith("incomesettings:profile_mode:"))
+async def income_tax_profile_mode(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    subject = data.get("income_tax_profile_subject")
+    choices = SELF_EMPLOYED_CLIENTS if subject == "Самозанятость" else IP_TAX_REGIMES
+    try:
+        mode = choices[int(callback.data.rsplit(":", 1)[1])]
+    except (ValueError, IndexError):
+        await show_income_types_settings(callback.message, callback.from_user.id)
+        return
+    await state.update_data(income_tax_profile_mode=mode)
+    await state.set_state(EditSettingsStates.income_type_rate)
+    hint = (
+        "Для самозанятости стандартные ставки — 4% с доходов от физиков и "
+        "6% от юриков; при налоговом бонусе — 3% и 4%."
+        if subject == "Самозанятость"
+        else "Введите процент, который нужно откладывать с каждого поступления."
+    )
+    await callback.message.answer(
+        f"<b>{escape(subject)} · {escape(mode)}</b>\n\n"
+        f"3 из 3 · Введите ставку в процентах.\n\n{hint}",
+        reply_markup=keyboard([tax_profile_navigation(data)]),
     )
 
 
@@ -1058,10 +1165,42 @@ async def income_type_add_tax(callback: CallbackQuery, state: FSMContext):
 
 @router.message(EditSettingsStates.income_type_rate)
 async def income_type_add_rate(message: Message, state: FSMContext):
+    data = await state.get_data()
     rate = parse_decimal(message.text)
     if rate is None or rate <= 0 or rate > 100:
-        await message.answer("Введите ставку больше 0 и не больше 100.")
+        await message.answer(
+            "Введите ставку больше 0 и не больше 100.",
+            reply_markup=keyboard([tax_profile_navigation(data)]),
+        )
         return
+    if data.get("income_type_action") == "add_profile":
+        name = tax_profile_name(
+            data["income_tax_profile_subject"], data["income_tax_profile_mode"], rate,
+        )
+        if data.get("income_profile_return") == "taxes:income":
+            from taxes import save_income_tax_profile, show_income_tax_profile_menu
+            try:
+                name, created = await save_income_tax_profile(
+                    message.from_user.id,
+                    data["income_tax_profile_subject"],
+                    data["income_tax_profile_mode"],
+                    rate,
+                )
+            except ValueError as error:
+                await message.answer(escape(str(error)))
+                return
+            await state.clear()
+            await message.answer(
+                f"{'Добавлен профиль' if created else 'Такой профиль уже добавлен'} "
+                f"<b>{escape(name)}</b>."
+            )
+            await show_income_tax_profile_menu(message, message.from_user.id)
+            return
+        allocator = db.load_allocator(message.from_user.id)
+        if name in allocator.settings.income_type_tax_rates:
+            await message.answer("Такой налоговый профиль уже есть. Выберите его в списке.")
+            return
+        await state.update_data(income_type_draft_name=name)
     await state.update_data(income_type_draft_rate=str(rate))
     await show_income_type_confirmation(message, state)
 
@@ -1103,9 +1242,20 @@ async def income_type_save(callback: CallbackQuery, state: FSMContext):
         allocator.settings.income_type_ids.pop(original, None)
         allocator.settings.income_type_ids[name] = identifier
         allocator.settings.income_type_labels[identifier] = name
+        profile = allocator.settings.income_tax_profiles.pop(original, None)
+        if profile is not None:
+            allocator.settings.income_tax_profiles[name] = {
+                **profile, "rate": str(rate),
+            }
     else:
         rates[name] = rate
         allocator.settings.ensure_income_type_id(name)
+        if action == "add_profile":
+            allocator.settings.income_tax_profiles[name] = {
+                "subject": str(data["income_tax_profile_subject"]),
+                "mode": str(data["income_tax_profile_mode"]),
+                "rate": str(rate),
+            }
     allocator.settings.taxable_income_types = [
         item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
     ]
@@ -1124,7 +1274,11 @@ async def income_type_save(callback: CallbackQuery, state: FSMContext):
     else:
         db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
-    await show_income_types_settings(callback.message, callback.from_user.id)
+    if data.get("income_profile_return") == "taxes:income":
+        from taxes import show_income_tax_profile_menu
+        await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+    else:
+        await show_income_types_settings(callback.message, callback.from_user.id)
 
 
 @router.callback_query(F.data.startswith("incomesettings:view:"))
@@ -1139,11 +1293,12 @@ async def income_type_view(callback: CallbackQuery, state: FSMContext):
     name = names[index]
     rate = allocator.settings.income_type_tax_rates[name]
     await state.update_data(income_type_edit_original=name)
+    is_profile = name in allocator.settings.income_tax_profiles
     await callback.message.answer(
         f"<b>{escape(name.upper())}</b>\n\n" + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Без налога"),
         reply_markup=keyboard([
-            [("Изменить название", "incomesettings:rename")],
-            [("Изменить налог", "incomesettings:rerate")],
+            *([] if is_profile else [[("Изменить название", "incomesettings:rename")]]),
+            *([] if is_profile else [[("Изменить налог", "incomesettings:rerate")]]),
             [("🗑️ Удалить", "incomesettings:delete")],
             [("← Назад", "settings:income_types")],
         ]),
@@ -1196,6 +1351,19 @@ async def income_type_rate_save(message: Message, state: FSMContext):
     data = await state.get_data()
     allocator = db.load_allocator(message.from_user.id)
     name = data["income_type_edit_original"]
+    profile = allocator.settings.income_tax_profiles.get(name)
+    if profile:
+        new_name = tax_profile_name(profile["subject"], profile["mode"], rate)
+        if new_name != name and new_name in allocator.settings.income_type_tax_rates:
+            await message.answer("Профиль с такой ставкой уже существует.")
+            return
+        await state.update_data(
+            income_type_action="rename",
+            income_type_draft_name=new_name,
+            income_type_draft_rate=str(rate),
+        )
+        await show_income_type_confirmation(message, state)
+        return
     await state.update_data(
         income_type_action="rerate",
         income_type_draft_name=name,
@@ -1225,6 +1393,7 @@ async def income_type_delete_confirm(callback: CallbackQuery, state: FSMContext)
     original = data["income_type_edit_original"]
     allocator.settings.income_type_tax_rates.pop(original, None)
     allocator.settings.income_type_ids.pop(original, None)
+    allocator.settings.income_tax_profiles.pop(original, None)
     allocator.settings.taxable_income_types = [name for name, rate in allocator.settings.income_type_tax_rates.items() if rate > 0]
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
@@ -1234,8 +1403,13 @@ async def income_type_delete_confirm(callback: CallbackQuery, state: FSMContext)
 @router.callback_query(F.data == "incomesettings:cancel")
 async def income_type_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    data = await state.get_data()
     await state.clear()
-    await show_income_types_settings(callback.message, callback.from_user.id)
+    if data.get("income_profile_return") == "taxes:income":
+        from taxes import show_income_tax_profile_menu
+        await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+    else:
+        await show_income_types_settings(callback.message, callback.from_user.id)
 
 
 @router.callback_query(F.data == "settings:tax")

@@ -650,6 +650,11 @@ class UserSettings:
     tax_rate: Decimal = Decimal("0")
     taxable_income_types: List[str] = field(default_factory=list)
     income_type_tax_rates: Dict[str, Decimal] = field(default_factory=dict)
+    # Метаданные налогового профиля. Ключ совпадает с именем типа дохода,
+    # чтобы старая история и расчёты продолжали работать без миграции.
+    # Пример: {"Самозанятость · Физики · 3%": {"subject": "Самозанятость",
+    # "mode": "Физики", "rate": "3"}}.
+    income_tax_profiles: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # Название можно менять, поэтому история доходов ссылается на тип через
     # постоянный ID. ``income_type_labels`` сохраняет последнее понятное имя
     # даже после удаления типа из активных настроек.
@@ -781,6 +786,15 @@ class UserSettings:
                 name: self.tax_rate
                 for name in self.taxable_income_types
             }
+        self.income_tax_profiles = {
+            str(name).strip(): {
+                str(field): str(value).strip()
+                for field, value in profile.items()
+                if str(field).strip() and str(value).strip()
+            }
+            for name, profile in (self.income_tax_profiles or {}).items()
+            if str(name).strip() in self.income_type_tax_rates and isinstance(profile, dict)
+        }
         self.taxable_income_types = [
             name
             for name, rate in self.income_type_tax_rates.items()

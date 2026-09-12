@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING
@@ -106,6 +107,41 @@ TAX_COLORS = {
     "Другой налог": "#C87452",
 }
 
+# Each tax kind has its own visual family. Different profiles or objects use
+# neighbouring shades without becoming visually confused with another kind.
+INCOME_TAX_PURPLES = (
+    "#7656D8", "#8B6FE0", "#A187E8", "#B6A0EE",
+    "#C9B9F3", "#6947C8", "#9472D6", "#AD90E3",
+    "#D8CBF7", "#5C3AB6", "#8062CE", "#BFA8EC",
+)
+PROPERTY_TAX_YELLOWS = (
+    "#E2B93B", "#F2C94C", "#D6A92D", "#F5D76E",
+    "#C99720", "#FFE08A", "#B8860B", "#EBCB64",
+    "#CCA43B", "#F7C948", "#D4AF37", "#F0D264",
+)
+TRANSPORT_TAX_GRAYS = (
+    "#7A7F87", "#9298A1", "#626871", "#A9AFB7",
+    "#50565E", "#BEC3CA", "#858B94", "#6C727B",
+    "#9EA4AC", "#454A51", "#B2B8C0", "#747A82",
+)
+LAND_TAX_BROWNS = (
+    "#8B5A2B", "#A66A3F", "#704522", "#B77A50",
+    "#5E3A20", "#C18B62", "#7D4E2A", "#9A6035",
+    "#AD7651", "#684126", "#BC825A", "#87532F",
+)
+OTHER_TAX_ORANGES = (
+    "#C87452", "#D88763", "#B56243", "#E29A76",
+    "#9E5037", "#ECAF91", "#C06B49", "#D17D59",
+)
+
+TAX_DETAIL_PALETTES = {
+    "Налог на доход": INCOME_TAX_PURPLES,
+    "Налог на имущество": PROPERTY_TAX_YELLOWS,
+    "Транспортный налог": TRANSPORT_TAX_GRAYS,
+    "Земельный налог": LAND_TAX_BROWNS,
+    "Другой налог": OTHER_TAX_ORANGES,
+}
+
 
 class TaxStates(StatesGroup):
     payment_name = State()
@@ -124,6 +160,7 @@ class TaxStates(StatesGroup):
 
 
 _PAYMENT_CONFIRM_LOCKS: dict[int, asyncio.Lock] = {}
+_PROFILE_SAVE_LOCKS: dict[int, asyncio.Lock] = {}
 
 
 ANNUAL_PROPERTY_TAXES = {
@@ -499,7 +536,7 @@ def tax_group(name: str) -> str:
         return "Транспортный налог"
     if "земел" in lowered:
         return "Земельный налог"
-    if "налог на доход" in lowered:
+    if "налог на доход" in lowered or "патент" in lowered:
         return "Налог на доход"
     return "Другой налог"
 
@@ -520,10 +557,59 @@ def collect_tax_statistics(telegram_id: int, year: int) -> tuple[dict, Decimal, 
         if amount <= ZERO:
             continue
         group = bucket["group"]
+        detail = bucket["detail"]
+        # Obligations are identified by both their tax kind and their object.
+        # Income receipts already carry a complete profile name, while a
+        # patent needs to retain its own label inside the income-tax family.
+        if group in {
+            "Налог на имущество", "Транспортный налог", "Земельный налог", "Другой налог",
+        } or str(bucket["key"]).startswith("Патент ·"):
+            detail = bucket["key"]
         groups[group]["total"] += amount
-        groups[group]["details"][bucket["detail"]] += amount
+        groups[group]["details"][detail] += amount
     current_total = sum((item["total"] for item in groups.values()), ZERO)
     return groups, current_total, total_all_time
+
+
+def tax_chart_values_and_colors(groups: dict) -> tuple[dict[str, Decimal], dict[str, str]]:
+    """Flatten every virtual tax destination into its own coloured sector."""
+    values: dict[str, Decimal] = {}
+    colors: dict[str, str] = {}
+    for group in TAX_GROUPS:
+        data = groups.get(group, {})
+        details = data.get("details", {})
+        positive_details = [
+            (str(detail), Decimal(str(amount)))
+            for detail, amount in details.items()
+            if Decimal(str(amount)) > ZERO
+        ]
+        positive_details.sort(key=lambda item: item[0].casefold())
+        palette = TAX_DETAIL_PALETTES[group]
+        used_indexes: set[int] = set()
+        detailed_total = ZERO
+        for detail, amount in positive_details:
+            if group == "Налог на доход" or detail.casefold().startswith(f"{group} · ".casefold()):
+                label = detail
+            elif group == "Другой налог" and " · " in detail:
+                label = detail
+            else:
+                label = f"{group} · {detail}"
+            values[label] = values.get(label, ZERO) + amount
+            index = int.from_bytes(
+                hashlib.sha256(label.casefold().encode("utf-8")).digest()[:2], "big",
+            ) % len(palette)
+            while index in used_indexes and len(used_indexes) < len(palette):
+                index = (index + 1) % len(palette)
+            used_indexes.add(index)
+            colors[label] = palette[index]
+            detailed_total += amount
+        # Preserve old or incomplete records that have a group total but no
+        # usable object breakdown; otherwise money could disappear from chart.
+        remainder = max(ZERO, Decimal(str(data.get("total", ZERO))) - detailed_total)
+        if remainder > ZERO:
+            values[group] = values.get(group, ZERO) + remainder
+            colors[group] = TAX_COLORS[group]
+    return values, colors
 
 
 def apply_planned_tax_allocation(telegram_id: int, allocator, amount: Decimal) -> None:
@@ -706,8 +792,11 @@ def reconcile_tax_obligation_balances(
 def make_pie_chart(groups: dict) -> bytes | None:
     if Image is None:
         return None
-    return make_chart({name: data["total"] for name, data in groups.items()},
-                      "НАЛОГИ", "Фактически отложено за год", TAX_COLORS)
+    values, colors = tax_chart_values_and_colors(groups)
+    return make_chart(
+        values, "НАЛОГИ", "Фактически отложено за год", colors,
+        preserve_order=True,
+    )
 
 
 def report_text(
@@ -732,7 +821,7 @@ def tax_obligations_overview(obligations: list[dict]) -> str:
     lines = ["<b>ДОБАВЛЕННЫЕ НАЛОГИ</b>", ""]
     for item in obligations:
         lines.append(
-            f"• {escape(item['tax_type'])} • {escape(item['object_name'])}"
+            f"• {escape(item['tax_type'])} · {escape(item['object_name'])}"
         )
     return "\n".join(lines)
 
@@ -868,6 +957,12 @@ def tax_completion_navigation(done_callback: str) -> list[tuple[str, str]]:
     ]
 
 
+def tax_goal_navigation(data: dict, default_back: str = "taxes:add") -> list[tuple[str, str]]:
+    """Return to the income-tax parent when a patent was opened from there."""
+    back = "taxes:income" if data.get("tax_goal_return") == "taxes:income" else default_back
+    return tax_navigation(back)
+
+
 async def show_taxes(message: Message, telegram_id: int, detailed: bool = False) -> None:
     allocator = db.load_allocator(telegram_id)
     if allocator is None:
@@ -902,15 +997,96 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
     rows.append([("ℹ️ Как это работает", "taxes:help")])
     rows.append([("← Главное меню", "taxes:back")])
 
-    tax_values = {name: data["total"] for name, data in groups.items() if data["total"] > ZERO}
+    tax_values, chart_colors = tax_chart_values_and_colors(groups)
     await send_chart_report(
         message, tax_values,
         "НАЛОГИ", text, reply_markup=keyboard(rows),
-        subtitle="Сейчас отложено на налоговом счёте", colors=TAX_COLORS,
+        subtitle="Доходные налоги разделены по профилям", colors=chart_colors,
+        preserve_order=True,
         center_amount=annual_total,
         center_label="Отложено",
         center_suffix="₽ на налоги",
     )
+
+
+async def show_income_tax_profile_menu(message: Message, telegram_id: int | None = None) -> None:
+    """Income-tax setup: profiles reserve a share of every income receipt."""
+    allocator = db.load_allocator(telegram_id) if telegram_id is not None else None
+    profiles = list(getattr(getattr(allocator, "settings", None), "income_tax_profiles", {}))
+    added = (
+        "\n\n<b>Уже добавлены:</b>\n" + "\n".join(f"• {escape(name)}" for name in profiles)
+        if profiles else ""
+    )
+    await message.answer(
+        "<b>НАЛОГ НА ДОХОД</b>\n\n"
+        "Выберите, для какого дохода добавить профиль. Процент будет "
+        "резервироваться с каждого отмеченного поступления."
+        + added,
+        reply_markup=keyboard([
+            [("Самозанятость (НПД)", "taxincome:self_employed")],
+            [("ИП на УСН «Доходы»", "taxincome:subject:ip")],
+            [("ИП на ПСН (патент)", "taxincome:patent")],
+            [("✓ Готово", "menu:taxes")],
+            tax_navigation("taxes:add"),
+        ]),
+    )
+
+
+async def show_self_employed_rate_menu(message: Message) -> None:
+    await message.answer(
+        "<b>САМОЗАНЯТОСТЬ (НПД)</b>\n\n"
+        "Выберите ставку для нового профиля. Обычные ставки: 4% с доходов "
+        "от физиков и 6% от юриков. Пока действует налоговый бонус, ставки "
+        "снижаются до 3% и 4%. Аллокатор не знает остаток бонуса — после его "
+        "исчерпания выберите обычную ставку.",
+        reply_markup=keyboard([
+            [("Физики · 4%", "taxincome:npd:physical:4"), ("Физики · 3%", "taxincome:npd:physical:3")],
+            [("Юрики · 6%", "taxincome:npd:business:6"), ("Юрики · 4%", "taxincome:npd:business:4")],
+            [("Своя ставка", "taxincome:subject:self_employed")],
+            [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")],
+        ]),
+    )
+
+
+async def show_ip_usn_rate_menu(message: Message) -> None:
+    await message.answer(
+        "<b>ИП НА УСН «ДОХОДЫ»</b>\n\n"
+        "Выберите, сколько откладывать с каждого поступления. Базовый вариант — 6%; "
+        "если у вас действует другая ставка, укажите её вручную.",
+        reply_markup=keyboard([
+            [("6%", "taxincome:usn:6"), ("Своя ставка", "taxincome:usn:custom")],
+            [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")],
+        ]),
+    )
+
+
+async def save_income_tax_profile(
+    telegram_id: int,
+    subject: str,
+    mode: str,
+    rate: Decimal,
+) -> tuple[str, bool]:
+    """Atomically add one selectable income-tax profile."""
+    from settings_editor import tax_profile_name
+    name = tax_profile_name(subject, mode, rate)
+    lock = _PROFILE_SAVE_LOCKS.setdefault(telegram_id, asyncio.Lock())
+    async with lock:
+        allocator = db.load_allocator(telegram_id)
+        if allocator is None:
+            raise ValueError("Сначала создайте финансовый профиль командой /start.")
+        if name in allocator.settings.income_type_tax_rates:
+            return name, False
+        allocator.settings.income_type_tax_rates[name] = rate
+        allocator.settings.ensure_income_type_id(name)
+        allocator.settings.income_tax_profiles[name] = {
+            "subject": subject, "mode": mode, "rate": str(rate),
+        }
+        allocator.settings.taxable_income_types = [
+            item for item, value in allocator.settings.income_type_tax_rates.items()
+            if value > ZERO
+        ]
+        db.save_allocator(telegram_id, allocator)
+    return name, True
 
 
 @router.callback_query(F.data == "taxes:help")
@@ -938,7 +1114,8 @@ async def taxes_help(callback: CallbackQuery):
         "• Налоги на имущество, транспорт и землю нужно оплатить "
         f"до 1 декабря {due_year}.\n"
         "• Налог на доход платите по графику своего налогового режима "
-        "(Самозанятый, ИП-УСН, Патент и т.п.).\n\n"
+        "(самозанятость, ИП на УСН «Доходы» или ИП на ПСН). После оплаты "
+        "выберите сохранённый доходный профиль, чтобы уменьшился именно его сектор.\n\n"
         "<b>➤ Повторяем</b>\n"
         "После оплаты нажмите\n"
         "Налог оплачен\n"
@@ -1143,13 +1320,33 @@ async def tax_payment_start(callback: CallbackQuery, state: FSMContext):
         if db.tax_obligation_paid_amount(callback.from_user.id, item["id"])
         < item["target_amount"]
     ]
+    income_by_key: dict[str, dict[str, str | Decimal]] = {}
+    buckets, _ = _tax_ledger(callback.from_user.id)
+    for bucket in buckets.values():
+        amount = max(ZERO, Decimal(str(bucket["amount"])))
+        if bucket["group"] != "Налог на доход" or amount <= ZERO:
+            continue
+        item = income_by_key.setdefault(
+            str(bucket["key"]),
+            {"key": str(bucket["key"]), "label": str(bucket["detail"]), "amount": ZERO},
+        )
+        item["amount"] = Decimal(str(item["amount"])) + amount
+    income_profiles = [
+        {"key": item["key"], "label": item["label"], "amount": str(item["amount"])}
+        for item in income_by_key.values()
+    ]
+    await state.update_data(tax_payment_income_profiles=income_profiles)
     rows = [
+        [(f"{item['label']} · {money(Decimal(str(item['amount'])))}", f"taxpayment:income:{index}")]
+        for index, item in enumerate(income_profiles)
+    ]
+    rows.extend([
         [(
             f"{item['tax_type']} · {item['object_name']}",
             f"taxpayment:obligation:{item['id']}",
         )]
         for item in obligations
-    ]
+    ])
     rows.extend([
         [("Другой налог", "taxpayment:other")],
         tax_navigation("menu:taxes"),
@@ -1158,6 +1355,37 @@ async def tax_payment_start(callback: CallbackQuery, state: FSMContext):
         "<b>КАКОЙ НАЛОГ ВЫ ОПЛАТИЛИ?</b>",
         reply_markup=keyboard(rows),
     )
+
+
+@router.callback_query(F.data.regexp(r"^taxpayment:income:\d+$"))
+async def tax_payment_income_profile(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    profiles = data.get("tax_payment_income_profiles") or []
+    try:
+        item = profiles[int(callback.data.rsplit(":", 1)[1])]
+        amount = Decimal(str(item["amount"]))
+    except (IndexError, KeyError, TypeError, ValueError):
+        await callback.message.answer(
+            "Этот список уже неактуален. Выберите оплаченный налог ещё раз.",
+            reply_markup=keyboard([tax_navigation("taxes:payment")]),
+        )
+        return
+    if amount <= ZERO:
+        await callback.message.answer(
+            "По этому профилю уже нет накопленной суммы.",
+            reply_markup=keyboard([tax_navigation("taxes:payment")]),
+        )
+        return
+    await state.update_data(
+        tax_payment_name=str(item["key"]),
+        tax_payment_obligation_id=None,
+        tax_payment_type="Налог на доход",
+        tax_payment_object=str(item["label"]),
+        tax_payment_amount=str(amount),
+        tax_payment_adjust_target=False,
+    )
+    await show_tax_payment_review(callback.message, state)
 
 
 @router.callback_query(F.data == "taxpayment:other")
@@ -1771,14 +1999,14 @@ async def tax_obligation_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(TaxStates.obligation_type)
     await callback.message.answer(
-        "<b>КАКОЙ НАЛОГ НУЖНО НАКОПИТЬ?</b>",
+        "<b>ВЫБЕРИТЕ НАЛОГ</b>",
         reply_markup=keyboard([
+            [("Налог на доход", "taxgoal:type:income")],
             [("Налог на имущество", "taxgoal:type:property")],
             [("Транспортный налог", "taxgoal:type:transport")],
             [("Земельный налог", "taxgoal:type:land")],
-            [("Патент", "taxgoal:type:patent")],
             [("Другой налог", "taxgoal:type:other")],
-            tax_navigation("menu:taxes"),
+            [("← Главное меню", "taxes:back"), ("← К налогам", "menu:taxes")],
         ]),
     )
 
@@ -1787,6 +2015,9 @@ async def tax_obligation_start(callback: CallbackQuery, state: FSMContext):
 async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     code = callback.data.rsplit(":", 1)[1]
+    if code == "income":
+        await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+        return
     labels = {
         "property": "Налог на имущество",
         "transport": "Транспортный налог",
@@ -1811,9 +2042,9 @@ async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
         )
     else:
         examples = {
-            "property": "Квартира или Дача",
-            "transport": "Автомобиль",
-            "land": "Дача или Земельный участок",
+            "property": "Квартира, дом или гараж",
+            "transport": "Автомобиль или мотоцикл",
+            "land": "Дачный или другой земельный участок",
             "other": "Страховые взносы или другой понятный вам платёж",
         }
         prompt = (
@@ -1827,19 +2058,105 @@ async def tax_obligation_type(callback: CallbackQuery, state: FSMContext):
     )
 
 
+@router.callback_query(F.data.startswith("taxincome:"))
+async def income_tax_profile_choice(callback: CallbackQuery, state: FSMContext):
+    """Route the compact Taxes-menu choice into the shared profile builder."""
+    await callback.answer()
+    parts = callback.data.split(":")
+    if len(parts) == 2 and parts[1] == "self_employed":
+        await show_self_employed_rate_menu(callback.message)
+        return
+    if len(parts) == 3 and parts[1] == "usn" and parts[2] == "6":
+        try:
+            profile_name, created = await save_income_tax_profile(
+                callback.from_user.id, "ИП", "УСН «Доходы»", Decimal("6"),
+            )
+        except ValueError as error:
+            await callback.message.answer(escape(str(error)))
+            return
+        await callback.message.answer(
+            f"{'Добавлен профиль' if created else 'Такой профиль уже добавлен'} "
+            f"<b>{escape(profile_name)}</b>."
+        )
+        await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+        return
+    if len(parts) == 3 and parts[1] == "usn" and parts[2] == "custom":
+        from settings_editor import EditSettingsStates, tax_profile_navigation
+        await state.update_data(
+            income_type_action="add_profile",
+            income_profile_return="taxes:income",
+            income_tax_profile_subject="ИП",
+            income_tax_profile_mode="УСН «Доходы»",
+        )
+        await state.set_state(EditSettingsStates.income_type_rate)
+        data = await state.get_data()
+        await callback.message.answer(
+            "<b>ИП НА УСН «ДОХОДЫ» · СВОЯ СТАВКА</b>\n\n"
+            "Введите процент, который нужно откладывать с каждого поступления.",
+            reply_markup=keyboard([tax_profile_navigation(data)]),
+        )
+        return
+    if len(parts) == 4 and parts[1] == "npd":
+        client = "Физики" if parts[2] == "physical" else "Юрики"
+        rate = Decimal(parts[3])
+        try:
+            profile_name, created = await save_income_tax_profile(
+                callback.from_user.id, "Самозанятость", client, rate,
+            )
+        except ValueError as error:
+            await callback.message.answer(escape(str(error)))
+            return
+        await callback.message.answer(
+            f"{'Добавлен профиль' if created else 'Такой профиль уже добавлен'} "
+            f"<b>{escape(profile_name)}</b>."
+        )
+        await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+        return
+    code = parts[-1]
+    if code == "patent":
+        await state.set_state(TaxStates.obligation_name)
+        await state.update_data(tax_goal_type="Патент", tax_goal_return="taxes:income")
+        await callback.message.answer(
+            "<b>ИП НА ПСН (ПАТЕНТ)</b>\n\n"
+            "Введите название, по которому вы узнаете этот патент.\n\n"
+            "Например: <b>Консультации — 1-й платёж</b>.",
+            reply_markup=keyboard([tax_navigation("taxes:income")]),
+        )
+        return
+    if code == "ip":
+        await show_ip_usn_rate_menu(callback.message)
+        return
+    if code not in {"self_employed"}:
+        await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+        return
+    from settings_editor import start_income_tax_profile
+    await start_income_tax_profile(
+        callback.message, state,
+        return_to="taxes:income", subject_key=code,
+    )
+
+
+@router.callback_query(F.data == "taxes:income")
+async def income_tax_menu_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await state.set_state(TaxStates.obligation_type)
+    await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+
+
 @router.message(TaxStates.obligation_name, F.text & ~F.text.startswith("/"))
 async def tax_obligation_name(message: Message, state: FSMContext):
+    data = await state.get_data()
     name = parse_tax_object_name(message.text)
     if name is None:
         await message.answer(
             "Здесь нужно название объекта или обязательства, а не сумма.\n\n"
             "Например: <b>Дача</b>, <b>Автомобиль</b>, <b>Квартира</b> "
             "или <b>Патент № 1</b>.",
-            reply_markup=keyboard([tax_navigation("taxes:add")]),
+            reply_markup=keyboard([tax_goal_navigation(data)]),
         )
         return
     await state.update_data(tax_goal_name=name)
-    data = await state.get_data()
     if data.get("tax_goal_type") in ANNUAL_PROPERTY_TAXES:
         due = annual_tax_due_date()
         months = tax_months_remaining(data["tax_goal_type"], due, moscow_today())
@@ -1880,7 +2197,7 @@ async def tax_obligation_name(message: Message, state: FSMContext):
         )
     await message.answer(
         due_prompt,
-        reply_markup=keyboard([tax_navigation("taxes:add")]),
+        reply_markup=keyboard([tax_goal_navigation(data)]),
     )
 
 
@@ -1941,15 +2258,15 @@ def parse_amount(text: str | None) -> Decimal | None:
 
 @router.message(TaxStates.obligation_amount, F.text & ~F.text.startswith("/"))
 async def tax_obligation_amount(message: Message, state: FSMContext):
+    data = await state.get_data()
     amount = parse_amount(message.text)
     if amount is None or amount <= ZERO:
         await message.answer(
             "Введите положительную сумму.",
-            reply_markup=keyboard([tax_navigation("taxes:add")]),
+            reply_markup=keyboard([tax_goal_navigation(data)]),
         )
         return
     await state.update_data(tax_goal_amount=str(amount))
-    data = await state.get_data()
     await state.update_data(tax_goal_saved="0")
     await save_tax_obligation(
         message,
@@ -1983,22 +2300,22 @@ async def tax_obligation_saved(message: Message, state: FSMContext):
 
 @router.message(TaxStates.obligation_due_date, F.text & ~F.text.startswith("/"))
 async def tax_obligation_due_date(message: Message, state: FSMContext):
+    data = await state.get_data()
     try:
         due = date.fromisoformat("-".join(reversed((message.text or "").strip().split("."))))
     except ValueError:
         example = (moscow_today() + timedelta(days=30)).strftime("%d.%m.%Y")
         await message.answer(
             f"Введите дату в формате ДД.ММ.ГГГГ. Например: <code>{example}</code>",
-            reply_markup=keyboard([tax_navigation("taxes:add")]),
+            reply_markup=keyboard([tax_goal_navigation(data)]),
         )
         return
     if due <= moscow_today():
         await message.answer(
             "Дата должна быть позже сегодняшнего дня.",
-            reply_markup=keyboard([tax_navigation("taxes:add")]),
+            reply_markup=keyboard([tax_goal_navigation(data)]),
         )
         return
-    data = await state.get_data()
     months = tax_months_remaining(data["tax_goal_type"], due, moscow_today())
     await state.update_data(
         tax_goal_due_date=due.isoformat(),
@@ -2009,7 +2326,7 @@ async def tax_obligation_due_date(message: Message, state: FSMContext):
         "<b>СКОЛЬКО НУЖНО ОПЛАТИТЬ?</b>\n\n"
         "Введите полную сумму этого платежа.\n\n"
         "——————\n<b>→ Введите сумму.</b>",
-        reply_markup=keyboard([tax_navigation("taxes:add")]),
+        reply_markup=keyboard([tax_goal_navigation(data)]),
     )
 
 
@@ -2072,15 +2389,29 @@ async def save_tax_obligation(
     )
     if duplicate is not None:
         await state.clear()
-        await message.answer(
-            f"Налог <b>{escape(tax_type)} · {escape(object_name)}</b> уже есть. "
-            "Измените существующий налог или внесите сумму из уведомления ФНС — "
-            "второй одинаковый план создавать не нужно.",
-            reply_markup=keyboard([
+        if tax_type == "Патент":
+            duplicate_text = (
+                f"Платёж <b>{escape(tax_type)} · {escape(object_name)}</b> уже есть. "
+                "Измените существующий платёж или задайте новому патенту другое понятное название."
+            )
+            duplicate_rows = [
+                [("✎ Изменить налоги", "taxes:edit")],
+                tax_navigation("taxes:income"),
+            ]
+        else:
+            duplicate_text = (
+                f"Налог <b>{escape(tax_type)} · {escape(object_name)}</b> уже есть. "
+                "Измените существующий налог или внесите сумму из уведомления ФНС — "
+                "второй одинаковый план создавать не нужно."
+            )
+            duplicate_rows = [
                 [("✎ Изменить налоги", "taxes:edit")],
                 [("Получено уведомление ФНС", "taxes:notice")],
                 tax_navigation("menu:taxes"),
-            ]),
+            ]
+        await message.answer(
+            duplicate_text,
+            reply_markup=keyboard(duplicate_rows),
         )
         return
     saved, opening_amount = new_tax_plan_funding(
@@ -2113,7 +2444,11 @@ async def save_tax_obligation(
         tax_obligation_card_text(
             item, saved, allocator, show_changes=True,
         ),
-        reply_markup=keyboard([tax_completion_navigation("menu:taxes")]),
+        reply_markup=keyboard([
+            tax_completion_navigation(
+                "taxes:income" if data.get("tax_goal_return") == "taxes:income" else "menu:taxes"
+            )
+        ]),
     )
 
 

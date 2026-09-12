@@ -2003,6 +2003,8 @@ async def send_distribution_report(
     )
 
     sustainable_remaining = allocator.sustainable_life_remaining
+    pillow_limit = money_plain(settings.force_majeure_limit)
+    stabilizer_limit = money_plain(settings.stabilizer_full_limit)
 
     lines.extend([
         "————————————",
@@ -2011,8 +2013,14 @@ async def send_distribution_report(
         f"➤ До <b>Устойчив. жизни</b> — {money_plain(sustainable_remaining)}",
         "",
         *([f"🏦 <b>Фонд Зарплаты</b> — {money_plain(state.intercontract_reserve)}"] if settings.income_rhythm == "cyclic" else []),
-        f"🛡️ <b>Подушка</b> — {money_plain(state.pillow_balance)}",
-        *([f"🛟 <b>Стабилизатор</b> — {money_plain(state.stabilizer_balance)}"] if settings.needs_stabilizer else []),
+        f"🛡️ <b>Подушка</b> — {money_plain(state.pillow_balance)} / {pillow_limit}",
+        *(
+            [
+                "🛟 <b>Стабилизатор</b> — "
+                f"{money_plain(state.stabilizer_balance)} / {stabilizer_limit}"
+            ]
+            if settings.needs_stabilizer else []
+        ),
     ])
 
     main_sections = ["\n".join(lines).strip()]

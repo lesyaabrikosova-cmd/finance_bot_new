@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 _DATA = tempfile.TemporaryDirectory()
 os.environ['ALLOCATOR_DATA_DIR'] = _DATA.name
 from charts import make_chart, chart_items, send_chart_report
-from taxes import collect_tax_statistics, TAX_COLORS
+from taxes import collect_tax_statistics, TAX_COLORS, tax_chart_values_and_colors
 from financial_engine import FinancialAllocator, UserSettings
 from PIL import Image
 
@@ -31,6 +31,34 @@ class ReportCharts(unittest.TestCase):
         colors = {rgb for count, rgb in Image.open(BytesIO(data)).getcolors(2_000_000)}
         self.assertIn((118, 86, 216), colors)
         self.assertIn((226, 185, 59), colors)
+
+    def test_income_tax_profiles_get_separate_purple_sectors(self):
+        groups = {
+            'Налог на доход': {
+                'total': D('700'),
+                'details': {'ИП · УСН «Доходы» · 6%': D('600'), 'Самозанятость · Физики · 3%': D('100')},
+            },
+            'Налог на имущество': {'total': D('50'), 'details': {}},
+        }
+        values, colors = tax_chart_values_and_colors(groups)
+        self.assertEqual(values['ИП · УСН «Доходы» · 6%'], D('600'))
+        self.assertEqual(values['Самозанятость · Физики · 3%'], D('100'))
+        self.assertNotEqual(colors['ИП · УСН «Доходы» · 6%'], colors['Самозанятость · Физики · 3%'])
+        self.assertEqual(colors['Налог на имущество'], TAX_COLORS['Налог на имущество'])
+
+    def test_property_tax_objects_get_separate_yellow_sectors(self):
+        groups = {
+            'Налог на имущество': {
+                'total': D('700'),
+                'details': {'Квартира': D('400'), 'Дом': D('300')},
+            },
+        }
+        values, colors = tax_chart_values_and_colors(groups)
+        apartment = 'Налог на имущество · Квартира'
+        house = 'Налог на имущество · Дом'
+        self.assertEqual(values[apartment], D('400'))
+        self.assertEqual(values[house], D('300'))
+        self.assertNotEqual(colors[apartment], colors[house])
 
     def test_empty_and_many_categories(self):
         self.assertIsNone(make_chart({'Нет': 0}, 'БАЛАНСЫ'))

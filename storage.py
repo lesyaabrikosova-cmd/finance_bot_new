@@ -152,13 +152,14 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 11,
+        "version": 12,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
         },
         "income_type_ids": dict(settings.income_type_ids),
         "income_type_labels": dict(settings.income_type_labels),
+        "income_tax_profiles": dict(settings.income_tax_profiles),
         "rhythm": settings.income_rhythm,
         "profile_type": normalize_profile_id(
             settings.profile_type,
@@ -215,7 +216,7 @@ def serialize_income_types(settings: UserSettings) -> str:
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -227,7 +228,7 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
@@ -264,6 +265,15 @@ def deserialize_income_rhythm(value) -> dict:
                 str(uid): str(name)
                 for uid, name in raw.get("income_type_labels", {}).items()
                 if str(uid).strip() and str(name).strip()
+            },
+            "income_tax_profiles": {
+                str(name): {
+                    str(field): str(field_value)
+                    for field, field_value in profile.items()
+                    if str(field).strip() and str(field_value).strip()
+                }
+                for name, profile in raw.get("income_tax_profiles", {}).items()
+                if str(name).strip() and isinstance(profile, dict)
             },
             "historical_gifts_monthly": max(
                 Decimal("0"), string_to_decimal(raw.get("historical_gifts_monthly", "0"))

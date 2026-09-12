@@ -144,7 +144,7 @@ class TaxFeatureTests(unittest.TestCase):
             if item["id"] == obligation_id
         )
         self.assertIn(
-            "• Налог на имущество • Квартира",
+            "• Налог на имущество · Квартира",
             tax_obligations_overview([obligation]),
         )
 
