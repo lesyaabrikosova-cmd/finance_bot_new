@@ -1059,7 +1059,14 @@ async def show_income_types_settings(
         rule = allocator.settings.income_type_tax_profiles.get(name)
         label = rule or (f"налог {rate}%" if rate > 0 else "без налога")
         lines.append(f"• {escape(name)} · {escape(label)}")
-    rows = [[(name, f"incomesettings:view:{index}")] for index, name in enumerate(rates)]
+    rate_names = list(rates)
+    rows = [
+        [
+            (name, f"incomesettings:view:{index}")
+            for index, name in enumerate(rate_names[start:start + 2], start)
+        ]
+        for start in range(0, len(rate_names), 2)
+    ]
     rows.append([("＋ Добавить тип дохода", "incomesettings:add_custom")])
     rows.append([("＋ Настроить патент (ПСН)", "taxes:patent:start")])
     rows.append([("← Главное меню", "menu:back"), ("← Назад", return_to)])

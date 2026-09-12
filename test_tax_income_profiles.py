@@ -16,6 +16,7 @@ from settings_editor import (
     income_tax_rule_select_patent,
     income_type_add_named_rule,
     income_type_add_rate,
+    show_income_types_settings,
 )
 from taxes import (
     LAND_TAX_BROWNS,
@@ -75,6 +76,26 @@ class MemoryState:
 
 
 class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
+    async def test_income_types_are_grouped_by_two_buttons_per_row(self):
+        current = allocator()
+        current.settings.income_type_tax_rates = {
+            "Зарплата": Decimal("6"),
+            "Халтура": Decimal("0"),
+            "Частник": Decimal("0"),
+            "Подарки": Decimal("0"),
+            "Сервизория": Decimal("0"),
+        }
+        message = SimpleNamespace(answer=AsyncMock())
+        with patch("settings_editor.db") as db:
+            db.load_allocator.return_value = current
+            await show_income_types_settings(message, 42)
+
+        self.assertEqual(button_rows(message)[:3], [
+            ["Зарплата", "Халтура"],
+            ["Частник", "Подарки"],
+            ["Сервизория"],
+        ])
+
     async def test_one_off_custom_usn_rate_keeps_usn_label(self):
         current = allocator()
         current.settings.income_type_tax_rates = {"Зарплата": Decimal("0")}
