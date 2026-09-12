@@ -57,6 +57,10 @@ SELF_EMPLOYED_CLIENTS = ("Физики", "Юрики")
 
 def tax_profile_name(subject: str, mode: str, rate: Decimal) -> str:
     """One readable identity for selection, history and the tax-chart legend."""
+    if subject == "Самозанятость":
+        subject, mode = "НПД", "ФЛ" if mode == "Физики" else "ЮЛ"
+    elif subject == "ИП" and mode == "УСН «Доходы»":
+        mode = "УСН"
     return f"{subject} · {mode} · {fmt_money(rate)}%"
 
 
@@ -1017,9 +1021,19 @@ async def show_income_types_settings(message: Message, telegram_id: int):
     allocator = db.load_allocator(telegram_id)
     rates = allocator.settings.income_type_tax_rates
     lines = [
-        f"• {escape(name)} — " + (f"налог {rate}%" if rate > 0 else "без налога")
+        f"• {escape(name)} — " + (
+            escape(allocator.settings.income_type_tax_profiles.get(name, f"налог {rate}%"))
+            if rate > 0 else "без налога"
+        )
         for name, rate in rates.items()
     ]
+    standalone_profiles = [
+        name for name in allocator.settings.income_tax_profiles
+        if name not in rates
+    ]
+    if standalone_profiles:
+        lines.extend(["", "<b>Добавленные налоговые правила</b>"])
+        lines.extend(f"• {escape(name)}" for name in standalone_profiles)
     rows = [[(name, f"incomesettings:view:{index}")] for index, name in enumerate(rates)]
     rows.append([("+ Налоговый профиль", "incomesettings:add")])
     rows.append([("+ Свой тип дохода", "incomesettings:add_custom")])
@@ -1142,7 +1156,7 @@ async def income_type_add_name(message: Message, state: FSMContext):
     if name.casefold() in {item.casefold() for item in allocator.settings.income_type_tax_rates}:
         await message.answer("Такой тип дохода уже существует.")
         return
-    await state.update_data(income_type_draft_name=name)
+    await state.update_data(income_type_draft_name=name, income_type_draft_profile=None)
     await message.answer(
         f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
         reply_markup=keyboard([
@@ -1156,11 +1170,50 @@ async def income_type_add_name(message: Message, state: FSMContext):
 async def income_type_add_tax(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if callback.data.endswith(":no"):
-        await state.update_data(income_type_draft_rate="0")
+        await state.update_data(income_type_draft_rate="0", income_type_draft_profile=None)
         await show_income_type_confirmation(callback.message, state)
         return
     await state.set_state(EditSettingsStates.income_type_rate)
-    await callback.message.answer("<b>СТАВКА НАЛОГА</b>\n\n—————\n<b>→ Введите число без знака %.</b>")
+    await callback.message.answer(
+        "<b>ВЫБЕРИТЕ НАЛОГОВОЕ ПРАВИЛО</b>\n\n"
+        "НПД — налог на профессиональный доход; ФЛ — физлица, ЮЛ — юрлица.",
+        reply_markup=keyboard([
+            [("НПД · ФЛ · 4%", "incomesettings:newrule:npd_fl_4"), ("НПД · ФЛ · 3%", "incomesettings:newrule:npd_fl_3")],
+            [("НПД · ЮЛ · 6%", "incomesettings:newrule:npd_ul_6"), ("НПД · ЮЛ · 4%", "incomesettings:newrule:npd_ul_4")],
+            [("ИП · УСН · 6%", "incomesettings:newrule:ip_usn_6")],
+            [("Своя ставка", "incomesettings:newrule:custom")],
+            [("Отмена", "incomesettings:cancel")],
+        ]),
+    )
+
+
+def compact_tax_rule_choice(choice: str) -> tuple[Decimal, str] | None:
+    return {
+        "npd_fl_4": (Decimal("4"), "НПД · ФЛ · 4%"),
+        "npd_fl_3": (Decimal("3"), "НПД · ФЛ · 3%"),
+        "npd_ul_6": (Decimal("6"), "НПД · ЮЛ · 6%"),
+        "npd_ul_4": (Decimal("4"), "НПД · ЮЛ · 4%"),
+        "ip_usn_6": (Decimal("6"), "ИП · УСН · 6%"),
+    }.get(choice)
+
+
+@router.callback_query(EditSettingsStates.income_type_rate, F.data.startswith("incomesettings:newrule:"))
+async def income_type_add_named_rule(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    choice = callback.data.rsplit(":", 1)[1]
+    selected = compact_tax_rule_choice(choice)
+    if selected is None:
+        await state.update_data(income_type_draft_profile=None)
+        await callback.message.answer(
+            "<b>СВОЯ СТАВКА</b>\n\nВведите число без знака %.",
+            reply_markup=keyboard([[('Отмена', 'incomesettings:cancel')]]),
+        )
+        return
+    rate, profile = selected
+    await state.update_data(
+        income_type_draft_rate=str(rate), income_type_draft_profile=profile,
+    )
+    await show_income_type_confirmation(callback.message, state)
 
 
 @router.message(EditSettingsStates.income_type_rate)
@@ -1197,11 +1250,13 @@ async def income_type_add_rate(message: Message, state: FSMContext):
             await show_income_tax_profile_menu(message, message.from_user.id)
             return
         allocator = db.load_allocator(message.from_user.id)
-        if name in allocator.settings.income_type_tax_rates:
+        if name in allocator.settings.income_tax_profiles:
             await message.answer("Такой налоговый профиль уже есть. Выберите его в списке.")
             return
         await state.update_data(income_type_draft_name=name)
     await state.update_data(income_type_draft_rate=str(rate))
+    if data.get("income_type_action") != "add_profile":
+        await state.update_data(income_type_draft_profile=None)
     await show_income_type_confirmation(message, state)
 
 
@@ -1217,7 +1272,10 @@ async def show_income_type_confirmation(message: Message, state: FSMContext):
     await message.answer(
         "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>\n\n"
         f"Название — <b>{escape(name)}</b>\n"
-        + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
+        + (
+            f"Налог — <b>{escape(str(data.get('income_type_draft_profile') or f'{rate}%'))}</b>"
+            if rate > 0 else "Налог — <b>не резервируется</b>"
+        ),
         reply_markup=keyboard([
             [("Исправить", fix_callback), ("✔️ Сохранить", "incomesettings:save")],
             [("Отмена", "incomesettings:cancel")],
@@ -1234,6 +1292,20 @@ async def income_type_save(callback: CallbackQuery, state: FSMContext):
     action = data.get("income_type_action", "add")
     name = data["income_type_draft_name"]
     rate = Decimal(data["income_type_draft_rate"])
+    if action == "add_profile":
+        allocator.settings.income_tax_profiles[name] = {
+            "subject": str(data["income_tax_profile_subject"]),
+            "mode": str(data["income_tax_profile_mode"]),
+            "rate": str(rate),
+        }
+        db.save_allocator(callback.from_user.id, allocator)
+        await state.clear()
+        if data.get("income_profile_return") == "taxes:income":
+            from taxes import show_income_tax_profile_menu
+            await show_income_tax_profile_menu(callback.message, callback.from_user.id)
+        else:
+            await show_income_types_settings(callback.message, callback.from_user.id)
+        return
     if action == "rename":
         original = data["income_type_edit_original"]
         identifier = allocator.settings.ensure_income_type_id(original)
@@ -1242,6 +1314,9 @@ async def income_type_save(callback: CallbackQuery, state: FSMContext):
         allocator.settings.income_type_ids.pop(original, None)
         allocator.settings.income_type_ids[name] = identifier
         allocator.settings.income_type_labels[identifier] = name
+        bound_profile = allocator.settings.income_type_tax_profiles.pop(original, None)
+        if bound_profile:
+            allocator.settings.income_type_tax_profiles[name] = bound_profile
         profile = allocator.settings.income_tax_profiles.pop(original, None)
         if profile is not None:
             allocator.settings.income_tax_profiles[name] = {
@@ -1250,12 +1325,11 @@ async def income_type_save(callback: CallbackQuery, state: FSMContext):
     else:
         rates[name] = rate
         allocator.settings.ensure_income_type_id(name)
-        if action == "add_profile":
-            allocator.settings.income_tax_profiles[name] = {
-                "subject": str(data["income_tax_profile_subject"]),
-                "mode": str(data["income_tax_profile_mode"]),
-                "rate": str(rate),
-            }
+        draft_profile = data.get("income_type_draft_profile")
+        if draft_profile:
+            allocator.settings.income_type_tax_profiles[name] = str(draft_profile)
+        if action == "rerate":
+            allocator.settings.income_type_tax_profiles.pop(name, None)
     allocator.settings.taxable_income_types = [
         item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
     ]
@@ -1292,10 +1366,13 @@ async def income_type_view(callback: CallbackQuery, state: FSMContext):
         return
     name = names[index]
     rate = allocator.settings.income_type_tax_rates[name]
+    bound_profile = allocator.settings.income_type_tax_profiles.get(name)
     await state.update_data(income_type_edit_original=name)
     is_profile = name in allocator.settings.income_tax_profiles
     await callback.message.answer(
-        f"<b>{escape(name.upper())}</b>\n\n" + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Без налога"),
+        f"<b>{escape(name.upper())}</b>\n\n" + (
+            f"Налог — <b>{escape(bound_profile or f'{rate}%')}</b>" if rate > 0 else "Без налога"
+        ),
         reply_markup=keyboard([
             *([] if is_profile else [[("Изменить название", "incomesettings:rename")]]),
             *([] if is_profile else [[("Изменить налог", "incomesettings:rerate")]]),
@@ -1337,9 +1414,44 @@ async def income_type_rate_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(EditSettingsStates.income_type_edit_rate)
     await callback.message.answer(
-        "Введите новую ставку от 0 до 100. Ноль означает, что налог автоматически не резервируется.",
-        reply_markup=keyboard([[("Отмена", "incomesettings:cancel")]]),
+        "<b>ИЗМЕНИТЬ НАЛОГ</b>\n\nВыберите правило или укажите свою ставку.",
+        reply_markup=keyboard([
+            [("НПД · ФЛ · 4%", "incomesettings:rerule:npd_fl_4"), ("НПД · ФЛ · 3%", "incomesettings:rerule:npd_fl_3")],
+            [("НПД · ЮЛ · 6%", "incomesettings:rerule:npd_ul_6"), ("НПД · ЮЛ · 4%", "incomesettings:rerule:npd_ul_4")],
+            [("ИП · УСН · 6%", "incomesettings:rerule:ip_usn_6")],
+            [("Своя ставка", "incomesettings:rerule:custom"), ("Без налога", "incomesettings:rerule:none")],
+            [("Отмена", "incomesettings:cancel")],
+        ]),
     )
+
+
+@router.callback_query(EditSettingsStates.income_type_edit_rate, F.data.startswith("incomesettings:rerule:"))
+async def income_type_named_rate_save(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    choice = callback.data.rsplit(":", 1)[1]
+    if choice == "custom":
+        await callback.message.answer(
+            "Введите новую ставку от 0 до 100. Ноль означает отсутствие налога.",
+            reply_markup=keyboard([[('Отмена', 'incomesettings:cancel')]]),
+        )
+        return
+    selected = compact_tax_rule_choice(choice)
+    rate, profile = selected if selected is not None else (Decimal("0"), None)
+    data = await state.get_data()
+    allocator = db.load_allocator(callback.from_user.id)
+    name = data["income_type_edit_original"]
+    allocator.settings.income_type_tax_rates[name] = rate
+    if profile:
+        allocator.settings.income_type_tax_profiles[name] = profile
+    else:
+        allocator.settings.income_type_tax_profiles.pop(name, None)
+    allocator.settings.taxable_income_types = [
+        item for item, item_rate in allocator.settings.income_type_tax_rates.items()
+        if item_rate > 0
+    ]
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_income_types_settings(callback.message, callback.from_user.id)
 
 
 @router.message(EditSettingsStates.income_type_edit_rate)
@@ -1393,6 +1505,7 @@ async def income_type_delete_confirm(callback: CallbackQuery, state: FSMContext)
     original = data["income_type_edit_original"]
     allocator.settings.income_type_tax_rates.pop(original, None)
     allocator.settings.income_type_ids.pop(original, None)
+    allocator.settings.income_type_tax_profiles.pop(original, None)
     allocator.settings.income_tax_profiles.pop(original, None)
     allocator.settings.taxable_income_types = [name for name, rate in allocator.settings.income_type_tax_rates.items() if rate > 0]
     db.save_allocator(callback.from_user.id, allocator)

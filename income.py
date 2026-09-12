@@ -647,7 +647,8 @@ async def custom_income_type(
         return
 
     await state.update_data(
-        income_type=value
+        income_type=value,
+        custom_income_type_profile=None,
     )
 
     await state.set_state(IncomeStates.custom_income_tax_choice)
@@ -673,7 +674,37 @@ async def custom_income_tax_choice(callback: CallbackQuery, state: FSMContext):
     if not await require_current_flow(callback, state):
         return
     await callback.answer()
-    if callback_base(callback.data).endswith(":yes"):
+    choice = callback_base(callback.data).rsplit(":", 1)[1]
+    if choice == "yes":
+        flow_id = await current_flow_id(state)
+        await callback.message.answer(
+            "<b>ВЫБЕРИТЕ НАЛОГОВОЕ ПРАВИЛО</b>\n\n"
+            "НПД — налог на профессиональный доход; ФЛ — физлица, ЮЛ — юрлица. "
+            "ИП — индивидуальный предприниматель, УСН — упрощённая система налогообложения.",
+            reply_markup=keyboard([
+                [("НПД · ФЛ · 4%", flow_callback("newincome:tax:npd_fl_4", flow_id)), ("НПД · ФЛ · 3%", flow_callback("newincome:tax:npd_fl_3", flow_id))],
+                [("НПД · ЮЛ · 6%", flow_callback("newincome:tax:npd_ul_6", flow_id)), ("НПД · ЮЛ · 4%", flow_callback("newincome:tax:npd_ul_4", flow_id))],
+                [("ИП · УСН · 6%", flow_callback("newincome:tax:ip_usn_6", flow_id))],
+                [("Своя ставка", flow_callback("newincome:tax:custom", flow_id)), ("Без налога", flow_callback("newincome:tax:no", flow_id))],
+                [("← Главное меню", "menu:back"), ("← Назад", flow_callback("income:back_tax_choice", flow_id))],
+            ]),
+        )
+        return
+    quick_profiles = {
+        "npd_fl_4": (Decimal("4"), "НПД · ФЛ · 4%"),
+        "npd_fl_3": (Decimal("3"), "НПД · ФЛ · 3%"),
+        "npd_ul_6": (Decimal("6"), "НПД · ЮЛ · 6%"),
+        "npd_ul_4": (Decimal("4"), "НПД · ЮЛ · 4%"),
+        "ip_usn_6": (Decimal("6"), "ИП · УСН · 6%"),
+    }
+    if choice in quick_profiles:
+        rate, profile = quick_profiles[choice]
+        await save_custom_income_type(
+            callback.message, state, callback.from_user.id, rate, profile,
+        )
+        return
+    if choice == "custom":
+        await state.update_data(custom_income_type_profile=None)
         await state.set_state(IncomeStates.custom_income_tax_rate)
         flow_id = await current_flow_id(state)
         await callback.message.answer(
@@ -683,7 +714,7 @@ async def custom_income_tax_choice(callback: CallbackQuery, state: FSMContext):
             reply_markup=await income_navigation(state, "income:back_tax_choice"),
         )
         return
-    await save_custom_income_type(callback.message, state, callback.from_user.id, Decimal("0"))
+    await save_custom_income_type(callback.message, state, callback.from_user.id, Decimal("0"), None)
 
 
 @router.message(IncomeStates.custom_income_tax_rate, F.text & ~F.text.startswith("/"))
@@ -698,16 +729,24 @@ async def custom_income_tax_rate(message: Message, state: FSMContext):
     await save_custom_income_type(message, state, message.from_user.id, rate)
 
 
-async def save_custom_income_type(message: Message, state: FSMContext, telegram_id: int, rate: Decimal):
+async def save_custom_income_type(
+    message: Message, state: FSMContext, telegram_id: int, rate: Decimal,
+    profile: str | None = None,
+):
     data = await state.get_data()
     name = data["income_type"]
-    await state.update_data(custom_income_type_rate=str(rate))
+    await state.update_data(
+        custom_income_type_rate=str(rate), custom_income_type_profile=profile,
+    )
     await state.set_state(IncomeStates.custom_income_confirm)
     flow_id = await current_flow_id(state)
     await message.answer(
         "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>\n\n"
         f"Название — <b>{escape(name)}</b>\n"
-        + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
+        + (
+            f"Налог — <b>{escape(profile or f'{rate}%')}</b>"
+            if rate > 0 else "Налог — <b>не резервируется</b>"
+        ),
         reply_markup=keyboard([
             [
                 ("✎ Исправить", flow_callback("newincome:fix", flow_id)),
@@ -749,6 +788,11 @@ async def commit_custom_income_type(callback: CallbackQuery, state: FSMContext):
     allocator = db.load_allocator(telegram_id)
     if allocator is not None:
         allocator.settings.income_type_tax_rates[name] = rate
+        profile = data.get("custom_income_type_profile")
+        if profile:
+            allocator.settings.income_type_tax_profiles[name] = profile
+        else:
+            allocator.settings.income_type_tax_profiles.pop(name, None)
         allocator.settings.ensure_income_type_id(name)
         allocator.settings.taxable_income_types = [
             item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
@@ -1131,10 +1175,13 @@ async def edit_income_tax(
         "————————————\n"
         "Изменение ниже действует <b>только на это "
         "поступление</b> и не меняет налоговые "
-        "настройки профиля.",
+        "настройки профиля. Патент здесь не выбирается: это отдельный "
+        "плановый платёж, а не процент с поступления.",
         reply_markup=keyboard([
-            [("3%", flow_callback("taxedit:pct:3", flow_id)), ("4%", flow_callback("taxedit:pct:4", flow_id))],
-            [("6%", flow_callback("taxedit:pct:6", flow_id)), ("15%", flow_callback("taxedit:pct:15", flow_id))],
+            [("НПД · ФЛ · 4%", flow_callback("taxedit:npd:physical:4", flow_id)), ("НПД · ФЛ · 3%", flow_callback("taxedit:npd:physical:3", flow_id))],
+            [("НПД · ЮЛ · 6%", flow_callback("taxedit:npd:business:6", flow_id)), ("НПД · ЮЛ · 4%", flow_callback("taxedit:npd:business:4", flow_id))],
+            [("ИП · УСН · 6%", flow_callback("taxedit:usn:6", flow_id))],
+            [("Без налога", flow_callback("taxedit:none", flow_id))],
             [
                 (
                     "Ввести свой %",
@@ -1171,6 +1218,7 @@ async def tax_edit_auto(
         tax_override=None,
         tax_override_label="по настройкам профиля",
         tax_override_percent=None,
+        tax_override_profile=None,
     )
 
     await show_income_confirmation(
@@ -1182,7 +1230,7 @@ async def tax_edit_auto(
 
 @router.callback_query(
     IncomeStates.tax_edit,
-    F.data == "taxedit:none"
+    (F.data == "taxedit:none") | F.data.startswith("taxedit:none|"),
 )
 async def tax_edit_none(
     callback: CallbackQuery,
@@ -1196,6 +1244,7 @@ async def tax_edit_none(
         tax_override="0",
         tax_override_label="НДФЛ платит работодатель — налог не резервируется",
         tax_override_percent="0",
+        tax_override_profile=None,
     )
 
     await show_income_confirmation(
@@ -1249,6 +1298,7 @@ async def tax_edit_fixed_percent(
     await state.update_data(
         tax_override=str(tax),
         tax_override_percent=str(percent),
+        tax_override_profile=None,
         tax_override_label=(
             "самозанятость от физлиц — 4%"
             if percent == Decimal("4")
@@ -1263,6 +1313,36 @@ async def tax_edit_fixed_percent(
         state,
         callback.from_user.id,
     )
+
+
+@router.callback_query(
+    IncomeStates.tax_edit,
+    F.data.startswith("taxedit:npd:") | F.data.startswith("taxedit:usn:"),
+)
+async def tax_edit_profile(callback: CallbackQuery, state: FSMContext):
+    """Apply a named NPD/USN rule to this income only."""
+    if not await require_current_flow(callback, state):
+        return
+    await callback.answer()
+    parts = callback_base(callback.data).split(":")
+    try:
+        if parts[1] == "npd":
+            rate = Decimal(parts[3])
+            profile = f"НПД · {'ФЛ' if parts[2] == 'physical' else 'ЮЛ'} · {rate}%"
+        else:
+            rate = Decimal(parts[2])
+            profile = f"ИП · УСН · {rate}%"
+    except (IndexError, InvalidOperation):
+        await callback.message.answer("Не удалось определить налоговый профиль.")
+        return
+    amount = Decimal((await state.get_data())["income_amount"])
+    await state.update_data(
+        tax_override=str(amount * rate / Decimal("100")),
+        tax_override_percent=str(rate),
+        tax_override_label=profile,
+        tax_override_profile=profile,
+    )
+    await show_income_confirmation(callback.message, state, callback.from_user.id)
 
 
 @router.callback_query(
@@ -1327,6 +1407,7 @@ async def save_custom_tax_percent(
         tax_override=str(tax),
         tax_override_label=f"вручную {percent}%",
         tax_override_percent=str(percent),
+        tax_override_profile=None,
     )
 
     await show_income_confirmation(
@@ -1393,6 +1474,7 @@ async def save_custom_tax_amount(
         tax_override=str(tax),
         tax_override_label="сумма введена вручную",
         tax_override_percent=None,
+        tax_override_profile=None,
     )
 
     await show_income_confirmation(
@@ -1675,6 +1757,16 @@ async def _confirm_income_locked(
                 allocator.settings.protective_stage_c_strategy = original_strategy
             if not result.checks["ok"]:
                 raise _IncomeChecksumError(result.checks["difference"])
+            if allocator.state.operation_log:
+                operation = allocator.state.operation_log[-1]
+                operation["tax_profile"] = (
+                    data.get("tax_override_profile")
+                    or allocator.settings.income_type_tax_profiles.get(income_type)
+                )
+                operation["tax_rate"] = (
+                    data.get("tax_override_percent")
+                    or allocator.settings.income_type_tax_rates.get(income_type, Decimal("0"))
+                )
             apply_planned_tax_allocation(
                 telegram_id,
                 allocator,

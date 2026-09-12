@@ -67,6 +67,7 @@ def make_chart(
     percentages_only=False,
     *,
     preserve_order=False,
+    legend_columns=2,
     center_amount=None,
     center_label='Доход за период',
     center_suffix='₽ до налогов',
@@ -75,8 +76,10 @@ def make_chart(
     items = chart_items(values, preserve_order)
     if not items:
         return None
+    if legend_columns not in {1, 2}:
+        raise ValueError("legend_columns must be 1 or 2")
     total = sum((v for _, v in items), Decimal(0))
-    legend_rows = (len(items) + 1) // 2
+    legend_rows = (len(items) + legend_columns - 1) // legend_columns
     font_dir = Path(__file__).resolve().parent / 'assets/fonts'
     def font(size, bold=False):
         return ImageFont.truetype(str(font_dir / ('PTSans-Bold.ttf' if bold else 'PTSans-Regular.ttf')), size)
@@ -84,12 +87,15 @@ def make_chart(
     measure_image = Image.new('RGB', (1, 1), '#191321')
     measure_draw = ImageDraw.Draw(measure_image)
     legend_lines = [
-        wrap_legend_label(label, 440, lambda value: measure_draw.textlength(value, font=label_font))
+        wrap_legend_label(
+            label, 940 if legend_columns == 1 else 440,
+            lambda value: measure_draw.textlength(value, font=label_font),
+        )
         for label, _ in items
     ]
     row_heights = []
     for row in range(legend_rows):
-        row_indexes = (row, row + legend_rows)
+        row_indexes = tuple(row + column * legend_rows for column in range(legend_columns))
         line_counts = [len(legend_lines[index]) for index in row_indexes if index < len(items)]
         row_heights.append(max(line_counts) * 42 + 63)
     row_tops = []

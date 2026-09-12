@@ -1863,16 +1863,20 @@ async def save_stabilizer_target_text(message: Message, state: FSMContext):
 
 
 async def ask_tax(message: Message, state: FSMContext):
-    await state.update_data(income_type_tax_rates={})
+    await state.update_data(income_type_tax_rates={}, income_type_tax_profiles={})
     await show_income_types_setup(message, state)
 
 
 async def show_income_types_setup(message: Message, state: FSMContext):
     data = await state.get_data()
     rates = data.get("income_type_tax_rates", {})
+    profiles = data.get("income_type_tax_profiles", {})
     await state.set_state(SetupStates.income_types_menu)
     lines = [
-        f"• {escape(name)} — " + (f"налог {rate}%" if Decimal(str(rate)) > 0 else "без налога")
+        f"• {escape(name)} — " + (
+            f"{escape(profiles.get(name, 'налог'))}"
+            if Decimal(str(rate)) > 0 else "без налога"
+        )
         for name, rate in rates.items()
     ]
     rows = [[(name, f"profileincome:view:{index}")] for index, name in enumerate(rates)]
@@ -1912,7 +1916,7 @@ async def profile_income_name(message: Message, state: FSMContext):
     if name.casefold() in {item.casefold() for item in rates}:
         await message.answer("Такой тип дохода уже существует. Введите другое название.")
         return
-    await state.update_data(pending_income_type_name=name)
+    await state.update_data(pending_income_type_name=name, pending_income_type_profile=None)
     await state.set_state(SetupStates.income_type_tax_choice)
     await message.answer(
         f"<b>{escape(name.upper())}</b>\n\nНужно самостоятельно откладывать налог с этого дохода?",
@@ -1926,14 +1930,46 @@ async def profile_income_name(message: Message, state: FSMContext):
 @router.callback_query(SetupStates.income_type_tax_choice, F.data.startswith("profileincome:tax:"))
 async def profile_income_tax_choice(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    if callback.data.endswith(":no"):
+    choice = callback.data.rsplit(":", 1)[1]
+    if choice == "no":
+        await state.update_data(pending_income_type_profile=None)
         await save_profile_income_type(callback.message, state, Decimal("0"))
         return
-    await state.set_state(SetupStates.income_type_rate)
+    quick_rates = {
+        "npd_physical_4": (Decimal("4"), "НПД · ФЛ · 4%"),
+        "npd_physical_3": (Decimal("3"), "НПД · ФЛ · 3%"),
+        "npd_business_6": (Decimal("6"), "НПД · ЮЛ · 6%"),
+        "npd_business_4": (Decimal("4"), "НПД · ЮЛ · 4%"),
+        "usn_6": (Decimal("6"), "ИП · УСН · 6%"),
+    }
+    if choice in quick_rates:
+        rate, profile = quick_rates[choice]
+        await state.update_data(pending_income_type_profile=profile)
+        await save_profile_income_type(callback.message, state, rate)
+        return
+    if choice == "custom":
+        await state.update_data(pending_income_type_profile=None)
+        await state.set_state(SetupStates.income_type_rate)
+        await callback.message.answer(
+            "<b>СВОЯ СТАВКА</b>\n\nВведите число без знака %.\n"
+            "Например: <code>4</code>",
+            reply_markup=keyboard([[("Отмена", "profileincome:back")]]),
+        )
+        return
+    await state.set_state(SetupStates.income_type_tax_choice)
     await callback.message.answer(
-        "<b>СТАВКА НАЛОГА</b>\n\n——————\n"
-        "<b>→ Введите число без знака %.</b>\n"
-        "<b>Например:</b> <code>4</code>"
+        "<b>ВЫБЕРИТЕ НАЛОГОВОЕ ПРАВИЛО</b>\n\n"
+        "НПД — налог на профессиональный доход; ФЛ — физлица, ЮЛ — юрлица. "
+        "ИП — индивидуальный предприниматель, УСН — упрощённая система налогообложения.\n\n"
+        "Патент здесь не выбирается: это отдельный фиксированный платёж, "
+        "а не процент от поступления.",
+        reply_markup=keyboard([
+            [("НПД · ФЛ · 4%", "profileincome:tax:npd_physical_4"), ("НПД · ФЛ · 3%", "profileincome:tax:npd_physical_3")],
+            [("НПД · ЮЛ · 6%", "profileincome:tax:npd_business_6"), ("НПД · ЮЛ · 4%", "profileincome:tax:npd_business_4")],
+            [("ИП · УСН · 6%", "profileincome:tax:usn_6")],
+            [("Своя ставка", "profileincome:tax:custom"), ("Без налога", "profileincome:tax:no")],
+            [("Отмена", "profileincome:back")],
+        ]),
     )
 
 
@@ -1954,7 +1990,10 @@ async def save_profile_income_type(message: Message, state: FSMContext, rate: De
     await message.answer(
         "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>\n\n"
         f"Название — <b>{escape(name)}</b>\n"
-        + (f"Налог — <b>{rate}%</b>" if rate > 0 else "Налог — <b>не резервируется</b>"),
+        + (
+            f"Налог — <b>{escape(str(data.get('pending_income_type_profile') or f'{rate}%'))}</b>"
+            if rate > 0 else "Налог — <b>не резервируется</b>"
+        ),
         reply_markup=keyboard([
             [("Исправить", "profileincome:add"), ("✔️ Сохранить", "profileincome:save")],
             [("Отмена", "profileincome:back")],
@@ -1967,15 +2006,22 @@ async def profile_income_save(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
     rates = dict(data.get("income_type_tax_rates", {}))
+    profiles = dict(data.get("income_type_tax_profiles", {}))
     original = data.get("pending_income_type_original")
     if original:
         rates.pop(original, None)
+        profiles.pop(original, None)
     rates[data["pending_income_type_name"]] = data["pending_income_type_rate"]
+    profile = data.get("pending_income_type_profile")
+    if profile:
+        profiles[data["pending_income_type_name"]] = profile
     await state.update_data(
         income_type_tax_rates=rates,
+        income_type_tax_profiles=profiles,
         pending_income_type_name=None,
         pending_income_type_rate=None,
         pending_income_type_original=None,
+        pending_income_type_profile=None,
     )
     await show_income_types_setup(callback.message, state)
 
@@ -1984,15 +2030,20 @@ async def profile_income_save(callback: CallbackQuery, state: FSMContext):
 async def profile_income_view(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     index = int(callback.data.rsplit(":", 1)[1])
-    rates = (await state.get_data()).get("income_type_tax_rates", {})
+    setup_data = await state.get_data()
+    rates = setup_data.get("income_type_tax_rates", {})
     names = list(rates)
     if not 0 <= index < len(names):
         await show_income_types_setup(callback.message, state)
         return
     name = names[index]
+    profile = setup_data.get("income_type_tax_profiles", {}).get(name)
     await callback.message.answer(
         f"<b>{escape(name.upper())}</b>\n\n"
-        + (f"Налог — <b>{rates[name]}%</b>" if Decimal(str(rates[name])) > 0 else "Без налога"),
+        + (
+            f"Налог — <b>{escape(profile or f'{rates[name]}%')}</b>"
+            if Decimal(str(rates[name])) > 0 else "Без налога"
+        ),
         reply_markup=keyboard([
             [("Изменить название", f"profileincome:editname:{index}")],
             [("Изменить налог", f"profileincome:edittax:{index}")],
@@ -2031,6 +2082,7 @@ async def profile_income_edit_name(message: Message, state: FSMContext):
     await state.update_data(
         pending_income_type_name=name,
         pending_income_type_rate=str(rates[original]),
+        pending_income_type_profile=data.get("income_type_tax_profiles", {}).get(original),
     )
     await save_profile_income_type(message, state, Decimal(str(rates[original])))
 
@@ -2061,10 +2113,13 @@ async def profile_income_delete(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Удалено")
     index = int(callback.data.rsplit(":", 1)[1])
     rates = dict((await state.get_data()).get("income_type_tax_rates", {}))
+    profiles = dict((await state.get_data()).get("income_type_tax_profiles", {}))
     names = list(rates)
     if 0 <= index < len(names):
-        rates.pop(names[index])
-        await state.update_data(income_type_tax_rates=rates)
+        removed = names[index]
+        rates.pop(removed)
+        profiles.pop(removed, None)
+        await state.update_data(income_type_tax_rates=rates, income_type_tax_profiles=profiles)
     await show_income_types_setup(callback.message, state)
 
 
@@ -7357,6 +7412,10 @@ def build_settings_from_data(
         income_type_tax_rates={
             name: Decimal(str(rate))
             for name, rate in data.get("income_type_tax_rates", {}).items()
+        },
+        income_type_tax_profiles={
+            str(name): str(profile)
+            for name, profile in data.get("income_type_tax_profiles", {}).items()
         },
 
         planned_taxes=planned_taxes,

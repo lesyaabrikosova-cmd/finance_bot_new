@@ -211,7 +211,8 @@ def _tax_ledger(telegram_id: int) -> tuple[dict[tuple, dict], Decimal]:
     total_contributed = ZERO
 
     def ensure_bucket(identity: tuple, *, key: str, group: str, detail: str,
-                      obligation_id: int | None = None) -> dict:
+                      obligation_id: int | None = None,
+                      aliases: set[str] | None = None) -> dict:
         if identity not in buckets:
             buckets[identity] = {
                 "amount": ZERO,
@@ -219,7 +220,10 @@ def _tax_ledger(telegram_id: int) -> tuple[dict[tuple, dict], Decimal]:
                 "group": group,
                 "detail": detail,
                 "obligation_id": obligation_id,
+                "aliases": set(aliases or ()),
             }
+        elif aliases:
+            buckets[identity]["aliases"].update(aliases)
         return buckets[identity]
 
     by_key: dict[str, list[dict]] = defaultdict(list)
@@ -248,9 +252,11 @@ def _tax_ledger(telegram_id: int) -> tuple[dict[tuple, dict], Decimal]:
         income_tax = max(ZERO, Decimal(str(payload.get("tax", ZERO))))
         if income_tax > ZERO:
             source = str(payload.get("income_type") or "Другой доход")
+            detail = income_tax_detail_label(payload, source, income_tax)
             bucket = ensure_bucket(
-                ("income", source), key=f"Налог на доход · {source}",
-                group="Налог на доход", detail=source,
+                ("income", detail), key=f"Налог на доход · {detail}",
+                group="Налог на доход", detail=detail,
+                aliases={f"Налог на доход · {source}"},
             )
             bucket["amount"] += income_tax
             total_contributed += income_tax
@@ -317,7 +323,8 @@ def _tax_ledger(telegram_id: int) -> tuple[dict[tuple, dict], Decimal]:
             key=lambda pair: (
                 0 if selected_identity is not None and pair[0] == selected_identity else
                 1 if pair[1]["key"] == payment["tax_name"] else
-                2 if pair[1]["group"] == selected_group else 3,
+                2 if payment["tax_name"] in pair[1].get("aliases", set()) else
+                3 if pair[1]["group"] == selected_group else 4,
                 group_order.get(pair[1]["group"], len(group_order)),
                 str(pair[0]),
             ),
@@ -526,6 +533,37 @@ def tax_financial_targets(allocator) -> dict[str, Decimal | int | str]:
 
 def money(value: Decimal) -> str:
     return f"{fmt_money(value)} ₽"
+
+
+def tax_rate_label(rate: Decimal) -> str:
+    """Render an effective tax rate without artificial trailing zeroes."""
+    return f"{fmt_money(rate)}%"
+
+
+def compact_income_tax_profile(profile: str) -> str:
+    """Normalize old verbose profile names to the compact UI vocabulary."""
+    value = str(profile).strip()
+    replacements = (
+        ("Самозанятость · Физики", "НПД · ФЛ"),
+        ("Самозанятость · Юрики", "НПД · ЮЛ"),
+        ("ИП · УСН «Доходы»", "ИП · УСН"),
+    )
+    for old, new in replacements:
+        if value.startswith(old):
+            return new + value[len(old):]
+    return value
+
+
+def income_tax_detail_label(payload: dict, source: str, tax: Decimal) -> str:
+    """Give every income-tax bucket a human-readable source and rule.
+
+    Older operations did not store a named rule. They remain grouped by their
+    real income source rather than being assigned a regime retrospectively.
+    """
+    profile = str(payload.get("tax_profile") or "").strip()
+    if profile and profile != source:
+        return f"{source} · {compact_income_tax_profile(profile)}"
+    return compact_income_tax_profile(source)
 
 
 def tax_group(name: str) -> str:
@@ -796,6 +834,7 @@ def make_pie_chart(groups: dict) -> bytes | None:
     return make_chart(
         values, "НАЛОГИ", "Фактически отложено за год", colors,
         preserve_order=True,
+        legend_columns=1,
     )
 
 
@@ -815,14 +854,48 @@ def report_text(
     )
 
 
-def tax_obligations_overview(obligations: list[dict]) -> str:
-    if not obligations:
-        return "<b>ДОБАВЛЕННЫЕ НАЛОГИ</b>\n\nУ вас нет добавленных налогов."
-    lines = ["<b>ДОБАВЛЕННЫЕ НАЛОГИ</b>", ""]
-    for item in obligations:
-        lines.append(
-            f"• {escape(item['tax_type'])} · {escape(item['object_name'])}"
-        )
+def tax_obligations_overview(
+    obligations: list[dict],
+    income_details: dict | None = None,
+    settings=None,
+) -> str:
+    """One screen for accrued income taxes and dated tax obligations."""
+    income_names = {
+        str(name) for name, amount in (income_details or {}).items()
+        if Decimal(str(amount)) > ZERO
+    }
+    if settings is not None:
+        bound_profiles = {
+            compact_income_tax_profile(profile)
+            for profile in getattr(settings, "income_type_tax_profiles", {}).values()
+        }
+        for name, rate in settings.income_type_tax_rates.items():
+            if rate <= ZERO:
+                continue
+            profile = getattr(settings, "income_type_tax_profiles", {}).get(name)
+            income_names.add(
+                f"{name} · {compact_income_tax_profile(profile)}" if profile else str(name)
+            )
+        for profile in getattr(settings, "income_tax_profiles", {}):
+            compact = compact_income_tax_profile(profile)
+            if compact not in bound_profiles:
+                income_names.add(compact)
+    if not income_names and not obligations:
+        return "<b>НАЛОГИ В АЛЛОКАТОРЕ</b>\n\nПока нет настроенных или накопленных налогов."
+    lines = ["<b>НАЛОГИ В АЛЛОКАТОРЕ</b>", ""]
+    if income_names:
+        lines.append("<b>С доходов</b>")
+        lines.extend(f"• {escape(name)}" for name in sorted(income_names, key=str.casefold))
+    if obligations:
+        if income_names:
+            lines.append("")
+        lines.append("<b>Плановые</b>")
+        for item in obligations:
+            lines.append(
+                f"• {escape(item['tax_type'])} · {escape(item['object_name'])}"
+            )
+    elif income_names:
+        lines.extend(["", "<b>Плановые</b>", "Пока нет."])
     return "\n".join(lines)
 
 
@@ -989,7 +1062,12 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         detailed,
     )
     obligations = db.load_tax_obligations(telegram_id)
-    text += f"\n\n————————————\n{tax_obligations_overview(obligations)}"
+    overview = tax_obligations_overview(
+        obligations,
+        groups.get("Налог на доход", {}).get("details", {}),
+        allocator.settings,
+    )
+    text += f"\n\n————————————\n{overview}"
     rows = [[("+ Добавить налог", "taxes:add")]]
     rows.append([("✎ Изменить налоги", "taxes:edit")])
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
@@ -1003,6 +1081,7 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         "НАЛОГИ", text, reply_markup=keyboard(rows),
         subtitle="Доходные налоги разделены по профилям", colors=chart_colors,
         preserve_order=True,
+        legend_columns=1,
         center_amount=annual_total,
         center_label="Отложено",
         center_suffix="₽ на налоги",
@@ -1012,15 +1091,26 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
 async def show_income_tax_profile_menu(message: Message, telegram_id: int | None = None) -> None:
     """Income-tax setup: profiles reserve a share of every income receipt."""
     allocator = db.load_allocator(telegram_id) if telegram_id is not None else None
-    profiles = list(getattr(getattr(allocator, "settings", None), "income_tax_profiles", {}))
+    settings = getattr(allocator, "settings", None)
+    stored_profiles = list(getattr(settings, "income_tax_profiles", {}))
+    profiles = [
+        compact_income_tax_profile(name)
+        for name in stored_profiles
+    ]
+    legacy_rules = [
+        f"{name} · {tax_rate_label(rate)}"
+        for name, rate in getattr(settings, "income_type_tax_rates", {}).items()
+        if rate > ZERO and name not in stored_profiles and not str(name).rstrip().endswith("%")
+    ]
+    known_rules = list(dict.fromkeys([*legacy_rules, *profiles]))
     added = (
-        "\n\n<b>Уже добавлены:</b>\n" + "\n".join(f"• {escape(name)}" for name in profiles)
-        if profiles else ""
+        "\n\n<b>Уже настроены:</b>\n" + "\n".join(f"• {escape(name)}" for name in known_rules)
+        if known_rules else ""
     )
     await message.answer(
         "<b>НАЛОГ НА ДОХОД</b>\n\n"
-        "Выберите, для какого дохода добавить профиль. Процент будет "
-        "резервироваться с каждого отмеченного поступления."
+        "Добавьте налоговое правило. Связать его с конкретным доходом можно "
+        "при создании дохода или через изменение его налоговых настроек."
         + added,
         reply_markup=keyboard([
             [("Самозанятость (НПД)", "taxincome:self_employed")],
@@ -1035,13 +1125,14 @@ async def show_income_tax_profile_menu(message: Message, telegram_id: int | None
 async def show_self_employed_rate_menu(message: Message) -> None:
     await message.answer(
         "<b>САМОЗАНЯТОСТЬ (НПД)</b>\n\n"
-        "Выберите ставку для нового профиля. Обычные ставки: 4% с доходов "
-        "от физиков и 6% от юриков. Пока действует налоговый бонус, ставки "
+        "НПД — налог на профессиональный доход. ФЛ — физические лица, ЮЛ — "
+        "юридические лица. Обычные ставки: 4% с доходов от ФЛ и 6% от ЮЛ. "
+        "Пока действует налоговый бонус, ставки "
         "снижаются до 3% и 4%. Аллокатор не знает остаток бонуса — после его "
         "исчерпания выберите обычную ставку.",
         reply_markup=keyboard([
-            [("Физики · 4%", "taxincome:npd:physical:4"), ("Физики · 3%", "taxincome:npd:physical:3")],
-            [("Юрики · 6%", "taxincome:npd:business:6"), ("Юрики · 4%", "taxincome:npd:business:4")],
+            [("НПД · ФЛ · 4%", "taxincome:npd:physical:4"), ("НПД · ФЛ · 3%", "taxincome:npd:physical:3")],
+            [("НПД · ЮЛ · 6%", "taxincome:npd:business:6"), ("НПД · ЮЛ · 4%", "taxincome:npd:business:4")],
             [("Своя ставка", "taxincome:subject:self_employed")],
             [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")],
         ]),
@@ -1051,10 +1142,11 @@ async def show_self_employed_rate_menu(message: Message) -> None:
 async def show_ip_usn_rate_menu(message: Message) -> None:
     await message.answer(
         "<b>ИП НА УСН «ДОХОДЫ»</b>\n\n"
-        "Выберите, сколько откладывать с каждого поступления. Базовый вариант — 6%; "
+        "ИП — индивидуальный предприниматель. УСН «Доходы» — упрощённая система "
+        "налогообложения с объектом «Доходы». Выберите, сколько откладывать с каждого поступления. Базовый вариант — 6%; "
         "если у вас действует другая ставка, укажите её вручную.",
         reply_markup=keyboard([
-            [("6%", "taxincome:usn:6"), ("Своя ставка", "taxincome:usn:custom")],
+            [("ИП · УСН · 6%", "taxincome:usn:6"), ("Своя ставка", "taxincome:usn:custom")],
             [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")],
         ]),
     )
@@ -1074,17 +1166,18 @@ async def save_income_tax_profile(
         allocator = db.load_allocator(telegram_id)
         if allocator is None:
             raise ValueError("Сначала создайте финансовый профиль командой /start.")
-        if name in allocator.settings.income_type_tax_rates:
-            return name, False
-        allocator.settings.income_type_tax_rates[name] = rate
-        allocator.settings.ensure_income_type_id(name)
+        existing = next(
+            (
+                stored for stored in allocator.settings.income_tax_profiles
+                if compact_income_tax_profile(stored) == name
+            ),
+            None,
+        )
+        if existing is not None:
+            return compact_income_tax_profile(existing), False
         allocator.settings.income_tax_profiles[name] = {
             "subject": subject, "mode": mode, "rate": str(rate),
         }
-        allocator.settings.taxable_income_types = [
-            item for item, value in allocator.settings.income_type_tax_rates.items()
-            if value > ZERO
-        ]
         db.save_allocator(telegram_id, allocator)
     return name, True
 
@@ -2458,6 +2551,7 @@ async def show_tax_obligations_edit(message: Message, telegram_id: int, notice: 
         [(f"{item['tax_type']}: {item['object_name']}", f"taxgoal:view:{item['id']}")]
         for item in obligations
     ]
+    rows.append([("＋ Добавить налог", "taxes:add")])
     rows.append([
         ("← Главное меню", "taxes:back"),
         ("← Назад", "menu:taxes"),

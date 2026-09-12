@@ -67,6 +67,18 @@ class ReportCharts(unittest.TestCase):
         self.assertEqual(len(items), 8)
         self.assertEqual(sum(v for _,v in items), sum(values.values()))
 
+    def test_tax_legend_can_render_as_one_column(self):
+        values = {
+            "Зарплата · ИП · УСН · 6%": D("6000"),
+            "Зарплата · НПД · ФЛ · 3%": D("300"),
+            "Халтура": D("200"),
+            "Транспортный налог · Автомобиль": D("1000"),
+        }
+        one_column = Image.open(BytesIO(make_chart(values, "НАЛОГИ", legend_columns=1)))
+        two_columns = Image.open(BytesIO(make_chart(values, "НАЛОГИ", legend_columns=2)))
+        self.assertEqual(one_column.width, 1080)
+        self.assertGreater(one_column.height, two_columns.height)
+
     def test_actual_super_stage_excludes_money_consumed_by_required_life(self):
         def allocator():
             return FinancialAllocator(UserSettings(has_debts=False, employment_type='Фрилансер',

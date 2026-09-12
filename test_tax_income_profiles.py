@@ -9,6 +9,7 @@ _DATA = tempfile.TemporaryDirectory()
 os.environ["ALLOCATOR_DATA_DIR"] = _DATA.name
 
 import taxes
+from onboarding import profile_income_save, profile_income_tax_choice
 from financial_engine import FinancialAllocator, UserSettings
 from taxes import (
     LAND_TAX_BROWNS,
@@ -20,7 +21,9 @@ from taxes import (
     show_income_tax_profile_menu,
     show_ip_usn_rate_menu,
     show_self_employed_rate_menu,
+    show_tax_obligations_edit,
     show_taxes,
+    tax_obligations_overview,
     tax_chart_values_and_colors,
     tax_obligation_start,
     tax_payment_start,
@@ -43,7 +46,55 @@ def button_rows(message):
     return [[button.text for button in row] for row in markup.inline_keyboard]
 
 
+class MemoryState:
+    def __init__(self, **data):
+        self.data = data
+        self.state = None
+
+    async def get_data(self):
+        return dict(self.data)
+
+    async def update_data(self, **values):
+        self.data.update(values)
+
+    async def set_state(self, value):
+        self.state = value
+
+    async def clear(self):
+        self.data.clear()
+        self.state = None
+
+
 class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
+    async def test_onboarding_preserves_named_rule_for_income_source(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        state = MemoryState(
+            pending_income_type_name="Зарплата",
+            income_type_tax_rates={},
+            income_type_tax_profiles={},
+        )
+        choice = SimpleNamespace(
+            data="profileincome:tax:usn_6", answer=AsyncMock(), message=message,
+        )
+        await profile_income_tax_choice(choice, state)
+        save = SimpleNamespace(answer=AsyncMock(), message=message)
+        await profile_income_save(save, state)
+        self.assertEqual(state.data["income_type_tax_rates"], {"Зарплата": "6"})
+        self.assertEqual(
+            state.data["income_type_tax_profiles"],
+            {"Зарплата": "ИП · УСН · 6%"},
+        )
+
+    async def test_empty_planned_tax_list_offers_add_tax(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        with patch("taxes.db") as db:
+            db.load_tax_obligations.return_value = []
+            await show_tax_obligations_edit(message, 42)
+        self.assertEqual(button_rows(message), [
+            ["＋ Добавить налог"],
+            ["← Главное меню", "← Назад"],
+        ])
+
     async def test_choose_tax_screen_has_fixed_navigation(self):
         callback = SimpleNamespace(
             answer=AsyncMock(),
@@ -78,6 +129,7 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
             db.load_tax_obligations.return_value = []
             await show_taxes(message, 42)
         report.assert_awaited_once()
+        self.assertEqual(report.await_args.kwargs["legend_columns"], 1)
 
     async def test_income_tax_menu_has_fixed_navigation(self):
         message = SimpleNamespace(answer=AsyncMock())
@@ -105,15 +157,15 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
         message = SimpleNamespace(answer=AsyncMock())
         await show_self_employed_rate_menu(message)
         self.assertEqual(button_rows(message)[:-1], [
-            ["Физики · 4%", "Физики · 3%"],
-            ["Юрики · 6%", "Юрики · 4%"],
+            ["НПД · ФЛ · 4%", "НПД · ФЛ · 3%"],
+            ["НПД · ЮЛ · 6%", "НПД · ЮЛ · 4%"],
             ["Своя ставка"],
         ])
 
     async def test_ip_usn_screen_has_base_and_custom_rate(self):
         message = SimpleNamespace(answer=AsyncMock())
         await show_ip_usn_rate_menu(message)
-        self.assertEqual(button_rows(message)[:-1], [["6%", "Своя ставка"]])
+        self.assertEqual(button_rows(message)[:-1], [["ИП · УСН · 6%", "Своя ставка"]])
 
     async def test_back_clears_draft_and_restores_tax_state(self):
         callback = SimpleNamespace(
@@ -167,6 +219,63 @@ class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
 
 
 class TaxIncomeChartColours(unittest.TestCase):
+    def test_legacy_income_operations_keep_their_source_names(self):
+        operations = [
+            {"id": 1, "payload": {"type": "income_distribution", "income_type": "Зарплата", "income": "100000", "tax": "6000"}},
+            {"id": 2, "payload": {"type": "income_distribution", "income_type": "Халтура", "income": "10000", "tax": "300"}},
+        ]
+        with patch("taxes.db") as db:
+            db.load_tax_obligations.return_value = []
+            db.load_operations.return_value = operations
+            db.load_tax_payments.return_value = []
+            groups, _, _ = taxes.collect_tax_statistics(42, 2026)
+        self.assertEqual(groups["Налог на доход"]["details"], {
+            "Зарплата": Decimal("6000"),
+            "Халтура": Decimal("300"),
+        })
+
+    def test_income_source_precedes_compact_profile_in_legend(self):
+        operations = [
+            {"id": 1, "payload": {
+                "type": "income_distribution", "income_type": "Зарплата",
+                "income": "100000", "tax": "6000",
+                "tax_profile": "ИП · УСН · 6%",
+            }},
+            {"id": 2, "payload": {
+                "type": "income_distribution", "income_type": "Зарплата",
+                "income": "10000", "tax": "300",
+                "tax_profile": "НПД · ФЛ · 3%",
+            }},
+            {"id": 3, "payload": {
+                "type": "income_distribution", "income_type": "Халтура",
+                "income": "5000", "tax": "200",
+            }},
+        ]
+        with patch("taxes.db") as db:
+            db.load_tax_obligations.return_value = []
+            db.load_operations.return_value = operations
+            db.load_tax_payments.return_value = []
+            groups, _, _ = taxes.collect_tax_statistics(42, 2026)
+        self.assertEqual(
+            groups["Налог на доход"]["details"],
+            {
+                "Зарплата · ИП · УСН · 6%": Decimal("6000"),
+                "Зарплата · НПД · ФЛ · 3%": Decimal("300"),
+                "Халтура": Decimal("200"),
+            },
+        )
+
+    def test_overview_includes_income_tax_rules(self):
+        current = allocator()
+        current.settings.income_type_tax_rates = {"Зарплата": Decimal("6")}
+        overview = tax_obligations_overview(
+            [], {"Халтура · 3%": Decimal("300")}, current.settings,
+        )
+        self.assertIn("<b>С доходов</b>", overview)
+        self.assertIn("Зарплата", overview)
+        self.assertIn("Халтура · 3%", overview)
+        self.assertNotIn("нет добавленных", overview)
+
     def test_property_objects_get_separate_family_colours(self):
         groups = {
             "Налог на имущество": {
@@ -252,13 +361,30 @@ class TaxIncomeChartColours(unittest.TestCase):
             db.load_tax_payments.return_value = [payment]
             buckets, _ = taxes._tax_ledger(42)
         self.assertEqual(
-            buckets[("income", "Самозанятость · Физики · 4%")]["amount"],
+            buckets[("income", "НПД · ФЛ · 4%")]["amount"],
             Decimal("0"),
         )
         self.assertEqual(
-            buckets[("income", "Самозанятость · Юрики · 6%")]["amount"],
+            buckets[("income", "НПД · ЮЛ · 6%")]["amount"],
             Decimal("600"),
         )
+
+    def test_legacy_payment_name_never_consumes_another_income_source(self):
+        operations = [
+            {"id": 1, "payload": {"type": "income_distribution", "income_type": "Зарплата", "income": "100000", "tax": "6000", "tax_profile": "ИП · УСН · 6%"}},
+            {"id": 2, "payload": {"type": "income_distribution", "income_type": "Халтура", "income": "10000", "tax": "300", "tax_profile": "НПД · ФЛ · 3%"}},
+        ]
+        payment = {
+            "id": 1, "amount": Decimal("300"), "obligation_id": None,
+            "tax_name": "Налог на доход · Халтура",
+        }
+        with patch("taxes.db") as db:
+            db.load_tax_obligations.return_value = []
+            db.load_operations.return_value = operations
+            db.load_tax_payments.return_value = [payment]
+            buckets, _ = taxes._tax_ledger(42)
+        self.assertEqual(buckets[("income", "Зарплата · ИП · УСН · 6%")]["amount"], Decimal("6000"))
+        self.assertEqual(buckets[("income", "Халтура · НПД · ФЛ · 3%")]["amount"], Decimal("0"))
 
 
 if __name__ == "__main__":

@@ -133,7 +133,7 @@ class TaxFeatureTests(unittest.TestCase):
         telegram_id = 990001
         self.assertEqual(
             tax_obligations_overview([]),
-            "<b>ДОБАВЛЕННЫЕ НАЛОГИ</b>\n\nУ вас нет добавленных налогов.",
+            "<b>НАЛОГИ В АЛЛОКАТОРЕ</b>\n\nПока нет настроенных или накопленных налогов.",
         )
         obligation_id = db.add_tax_obligation(
             telegram_id, "Налог на имущество", "Квартира", Decimal("12000"),
@@ -943,12 +943,17 @@ class TaxFeatureTests(unittest.TestCase):
             household_reserve=Decimal("0"),
             average_income=Decimal("1000"),
             income_type_tax_rates={"Заказ ФЛ": Decimal("4"), "Подарок": Decimal("0")},
+            income_type_tax_profiles={"Заказ ФЛ": "НПД · ФЛ · 4%"},
         )
         db.save_allocator(telegram_id, FinancialAllocator(settings))
         loaded = db.load_allocator(telegram_id)
         self.assertEqual(
             loaded.settings.income_type_tax_rates,
             {"Заказ ФЛ": Decimal("4"), "Подарок": Decimal("0")},
+        )
+        self.assertEqual(
+            loaded.settings.income_type_tax_profiles,
+            {"Заказ ФЛ": "НПД · ФЛ · 4%"},
         )
 
     def test_income_rhythm_survives_storage_round_trip(self):

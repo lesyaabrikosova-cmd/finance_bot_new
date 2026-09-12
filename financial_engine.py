@@ -650,10 +650,13 @@ class UserSettings:
     tax_rate: Decimal = Decimal("0")
     taxable_income_types: List[str] = field(default_factory=list)
     income_type_tax_rates: Dict[str, Decimal] = field(default_factory=dict)
-    # Метаданные налогового профиля. Ключ совпадает с именем типа дохода,
-    # чтобы старая история и расчёты продолжали работать без миграции.
-    # Пример: {"Самозанятость · Физики · 3%": {"subject": "Самозанятость",
-    # "mode": "Физики", "rate": "3"}}.
+    # Default named tax rule for each real income source.  The source remains
+    # e.g. "Зарплата" while the value is a compact legend suffix such as
+    # "ИП · УСН · 6%" or "НПД · ФЛ · 3%".
+    income_type_tax_profiles: Dict[str, str] = field(default_factory=dict)
+    # Каталог добавленных налоговых правил. Старые версии могли одновременно
+    # хранить такое имя как тип дохода; это поддерживается при чтении истории,
+    # но новые правила больше не подменяют реальные источники доходов.
     income_tax_profiles: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # Название можно менять, поэтому история доходов ссылается на тип через
     # постоянный ID. ``income_type_labels`` сохраняет последнее понятное имя
@@ -781,6 +784,11 @@ class UserSettings:
             for name, rate in self.income_type_tax_rates.items()
             if str(name).strip()
         }
+        self.income_type_tax_profiles = {
+            str(name).strip(): str(profile).strip()
+            for name, profile in (self.income_type_tax_profiles or {}).items()
+            if str(name).strip() in self.income_type_tax_rates and str(profile).strip()
+        }
         if not self.income_type_tax_rates and self.taxable_income_types:
             self.income_type_tax_rates = {
                 name: self.tax_rate
@@ -793,7 +801,7 @@ class UserSettings:
                 if str(field).strip() and str(value).strip()
             }
             for name, profile in (self.income_tax_profiles or {}).items()
-            if str(name).strip() in self.income_type_tax_rates and isinstance(profile, dict)
+            if str(name).strip() and isinstance(profile, dict)
         }
         self.taxable_income_types = [
             name
