@@ -24,6 +24,7 @@ from mode_presentation import mode_image_path
 from charts import send_chart_report
 from taxes import reconcile_tax_obligation_balances
 from income_deletion import IncomeDeletionError, delete_income_safely
+from time_utils import moscow_today
 
 
 router = Router()
@@ -1241,6 +1242,14 @@ async def menu_about(
 # ============================================================
 
 INCOME_HISTORY_PAGE_SIZE = 8
+MONTH_NAMES = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+MONTH_BUTTON_NAMES = (
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+)
 
 
 def income_history_operations(telegram_id: int) -> list[dict]:
@@ -1250,6 +1259,41 @@ def income_history_operations(telegram_id: int) -> list[dict]:
         for operation in db.load_operations(telegram_id, limit=-1)
         if operation.get("type") == "income_distribution"
     ]
+
+
+def income_operation_date(operation: dict) -> date | None:
+    """Return the recorded income date, falling back to its ledger timestamp."""
+    payload = operation.get("payload") or {}
+    raw_date = payload.get("date") or operation.get("created_at")
+    try:
+        return date.fromisoformat(str(raw_date)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def income_operations_for_period(
+    operations: list[dict],
+    period_type: str,
+    year: int | None = None,
+    month: int | None = None,
+) -> list[dict]:
+    """Select income records for a calendar month or year from one ledger read."""
+    if period_type not in {"month", "year"} or year is None:
+        raise ValueError("A calendar year is required for income period filtering")
+    if period_type == "month" and (month is None or not 1 <= month <= 12):
+        raise ValueError("A month from 1 to 12 is required")
+
+    selected = []
+    for operation in operations:
+        if operation.get("type") != "income_distribution":
+            continue
+        operation_date = income_operation_date(operation)
+        if operation_date is None or operation_date.year != year:
+            continue
+        if period_type == "month" and operation_date.month != month:
+            continue
+        selected.append(operation)
+    return selected
 
 
 def rebuild_period_analytics_from_history(allocator, telegram_id: int) -> None:
@@ -1273,12 +1317,8 @@ def rebuild_period_analytics_from_history(allocator, telegram_id: int) -> None:
 
 
 def income_history_date(operation: dict) -> str:
-    payload = operation.get("payload") or {}
-    raw_date = payload.get("date") or operation.get("created_at")
-    try:
-        return date.fromisoformat(str(raw_date)[:10]).strftime("%d.%m.%Y")
-    except (TypeError, ValueError):
-        return "Без даты"
+    operation_date = income_operation_date(operation)
+    return operation_date.strftime("%d.%m.%Y") if operation_date else "Без даты"
 
 
 def income_history_button_label(operation: dict) -> str:
@@ -1375,8 +1415,17 @@ def income_note_edit_keyboard(operation_id: int, has_note: bool):
     return keyboard(rows)
 
 
-async def send_income_history(message: Message, telegram_id: int, page: int = 0):
+async def send_income_history(
+    message: Message,
+    telegram_id: int,
+    page: int = 0,
+    year: int | None = None,
+    month: int | None = None,
+):
     operations = income_history_operations(telegram_id)
+    is_month_history = year is not None and month is not None
+    if is_month_history:
+        operations = income_operations_for_period(operations, "month", year, month)
     last_page = max(0, (len(operations) - 1) // INCOME_HISTORY_PAGE_SIZE)
     page = max(0, min(page, last_page))
     page_operations = operations[
@@ -1385,36 +1434,42 @@ async def send_income_history(message: Message, telegram_id: int, page: int = 0)
 
     if not operations:
         await message.answer(
-            "<b>ИСТОРИЯ ДОХОДОВ</b>\n\n"
-            "Вы ещё не добавили ни одного дохода.",
+            f"<b>{'ПОСТУПЛЕНИЯ ' + MONTH_NAMES[month - 1].upper() if is_month_history else 'ИСТОРИЯ ДОХОДОВ'}</b>\n\n"
+            + ("За этот период доходов пока нет." if is_month_history else "Вы ещё не добавили ни одного дохода."),
             reply_markup=keyboard([
                 [
                     ("← Главное меню", "menu:back"),
-                    ("← Назад", "menu:income_analysis"),
+                    ("← Назад", f"incomeanalysis:month:{year}:{month}" if is_month_history else "menu:income_analysis"),
                 ],
             ]),
         )
         return
 
     rows = [
-        [(income_history_button_label(operation), f"incomehistory:detail:{operation['id']}")]
+        [
+            (
+                income_history_button_label(operation),
+                f"incomehistory:detail:{operation['id']}:{year}:{month}" if is_month_history
+                else f"incomehistory:detail:{operation['id']}",
+            )
+        ]
         for operation in page_operations
     ]
     if last_page:
         navigation = []
         if page > 0:
-            navigation.append(("← Новее", f"incomehistory:page:{page - 1}"))
+            navigation.append(("← Новее", f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
         if page < last_page:
-            navigation.append(("Старше →", f"incomehistory:page:{page + 1}"))
+            navigation.append(("Старше →", f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
         rows.append(navigation)
     rows.extend([
         [
             ("← Главное меню", "menu:back"),
-            ("← Назад", "menu:income_analysis"),
+            ("← Назад", f"incomeanalysis:month:{year}:{month}" if is_month_history else "menu:income_analysis"),
         ],
     ])
     await message.answer(
-        "<b>ИСТОРИЯ ДОХОДОВ</b>",
+        f"<b>{'ПОСТУПЛЕНИЯ ' + MONTH_NAMES[month - 1].upper() if is_month_history else 'ИСТОРИЯ ДОХОДОВ'}</b>",
         reply_markup=keyboard(rows),
     )
 
@@ -1445,6 +1500,8 @@ async def send_income_history_detail(
     message: Message,
     telegram_id: int,
     operation_id: int,
+    year: int | None = None,
+    month: int | None = None,
 ) -> bool:
     operation = find_income_history_operation(telegram_id, operation_id)
     if operation is None:
@@ -1465,6 +1522,11 @@ async def send_income_history_detail(
         edit_row.append(
             ("🗑️ Удалить доход", f"incomehistory:delete:{operation_id}")
         )
+    back_callback = (
+        f"incomehistory:month:{year}:{month}"
+        if year is not None and month is not None
+        else "incomehistory:open"
+    )
     await message.answer(
         income_operation_card_text(operation),
         reply_markup=keyboard([
@@ -1472,7 +1534,7 @@ async def send_income_history_detail(
             edit_row,
             [
                 ("← Главное меню", "menu:back"),
-                ("← Назад", "incomehistory:open"),
+                ("← Назад", back_callback),
             ],
         ]),
     )
@@ -1589,18 +1651,41 @@ async def income_history_page(callback: CallbackQuery, state: FSMContext):
     await send_income_history(callback.message, callback.from_user.id, page)
 
 
+@router.callback_query(F.data.startswith("incomehistory:monthpage:"))
+async def income_history_month_page(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        _, _, year, month, page = callback.data.split(":")
+        year, month, page = int(year), int(month), int(page)
+        if not 1 <= month <= 12:
+            raise ValueError
+    except (AttributeError, ValueError):
+        await callback.message.answer("Не удалось открыть страницу поступлений.")
+        return
+    await state.clear()
+    await send_income_history(callback.message, callback.from_user.id, page, year, month)
+
+
 @router.callback_query(F.data.startswith("incomehistory:detail:"))
 async def income_history_detail(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        parts = callback.data.split(":")
+        operation_id = int(parts[2])
+        year = int(parts[3]) if len(parts) == 5 else None
+        month = int(parts[4]) if len(parts) == 5 else None
+        if month is not None and not 1 <= month <= 12:
+            raise ValueError
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     await state.clear()
     await send_income_history_detail(
         callback.message,
         callback.from_user.id,
         operation_id,
+        year,
+        month,
     )
 
 
@@ -1906,6 +1991,7 @@ def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decim
 def income_analysis_fallback_text(
     totals: dict[str, Decimal],
     total_income: Decimal,
+    empty_message: str = "В текущем расчётном периоде пока нет поступлений.",
 ) -> str:
     """Complete text equivalent used when the chart cannot be delivered."""
     lines = [
@@ -1921,18 +2007,97 @@ def income_analysis_fallback_text(
                 f"{pct(D(amount), total_income)}"
             )
     else:
-        lines.extend(['', 'В текущем расчётном периоде пока нет поступлений.'])
+        lines.extend(['', empty_message])
     return '\n'.join(lines)
+
+
+def income_analysis_navigation() -> object:
+    return keyboard([
+        [("История доходов", "incomehistory:open")],
+        [("Другой период", "incomeanalysis:periods")],
+        [("← Главное меню", "menu:back")],
+    ])
+
+
+def income_months_keyboard(year: int) -> object:
+    rows = [
+        [
+            (MONTH_BUTTON_NAMES[index], f"incomeanalysis:month:{year}:{index + 1}")
+            for index in range(row_start, row_start + 3)
+        ]
+        for row_start in range(0, 12, 3)
+    ]
+    rows.extend([
+        [(f"← {year - 1}", f"incomeanalysis:months:{year - 1}"),
+         (f"{year + 1} →", f"incomeanalysis:months:{year + 1}")],
+        [("← Назад", "incomeanalysis:periods")],
+    ])
+    return keyboard(rows)
+
+
+async def send_income_months(message: Message, year: int) -> None:
+    await message.answer(f"<b>{year}</b>", reply_markup=income_months_keyboard(year))
+
+
+async def send_income_period_analysis(
+    message: Message,
+    telegram_id: int,
+    period_type: str,
+    year: int,
+    month: int | None = None,
+) -> None:
+    """Render the existing income chart for a selected calendar period."""
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer(
+            "Сначала создайте финансовый профиль через /start.",
+            reply_markup=keyboard([[("Настроить профиль", "setup:start")]]),
+        )
+        return
+    operations = income_operations_for_period(
+        db.load_operations(telegram_id, limit=-1), period_type, year, month,
+    )
+    totals = dict(sorted(
+        income_analysis_totals(allocator, operations).items(),
+        key=lambda item: item[1], reverse=True,
+    ))
+    total_income = sum(totals.values(), Decimal("0"))
+    if period_type == "month":
+        assert month is not None
+        period_label = f"{MONTH_BUTTON_NAMES[month - 1]} {year}"
+        rows = [
+            [(f"Поступления {MONTH_NAMES[month - 1]}", f"incomehistory:month:{year}:{month}")],
+            [("Другой месяц", f"incomeanalysis:months:{year}")],
+            [(f"Весь {year} год", f"incomeanalysis:year:{year}")],
+            [("← Назад", f"incomeanalysis:months:{year}")],
+        ]
+    else:
+        period_label = str(year)
+        rows = [
+            [(f"← {year - 1}", f"incomeanalysis:year:{year - 1}"),
+             (f"{year + 1} →", f"incomeanalysis:year:{year + 1}")],
+            [("← Назад", "incomeanalysis:periods")],
+        ]
+    navigation = keyboard(rows)
+    empty_message = "За этот период доходов пока нет."
+    await send_chart_report(
+        message,
+        totals,
+        "АНАЛИЗ ДОХОДОВ",
+        empty_message if not totals else "",
+        subtitle=f"Источники дохода · {period_label}",
+        center_amount=total_income if totals else None,
+        preserve_order=True,
+        fallback_text=income_analysis_fallback_text(totals, total_income, empty_message),
+        reply_markup=navigation,
+    )
 
 
 async def send_income_analysis(
     message: Message,
     telegram_id: int,
 ):
-    analysis_keyboard = keyboard([
-        [("История доходов", "incomehistory:open")],
-        [("← Главное меню", "menu:back")],
-    ])
+    analysis_keyboard = income_analysis_navigation()
 
     allocator = db.load_allocator(
         telegram_id
@@ -2003,6 +2168,59 @@ async def menu_income_analysis(
         callback.message,
         callback.from_user.id,
     )
+
+
+@router.callback_query(F.data == "incomeanalysis:periods")
+async def income_analysis_periods(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await callback.message.answer(
+        "<b>ДРУГОЙ ПЕРИОД</b>",
+        reply_markup=keyboard([
+            [("По месяцам", f"incomeanalysis:months:{moscow_today().year}")],
+            [("По годам", f"incomeanalysis:year:{moscow_today().year}")],
+            [("← Назад", "menu:income_analysis")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("incomeanalysis:months:"))
+async def income_analysis_months(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        year = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        await callback.message.answer("Не удалось открыть месяцы.")
+        return
+    await state.clear()
+    await send_income_months(callback.message, year)
+
+
+@router.callback_query(F.data.startswith("incomeanalysis:month:"))
+async def income_analysis_month(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        _, _, year, month = callback.data.split(":")
+        year, month = int(year), int(month)
+        if not 1 <= month <= 12:
+            raise ValueError
+    except (AttributeError, ValueError):
+        await callback.message.answer("Не удалось открыть анализ месяца.")
+        return
+    await state.clear()
+    await send_income_period_analysis(callback.message, callback.from_user.id, "month", year, month)
+
+
+@router.callback_query(F.data.startswith("incomeanalysis:year:"))
+async def income_analysis_year(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        year = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        await callback.message.answer("Не удалось открыть анализ года.")
+        return
+    await state.clear()
+    await send_income_period_analysis(callback.message, callback.from_user.id, "year", year)
 
 
 @router.callback_query(F.data == "menu:reserves")
