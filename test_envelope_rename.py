@@ -11,13 +11,13 @@ from dashboard import period_balance_chart
 
 
 class RenameTests(unittest.TestCase):
-    def test_chart_does_not_reintroduce_old_names(self):
+    def test_chart_uses_the_name_already_resolved_by_the_ledger(self):
         a = SimpleNamespace(state=SimpleNamespace(
             period_tax=D(0), period_life_topups={'Квартира': D(100)}))
-        values, _ = period_balance_chart(a, {'КЖ:Недвижимость': D(100)})
+        values, _ = period_balance_chart(a, {'КЖ:Квартира': D(100)})
         self.assertEqual(values, {'КМ · Квартира': D(100)})
 
-    def test_chart_uses_only_current_category_and_goal_ids(self):
+    def test_chart_keeps_archived_and_current_identities_separate(self):
         current_goal = SimpleNamespace(
             name='Путешествие', uid='goal-1', is_chest=False,
         )
@@ -33,12 +33,17 @@ class RenameTests(unittest.TestCase):
         allocator = SimpleNamespace(settings=settings, state=state)
         values, _ = period_balance_chart(
             allocator,
-            {'Цели:Отпуск': D(100), 'Цели:Путешествие': D(50)},
+            {
+                'КЖ:Недвижимость · прежний life-old': D(100),
+                'КЖ:Квартира': D(50),
+                'Цели:Отпуск · прежний goal-old': D(100),
+                'Цели:Путешествие': D(50),
+            },
         )
         self.assertEqual(values['КМ · Квартира'], D(50))
-        self.assertNotIn('КМ · Недвижимость', values)
+        self.assertEqual(values['КМ · Недвижимость · прежняя категория'], D(100))
         self.assertEqual(values['Цели и Сундуки · Путешествие'], D(50))
-        self.assertNotIn('Цели и Сундуки · Отпуск', values)
+        self.assertEqual(values['Цели и Сундуки · Отпуск · прежняя позиция'], D(100))
 
     def test_chained_renames_preserve_period_and_history(self):
         with tempfile.TemporaryDirectory() as directory:

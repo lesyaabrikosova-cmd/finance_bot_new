@@ -14,7 +14,7 @@ class ForecastTextTests(unittest.TestCase):
         source=SimpleNamespace(settings=SimpleNamespace(goals=[Goal('Продвижение',D(100),position_type='chest')]))
         text=forecast_allocation_text(source,{'Цели:Продвижение':D(20),'КЖ:Дом':D(30),'БР:Еда':D(10),
             'Бытовой резерв':D(10),'Инвестиции':D(40),'Подушка':D(0)})
-        self.assertEqual(text,'📈 Инвестиции — 40,00 ₽\n\n❤️ Дом — 30,00 ₽\n\n💚 Бытовой резерв — 10,00 ₽\n\n🧳 Сундук Продвижения — 20,00 ₽')
+        self.assertEqual(text,'📈 Инвестиции — 40 ₽\n\n❤️ Дом — 30 ₽\n\n💚 Бытовой резерв — 10 ₽\n\n🧳 Сундук Продвижения — 20 ₽')
     def test_chest_names_are_idempotent_and_goal_name_unchanged(self):
         for name in ['Продвижение','Сундук Продвижение','Сундук Продвижения']:
             self.assertEqual(goal_display_name(name,True),'Сундук Продвижения')

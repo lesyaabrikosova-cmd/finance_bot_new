@@ -2,13 +2,14 @@ from datetime import date
 from decimal import Decimal, ROUND_CEILING
 
 from storage import db
+from time_utils import moscow_today
 
 
 ZERO = Decimal("0")
 
 
 def months_remaining(due_date: str, today: date | None = None) -> int:
-    today = today or date.today()
+    today = today or moscow_today()
     due = date.fromisoformat(due_date)
     if due <= today:
         return 1
@@ -58,6 +59,21 @@ def apply_planned_payment_allocation(
         for item in db.load_planned_payments(telegram_id)
         if item["envelope_name"] == envelope_name
     ]
+    # Old rows may exist without the automatic-obligation marker that newer
+    # flows establish during refresh.  Mark them before applying money so a
+    # payment completed by this income actually removes its monthly cost from
+    # the Critical Minimum instead of leaving the base permanently inflated.
+    for item in obligations:
+        automatic_key = f"payment:{item['id']}"
+        if automatic_key in allocator.settings.automatic_life_obligations:
+            continue
+        monthly = Decimal(str(item["monthly_amount"]))
+        allocator.settings.base_critical_life = max(
+            ZERO,
+            allocator.settings.base_critical_life - monthly,
+        )
+        allocator.settings.set_automatic_life_obligation(automatic_key, monthly)
+
     target_total = sum((item["monthly_amount"] for item in obligations), ZERO)
     if amount <= ZERO or target_total <= ZERO:
         return

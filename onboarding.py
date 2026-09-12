@@ -29,6 +29,7 @@ from financial_engine import (
     VACATION_BUDGET_ITEMS,
     goal_percentage_bounds,
     goal_display_name,
+    is_system_envelope_name,
     sequential_goal_percentages,
     vacation_budget,
 )
@@ -5272,6 +5273,12 @@ async def save_km_envelope_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     if len(name) < 2 or len(name) > 40:
         await message.answer("Введите название длиной от 2 до 40 символов.")
+        return
+    if is_system_envelope_name(name):
+        await message.answer(
+            "Это название уже используется Аллокатором для системного конверта. "
+            "Введите другое название.",
+        )
         return
 
     data = await state.get_data()

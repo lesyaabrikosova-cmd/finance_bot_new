@@ -77,6 +77,19 @@ def display_name(goal: Goal) -> str:
     return goal_display_name(goal.name, goal.is_chest)
 
 
+def goal_by_token(allocator, token: str) -> tuple[int, Goal] | None:
+    """Resolve new UID callbacks and buttons sent by older index-based builds."""
+    token = str(token or "")
+    for index, goal in enumerate(allocator.settings.goals):
+        if goal.uid == token:
+            return index, goal
+    try:
+        index = int(token)
+        return index, allocator.settings.goals[index]
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def goal_line(allocator, goal: Goal) -> str:
     state_labels = {
         "paused": " · на паузе",
@@ -135,20 +148,16 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
         await message.answer("Сначала создайте финансовый профиль через /start.")
         return
     goals = allocator.settings.goals
-    visible = [
-        (index, goal)
-        for index, goal in enumerate(goals)
-        if goal.status != "archived"
-    ]
+    visible = [goal for goal in goals if goal.status != "archived"]
     archived_count = sum(goal.status == "archived" for goal in goals)
     estimates, explanation = goal_income_preview(allocator, telegram_id)
     if visible:
-        listing = "\n\n".join(goal_line(allocator, goal) + f"\n  Примерное пополнение: {rub(estimates.get(display_name(goal), 0))}" for _, goal in visible)
+        listing = "\n\n".join(goal_line(allocator, goal) + f"\n  Примерное пополнение: {rub(estimates.get(display_name(goal), 0))}" for goal in visible)
     else:
         listing = "<b>Пока список пуст.</b>"
     rows = [
-        [(f"{icon(goal)} {display_name(goal)}", f"goalmanage:view:{index}")]
-        for index, goal in visible
+        [(f"{icon(goal)} {display_name(goal)}", f"goalmanage:view:{goal.uid}")]
+        for goal in visible
     ]
     current_names = {goal.name for goal in goals}
     legacy_goal_names = [
@@ -208,8 +217,8 @@ async def choose_current_goal(callback: CallbackQuery, state: FSMContext):
     old = callback.data.split(":", 2)[2]
     allocator = db.load_allocator(callback.from_user.id)
     await state.update_data(legacy_goal_name=old)
-    rows = [[(display_name(goal), f"goalmanage:repair_apply:{index}")]
-            for index, goal in enumerate(allocator.settings.goals)]
+    rows = [[(display_name(goal), f"goalmanage:repair_apply:{goal.uid}")]
+            for goal in allocator.settings.goals]
     await callback.message.answer(
         f"Прежнее название: <b>{escape(old)}</b>\n\nВыберите его новое название.",
         reply_markup=keyboard(rows + [[("← Назад", "goalmanage:repair")]]),
@@ -221,15 +230,12 @@ async def apply_legacy_goal(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
     old = data.get("legacy_goal_name")
-    try:
-        index = int(callback.data.rsplit(":", 1)[1])
-    except ValueError:
-        index = -1
     allocator = db.load_allocator(callback.from_user.id)
-    if not old or not 0 <= index < len(allocator.settings.goals):
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if not old or resolved is None:
         await callback.message.answer("Не удалось связать цель. Откройте список заново.")
         return
-    goal = allocator.settings.goals[index]
+    _, goal = resolved
     amount = Decimal(str(allocator.state.goal_balances.pop(old, Decimal("0"))))
     allocator.state.goal_balances[goal.name] = (
         Decimal(str(allocator.state.goal_balances.get(goal.name, 0))) + amount
@@ -249,21 +255,17 @@ async def apply_legacy_goal(callback: CallbackQuery, state: FSMContext):
 async def show_goals_archive(callback: CallbackQuery):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    archived = [
-        (index, goal)
-        for index, goal in enumerate(allocator.settings.goals)
-        if goal.status == "archived"
-    ]
+    archived = [goal for goal in allocator.settings.goals if goal.status == "archived"]
     if not archived:
         await show_goals_manager(callback.message, callback.from_user.id)
         return
     lines = "\n".join(
         f"• {icon(goal)} <b>{escape(display_name(goal))}</b>"
-        for _, goal in archived
+        for goal in archived
     )
     rows = [
-        [(f"Вернуть · {display_name(goal)}", f"goalmanage:restore:{index}")]
-        for index, goal in archived
+        [(f"Вернуть · {display_name(goal)}", f"goalmanage:restore:{goal.uid}")]
+        for goal in archived
     ]
     rows.append([("← Назад", "goals:manage")])
     await callback.message.answer(
@@ -651,12 +653,12 @@ async def save_percentage(message: Message, state: FSMContext):
 async def view_position(callback: CallbackQuery):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    try:
-        index = int(callback.data.rsplit(":", 1)[1])
-        goal = allocator.settings.goals[index]
-    except (ValueError, IndexError):
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
         await show_goals_manager(callback.message, callback.from_user.id)
         return
+    _, goal = resolved
+    uid = goal.uid
     target = ""
     if goal.is_goal:
         forecast = allocator.goal_forecast(goal)
@@ -674,22 +676,22 @@ async def view_position(callback: CallbackQuery):
     elif goal.status == "archived":
         status = "В архиве"
     actions = [
-        [("Изменить название", f"goalmanage:edit:name:{index}")],
-        *([[("Изменить сумму", f"goalmanage:edit:target:{index}"), ("Изменить срок", f"goalmanage:edit:deadline:{index}")],
-           [("Изменить запас", f"goalmanage:edit:buffer:{index}")]] if goal.is_goal and goal.status not in {"completed", "archived"} else []),
+        [("Изменить название", f"goalmanage:edit:name:{uid}")],
+        *([[("Изменить сумму", f"goalmanage:edit:target:{uid}"), ("Изменить срок", f"goalmanage:edit:deadline:{uid}")],
+           [("Изменить запас", f"goalmanage:edit:buffer:{uid}")]] if goal.is_goal and goal.status not in {"completed", "archived"} else []),
     ]
-    if goal.status in {"active", "paused"}:
-        actions.append([(("Возобновить" if goal.status == "paused" else "Поставить на паузу"), f"goalmanage:toggle:{index}")])
+    if goal.status in {"active", "paused"} and not goal.is_system_chest:
+        actions.append([(("Возобновить" if goal.status == "paused" else "Поставить на паузу"), f"goalmanage:toggle:{uid}")])
     if goal.is_goal and goal.status in {"active", "paused"}:
-        actions.append([("✔️ Отметить выполненной", f"goalmanage:complete:ask:{index}")])
+        actions.append([("✔️ Отметить выполненной", f"goalmanage:complete:ask:{uid}")])
     if goal.status == "completed":
-        actions.append([("Перенести в архив", f"goalmanage:archive:{index}")])
+        actions.append([("Перенести в архив", f"goalmanage:archive:{uid}")])
     if goal.status == "archived":
-        actions.append([("Вернуть из архива", f"goalmanage:restore:{index}")])
+        actions.append([("Вернуть из архива", f"goalmanage:restore:{uid}")])
     if not goal.is_system_chest:
-        actions.append([("🗑️ Удалить", f"goalmanage:delete:ask:{index}")])
+        actions.append([("🗑️ Удалить", f"goalmanage:delete:ask:{uid}")])
     else:
-        actions.append([("ℹ️ Постоянный Сундук", f"goalmanage:system_chest:{index}")])
+        actions.append([("ℹ️ Постоянный Сундук", f"goalmanage:system_chest:{uid}")])
     actions.append([("← Назад", "goals:manage")])
     await callback.message.answer(
         f"<b>{icon(goal)} {escape(goal.name.upper())}</b>\n\n"
@@ -701,12 +703,13 @@ async def view_position(callback: CallbackQuery):
 
 async def begin_edit(callback: CallbackQuery, state: FSMContext, field: str, state_value: State, prompt: str):
     await callback.answer()
-    try:
-        index = int(callback.data.rsplit(":", 1)[1])
-    except ValueError:
+    allocator = db.load_allocator(callback.from_user.id)
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
         await show_goals_manager(callback.message, callback.from_user.id)
         return
-    await state.update_data(edit_goal_index=index)
+    _, goal = resolved
+    await state.update_data(edit_goal_uid=goal.uid)
     await state.set_state(state_value)
     await callback.message.answer(prompt, reply_markup=keyboard([[("✖️ Отмена", "goals:manage")]]))
 
@@ -721,11 +724,19 @@ async def save_edited_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     data = await state.get_data()
     allocator = db.load_allocator(message.from_user.id)
-    index = int(data["edit_goal_index"])
+    resolved = goal_by_token(
+        allocator,
+        data.get("edit_goal_uid", data.get("edit_goal_index", "")),
+    )
+    if resolved is None:
+        await state.clear()
+        await message.answer("Эта цель уже изменена.")
+        await show_goals_manager(message, message.from_user.id)
+        return
+    index, goal = resolved
     if not name or len(name) > 60 or any(i != index and goal.name.casefold() == name.casefold() for i, goal in enumerate(allocator.settings.goals)):
         await message.answer("Введите уникальное название длиной до 60 символов.")
         return
-    goal = allocator.settings.goals[index]
     old_name = goal.name
     goal.name = name
     db.record_envelope_rename(
@@ -786,7 +797,16 @@ async def save_edited_buffer(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     allocator = db.load_allocator(message.from_user.id)
-    goal = allocator.settings.goals[int(data["edit_goal_index"])]
+    resolved = goal_by_token(
+        allocator,
+        data.get("edit_goal_uid", data.get("edit_goal_index", "")),
+    )
+    if resolved is None:
+        await state.clear()
+        await message.answer("Эта цель уже изменена.")
+        await show_goals_manager(message, message.from_user.id)
+        return
+    _, goal = resolved
     goal.buffer_enabled = value > 0
     goal.buffer_percent = value
     goal.updated_at = datetime.now(timezone.utc).isoformat()
@@ -798,7 +818,16 @@ async def save_edited_buffer(message: Message, state: FSMContext):
 async def save_simple_goal_edit(message: Message, state: FSMContext, field: str, value):
     data = await state.get_data()
     allocator = db.load_allocator(message.from_user.id)
-    goal = allocator.settings.goals[int(data["edit_goal_index"])]
+    resolved = goal_by_token(
+        allocator,
+        data.get("edit_goal_uid", data.get("edit_goal_index", "")),
+    )
+    if resolved is None:
+        await state.clear()
+        await message.answer("Эта цель уже изменена.")
+        await show_goals_manager(message, message.from_user.id)
+        return
+    _, goal = resolved
     setattr(goal, field, value)
     if field == "target_amount":
         goal.currency_code = "RUB"
@@ -812,8 +841,17 @@ async def save_simple_goal_edit(message: Message, state: FSMContext, field: str,
 async def toggle_position(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    index = int(callback.data.rsplit(":", 1)[1])
-    goal = allocator.settings.goals[index]
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
+        await show_goals_manager(callback.message, callback.from_user.id)
+        return
+    _, goal = resolved
+    if goal.is_system_chest:
+        await callback.message.answer(
+            "Постоянный Сундук всегда активен: он принимает свободные деньги, когда остальные Цели заполнены.",
+            reply_markup=keyboard([[("← Назад", f"goalmanage:view:{goal.uid}")]]),
+        )
+        return
     if goal.status not in {"active", "paused"}:
         await callback.message.answer("Эту позицию сначала нужно вернуть из архива.")
         return
@@ -844,13 +882,16 @@ async def toggle_position(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("goalmanage:complete:ask:"))
 async def ask_complete_position(callback: CallbackQuery):
     await callback.answer()
-    index = int(callback.data.rsplit(":", 1)[1])
     allocator = db.load_allocator(callback.from_user.id)
-    goal = allocator.settings.goals[index]
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
+        await show_goals_manager(callback.message, callback.from_user.id)
+        return
+    _, goal = resolved
     await callback.message.answer(
         f"Отметить ⭐️ <b>{escape(goal.name)}</b> выполненной? Она перестанет получать новые деньги.",
         reply_markup=keyboard([
-            [("✔️ Цель выполнена", f"goalmanage:complete:yes:{index}")],
+            [("✔️ Цель выполнена", f"goalmanage:complete:yes:{goal.uid}")],
             [("✖️ Отмена", "goals:manage")],
         ]),
     )
@@ -860,8 +901,11 @@ async def ask_complete_position(callback: CallbackQuery):
 async def complete_position(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    index = int(callback.data.rsplit(":", 1)[1])
-    goal = allocator.settings.goals[index]
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
+        await show_goals_manager(callback.message, callback.from_user.id)
+        return
+    _, goal = resolved
     if not goal.is_goal:
         await callback.message.answer("Сундук не имеет конечной точки и не завершается автоматически.")
         return
@@ -884,7 +928,11 @@ async def complete_position(callback: CallbackQuery, state: FSMContext):
 async def archive_position(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    goal = allocator.settings.goals[int(callback.data.rsplit(":", 1)[1])]
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
+        await show_goals_manager(callback.message, callback.from_user.id)
+        return
+    _, goal = resolved
     if goal.status != "completed":
         await callback.message.answer("В архив можно перенести завершённую Цель.")
         return
@@ -900,7 +948,11 @@ async def archive_position(callback: CallbackQuery, state: FSMContext):
 async def restore_position(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    goal = allocator.settings.goals[int(callback.data.rsplit(":", 1)[1])]
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
+        await show_goals_manager(callback.message, callback.from_user.id)
+        return
+    _, goal = resolved
     if goal.status != "archived":
         await show_goals_manager(callback.message, callback.from_user.id)
         return
@@ -919,20 +971,28 @@ async def restore_position(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("goalmanage:delete:ask:"))
 async def ask_delete_position(callback: CallbackQuery):
     await callback.answer()
-    index = int(callback.data.rsplit(":", 1)[1])
     allocator = db.load_allocator(callback.from_user.id)
-    goal = allocator.settings.goals[index]
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
+        await show_goals_manager(callback.message, callback.from_user.id)
+        return
+    _, goal = resolved
     if goal.is_system_chest:
         await callback.message.answer(
             "Этот Сундук нельзя удалить: он принимает свободные деньги, когда "
-            "другие Цели заполнены. Его можно переименовать или изменить долю."
+            "другие Цели заполнены. Его можно переименовать или изменить долю.",
+            reply_markup=keyboard([[("← Назад", f"goalmanage:view:{goal.uid}")]]),
         )
         return
+    destination = allocator.ensure_active_chest()
+    balance = Decimal(str(allocator.state.goal_balances.get(goal.name, goal.balance)))
     await callback.message.answer(
-        f"Удалить {icon(goal)} <b>{escape(display_name(goal))}</b>? Это действие нельзя отменить.",
+        f"Удалить {icon(goal)} <b>{escape(display_name(goal))}</b>?\n\n"
+        f"Сейчас здесь — <b>{rub(balance)}</b>. Деньги останутся в накоплениях "
+        f"и будут перенесены в 🧳 <b>{escape(display_name(destination))}</b>.",
         reply_markup=keyboard([
-            [("🗑️ Удалить", f"goalmanage:delete:yes:{index}")],
-            [("✖️ Отмена", "goals:manage")],
+            [("🗑️ Удалить", f"goalmanage:delete:yes:{goal.uid}")],
+            [("← Назад", f"goalmanage:view:{goal.uid}"), ("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -942,7 +1002,8 @@ async def explain_system_chest(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer(
         "Этот Сундук нельзя удалить: он всегда остаётся маршрутом для свободных "
-        "денег. Его можно переименовать и настроить его долю."
+        "денег. Его можно переименовать и настроить его долю.",
+        reply_markup=keyboard([[("← Назад", f"goalmanage:view:{callback.data.rsplit(':', 1)[1]}")]]),
     )
 
 
@@ -950,23 +1011,59 @@ async def explain_system_chest(callback: CallbackQuery):
 async def delete_position(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    index = int(callback.data.rsplit(":", 1)[1])
-    try:
-        goal = allocator.settings.goals[index]
-        if goal.is_system_chest:
-            await callback.message.answer(
-                "Этот Сундук нельзя удалить. Его можно переименовать."
-            )
-            return
-        if allocator.is_last_active_chest(goal):
-            await callback.message.answer("Этот Сундук пока единственный активный. Сначала добавьте или возобновите другой — он будет принимать свободные деньги.")
-            return
-        allocator.settings.goals.pop(index)
-    except IndexError:
+    resolved = goal_by_token(allocator, callback.data.rsplit(":", 1)[1])
+    if resolved is None:
         await show_goals_manager(callback.message, callback.from_user.id)
         return
-    allocator.state.goal_balances.pop(goal.name, None)
+    index, goal = resolved
+    if goal.is_system_chest:
+        await callback.message.answer(
+            "Этот Сундук нельзя удалить. Его можно переименовать.",
+            reply_markup=keyboard([[("← Назад", f"goalmanage:view:{goal.uid}")]]),
+        )
+        return
+    if allocator.is_last_active_chest(goal):
+        await callback.message.answer(
+            "Этот Сундук пока единственный активный. Сначала добавьте или возобновите другой — он будет принимать свободные деньги.",
+            reply_markup=keyboard([[("← Назад", f"goalmanage:view:{goal.uid}")]]),
+        )
+        return
+    destination = allocator.ensure_active_chest()
+    moved = Decimal(str(allocator.state.goal_balances.pop(goal.name, goal.balance)))
+    allocator.state.goal_balances[destination.name] = (
+        Decimal(str(allocator.state.goal_balances.get(destination.name, destination.balance)))
+        + moved
+    )
+    source_key = f"Цели:{goal.name}"
+    destination_key = f"Цели:{destination.name}"
+    period_moved = Decimal(str(allocator.state.period_allocations.pop(source_key, 0)))
+    if period_moved:
+        allocator.state.period_allocations[destination_key] = (
+            Decimal(str(allocator.state.period_allocations.get(destination_key, 0)))
+            + period_moved
+        )
+    allocator.settings.goals.pop(index)
     normalize_active_goal_percentages(allocator.settings.goals)
-    db.save_allocator(callback.from_user.id, allocator)
+    with db.transaction():
+        if moved:
+            db.save_operation(
+                callback.from_user.id,
+                "envelope_transfer",
+                {
+                    "source": source_key,
+                    "source_id": f"goal:{goal.uid}",
+                    "destination": destination_key,
+                    "destination_id": f"goal:{destination.uid}",
+                    "source_kind": "chest" if goal.is_chest else "goal",
+                    "destination_kind": "chest",
+                    "amount": str(moved),
+                    "reason": "goal_deleted",
+                },
+            )
+        db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
+    await callback.message.answer(
+        f"{icon(goal)} <b>{escape(display_name(goal))}</b> удалён. "
+        f"{rub(moved)} перенесено в 🧳 <b>{escape(display_name(destination))}</b>."
+    )
     await show_goals_manager(callback.message, callback.from_user.id)

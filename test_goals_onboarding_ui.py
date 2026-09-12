@@ -90,9 +90,9 @@ class GoalsOnboardingUiTests(unittest.IsolatedAsyncioTestCase):
             for row in kwargs["reply_markup"].inline_keyboard
             for button in row
         ]
-        self.assertIn("Отпуск", labels)
-        self.assertIn("Сундук Подарков", labels)
-        self.assertIn("Сундук Техники", labels)
+        self.assertIn("⭐️ Отпуск", labels)
+        self.assertIn("🧳 Сундук Подарков", labels)
+        self.assertIn("🧳 Сундук Техники", labels)
         self.assertIn("+ Своя Цель или Сундук", labels)
         self.assertIn("Мне пока не нужны", labels)
         self.assertNotIn("Сундук Хотелок", labels)

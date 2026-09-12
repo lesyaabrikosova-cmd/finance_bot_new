@@ -41,7 +41,7 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             await send_income_history(message, 42)
         markup = message.answer.await_args.kwargs["reply_markup"]
         buttons = [button.text for row in markup.inline_keyboard for button in row]
-        self.assertIn("09.09 · Частник · 3 700", buttons)
+        self.assertIn("09.09.2026 · Частник · 3 700", buttons)
         self.assertIn("← К анализу доходов", buttons)
         self.assertIn("← Главное меню", buttons)
 

@@ -1,0 +1,153 @@
+import tempfile
+import unittest
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import SendPhoto
+
+import income
+from financial_engine import AllocatorState, FinancialAllocator, UserSettings
+
+
+class FakeState:
+    def __init__(self, state=None, data=None):
+        self.value = state
+        self.data = dict(data or {})
+        self.clear = AsyncMock()
+
+    async def get_state(self):
+        return self.value
+
+    async def get_data(self):
+        return dict(self.data)
+
+
+class IncomeInputTests(unittest.TestCase):
+    def test_parser_accepts_russian_and_international_grouping(self):
+        self.assertEqual(income.parse_decimal("1,234.56"), Decimal("1234.56"))
+        self.assertEqual(income.parse_decimal("1.234,56"), Decimal("1234.56"))
+        self.assertEqual(income.parse_decimal("125 000,50 ₽"), Decimal("125000.50"))
+
+    def test_parser_rejects_non_finite_exponents_and_subkopecks(self):
+        for raw in (
+            "NaN", "Infinity", "-Infinity", "1e3", "1E999999", "0.001",
+            "1,234,56", "12.34.56", "1000000000001",
+        ):
+            with self.subTest(raw=raw):
+                self.assertIsNone(income.parse_decimal(raw))
+
+    def test_financial_core_rejects_non_finite_income(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("100"),
+        ))
+        for value in (Decimal("NaN"), Decimal("Infinity")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                allocator.process_income(value, "Доход")
+
+
+class IncomeFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_cancel_cannot_clear_another_wizard(self):
+        state = FakeState("Taxes:amount", {"income_flow_id": "current"})
+        callback = SimpleNamespace(
+            data="income:cancel|old",
+            answer=AsyncMock(),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+
+        accepted = await income.require_current_flow(callback, state)
+
+        self.assertFalse(accepted)
+        state.clear.assert_not_awaited()
+        self.assertIn("другая операция", callback.message.answer.await_args.args[0])
+
+    async def test_missing_income_image_still_sends_report_with_navigation(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        markup = object()
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.png"
+            await income.send_photo_with_sections(
+                message, missing, ["Отчёт сохранён"], reply_markup=markup,
+            )
+
+        self.assertEqual(message.answer.await_args.args[0], "Отчёт сохранён")
+        self.assertIs(message.answer.await_args.kwargs["reply_markup"], markup)
+
+    async def test_telegram_photo_error_falls_back_to_text_and_navigation(self):
+        message = SimpleNamespace(
+            answer_photo=AsyncMock(side_effect=TelegramBadRequest(
+                method=SendPhoto(chat_id=1, photo="x"), message="bad media",
+            )),
+            answer=AsyncMock(),
+        )
+        markup = object()
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "income.png"
+            image.write_bytes(b"not important")
+            await income.send_photo_with_sections(
+                message, image, ["Доход распределён"], reply_markup=markup,
+            )
+
+        self.assertEqual(message.answer.await_args.args[0], "Доход распределён")
+        self.assertIs(message.answer.await_args.kwargs["reply_markup"], markup)
+
+    async def test_live_report_merges_taxes_and_shows_household_subcategories(self):
+        allocator = FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            profile_type="cyclic",
+            income_rhythm="cyclic",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("50"),
+            average_income=Decimal("1000"),
+            life_categories={"Жизнь": Decimal("100")},
+            household_reserve_categories={"Продукты": Decimal("30")},
+            income_gap_months=Decimal("1"),
+        ), AllocatorState(
+            intercontract_reserve=Decimal("200"),
+            pillow_force_majeure=Decimal("100"),
+            pillow_stabilizer=Decimal("50"),
+        ))
+        result = SimpleNamespace(
+            income=Decimal("100"),
+            tax=Decimal("10"),
+            allocations={
+                "КЖ:Налоги": Decimal("20"),
+                "БР:Продукты": Decimal("30"),
+                "Бытовой резерв": Decimal("0"),
+                "Фонд Зарплаты": Decimal("5"),
+                "Подушка": Decimal("4"),
+                "Стабилизатор дохода": Decimal("3"),
+                "Инвестиции": Decimal("2"),
+            },
+            super_stage_allocated=Decimal("0"),
+            checks={"total": Decimal("100"), "income": Decimal("100"),
+                    "difference": Decimal("0"), "ok": True},
+            steps=[],
+        )
+        message = SimpleNamespace(from_user=SimpleNamespace(id=10))
+        with (
+            patch.object(income, "send_photo_with_sections", new=AsyncMock()) as send,
+            patch.object(income, "main_menu_keyboard", return_value=object()),
+        ):
+            await income.send_distribution_report(
+                message, allocator, result, "Контракт", date(2026, 9, 12),
+            )
+
+        text = "\n".join(send.await_args.args[2])
+        self.assertEqual(text.count("🏛️ <b>Налоги</b>"), 1)
+        self.assertIn("🏛️ <b>Налоги</b> — 30", text)
+        self.assertNotIn("🏛️ <b>Налог</b>", text)
+        self.assertIn("💚 <b>Продукты</b> — 30", text)
+        self.assertLess(text.index("🏦 <b>Фонд Зарплаты</b>"), text.index("🛡️ <b>Подушка</b>"))
+
+
+if __name__ == "__main__":
+    unittest.main()

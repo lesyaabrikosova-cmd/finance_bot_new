@@ -9,8 +9,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from financial_engine import goal_display_name
+from financial_engine import goal_display_name, is_system_envelope_name
 from storage import db
+from time_utils import moscow_now
 from ui import keyboard, main_menu_keyboard
 
 router = Router()
@@ -60,6 +61,18 @@ def fmt_money(value: Decimal) -> str:
     formatted = f"{Decimal(value):,.2f}"
     formatted = formatted.replace(",", " ").replace(".", ",")
     return formatted[:-3] if formatted.endswith(",00") else formatted
+
+
+def set_user_critical_life(settings, value: Decimal) -> Decimal:
+    """Save the user's ordinary monthly costs without baking in automatics.
+
+    Planned taxes and other dated obligations are kept separately and are
+    added by ``recalculate_critical_life``.  Treating the number entered by the
+    user as the already-increased total used to make the permanent part drift
+    down after an automatic obligation was later removed.
+    """
+    settings.base_critical_life = Decimal(value)
+    return settings.recalculate_critical_life()
 
 def distribute_existing_pillow(allocator, total: Decimal) -> None:
     s = allocator.settings
@@ -722,14 +735,27 @@ async def confirm_full_reset(
     st.distribution_history = []
 
     # Новый отсчёт начинается сейчас
-    st.period_started_at = datetime.now().isoformat()
+    st.period_started_at = moscow_now().isoformat()
 
-    db.save_allocator(
-        callback.from_user.id,
-        allocator,
-    )
-
-    db.clear_accounting_history(callback.from_user.id)
+    try:
+        # The visible zero balances and the SQL accounting ledger are one
+        # reset.  If either write fails, SQLite restores both instead of
+        # leaving a half-reset profile.
+        with db.transaction():
+            db.save_allocator(
+                callback.from_user.id,
+                allocator,
+            )
+            db.clear_accounting_history(callback.from_user.id)
+    except Exception:
+        await callback.message.answer(
+            "Не удалось полностью обнулить учёт. Все данные сохранены без изменений.",
+            reply_markup=keyboard([
+                [("← Главное меню", "menu:back")],
+                [("← Назад", "settings:developer")],
+            ]),
+        )
+        return
 
     await callback.message.answer(
         "✅ <b>УЧЁТ ПОЛНОСТЬЮ ОБНУЛЁН</b>\n\n"
@@ -781,9 +807,10 @@ async def edit_critical(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditSettingsStates.critical_life)
     await callback.message.answer(
         "🔴 <b>ОБЯЗАТЕЛЬНАЯ ЖИЗНЬ</b>\n\n"
-        f"Сейчас: <b>{rub(allocator.settings.critical_life)}</b>\n\n"
+        f"Сейчас: <b>{rub(allocator.settings.base_critical_life)}</b>\n\n"
         "Введите новую месячную сумму обязательных расходов.\n"
-        "Кредитные минимальные платежи сюда не добавляйте — они учитываются отдельно."
+        "Налоги, плановые платежи и минимальные платежи по долгам сюда "
+        "не добавляйте — Аллокатор учитывает их отдельно."
     )
 
 @router.message(EditSettingsStates.critical_life)
@@ -793,7 +820,14 @@ async def save_critical(message: Message, state: FSMContext):
         await message.answer("Введите сумму больше 0.")
         return
     allocator = db.load_allocator(message.from_user.id)
-    explicit = sum(allocator.settings.life_categories.values(), Decimal("0"))
+    explicit = sum(
+        (
+            amount
+            for name, amount in allocator.settings.life_categories.items()
+            if name.strip().casefold() not in {"налог", "налоги"}
+        ),
+        Decimal("0"),
+    )
     if explicit > value:
         await message.answer(
             "Новая КЖ меньше суммы ваших отдельных категорий КЖ.\n\n"
@@ -801,15 +835,13 @@ async def save_critical(message: Message, state: FSMContext):
             "Сначала уменьшите категории либо введите КЖ не меньше этой суммы."
         )
         return
-    # В интерфейсе редактируется итоговый КМ. Внутри сохраняем его
-    # постоянную часть без активных временных обязательств.
-    allocator.settings.base_critical_life = max(
-        Decimal("0"), value - allocator.settings.automatic_critical_life,
-    )
-    allocator.settings.recalculate_critical_life()
+    actual = set_user_critical_life(allocator.settings, value)
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(f"✅ Обязательная жизнь обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
+    await message.answer(
+        f"✅ Критический минимум обновлён: <b>{rub(actual)}</b>",
+        reply_markup=main_menu_keyboard(message.from_user.id),
+    )
 
 @router.callback_query(F.data == "settings:household")
 async def edit_household(callback: CallbackQuery, state: FSMContext):
@@ -965,14 +997,32 @@ async def income_type_save(callback: CallbackQuery, state: FSMContext):
     rate = Decimal(data["income_type_draft_rate"])
     if action == "rename":
         original = data["income_type_edit_original"]
+        identifier = allocator.settings.ensure_income_type_id(original)
         rates = {name if item == original else item: item_rate for item, item_rate in rates.items()}
         allocator.settings.income_type_tax_rates = rates
+        allocator.settings.income_type_ids.pop(original, None)
+        allocator.settings.income_type_ids[name] = identifier
+        allocator.settings.income_type_labels[identifier] = name
     else:
         rates[name] = rate
+        allocator.settings.ensure_income_type_id(name)
     allocator.settings.taxable_income_types = [
         item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
     ]
-    db.save_allocator(callback.from_user.id, allocator)
+    if action == "rename":
+        # The label bridge and the settings row are one logical migration.
+        # Keeping them in one transaction prevents a half-renamed type if the
+        # second write ever fails.
+        with db.transaction():
+            db.record_income_type_rename(
+                callback.from_user.id,
+                original,
+                name,
+                identifier,
+            )
+            db.save_allocator(callback.from_user.id, allocator)
+    else:
+        db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
     await show_income_types_settings(callback.message, callback.from_user.id)
 
@@ -1072,7 +1122,9 @@ async def income_type_delete_confirm(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     data = await state.get_data()
     allocator = db.load_allocator(callback.from_user.id)
-    allocator.settings.income_type_tax_rates.pop(data["income_type_edit_original"], None)
+    original = data["income_type_edit_original"]
+    allocator.settings.income_type_tax_rates.pop(original, None)
+    allocator.settings.income_type_ids.pop(original, None)
     allocator.settings.taxable_income_types = [name for name, rate in allocator.settings.income_type_tax_rates.items() if rate > 0]
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
@@ -1117,7 +1169,10 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         f"• {escape(name)} = {rub(amount)}"
         for name, amount in allocator.settings.life_categories.items()
     ) or "Отдельных категорий сейчас нет."
-    rows = [[(name, f"settings:life_open:{name}")] for name in allocator.settings.life_categories]
+    rows = [
+        [(name, f"settings:life_open:{allocator.settings.ensure_life_category_id(name)}")]
+        for name in allocator.settings.life_categories
+    ]
     current_names = set(allocator.settings.life_categories) | {"Зарплата"}
     legacy_names = [
         name for name, amount in allocator.state.period_life_topups.items()
@@ -1200,18 +1255,29 @@ async def apply_legacy_life_category(callback: CallbackQuery, state: FSMContext)
 @router.callback_query(F.data.startswith("settings:life_open:"))
 async def open_life_category(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    name = callback.data.split(":", 2)[2]
+    token = callback.data.split(":", 2)[2]
     allocator = db.load_allocator(callback.from_user.id)
+    name = next(
+        (name for name, uid in allocator.settings.life_category_ids.items() if uid == token),
+        token,  # backward compatibility with buttons sent before the migration
+    )
     amount = allocator.settings.life_categories.get(name)
     if amount is None:
-        await callback.message.answer("Эта категория уже изменена. Откройте список заново.")
+        await callback.message.answer(
+            "Эта категория уже изменена. Откройте список заново.",
+            reply_markup=keyboard([
+                [("← Назад", "settings:life_categories")],
+                [("← Главное меню", "menu:back")],
+            ]),
+        )
         return
+    uid = allocator.settings.ensure_life_category_id(name)
     await state.update_data(life_category_old=name)
     await callback.message.answer(
         f"<b>{escape(name)}</b>\n\nСумма в Критическом минимуме — <b>{rub(amount)}</b>.",
         reply_markup=keyboard([
-            [("Переименовать", f"settings:life_rename:{name}"), ("Изменить сумму", f"settings:life_amount:{name}")],
-            [("🗑️ Удалить категорию", f"settings:life_delete:{name}")],
+            [("Переименовать", f"settings:life_rename:{uid}"), ("Изменить сумму", f"settings:life_amount:{uid}")],
+            [("🗑️ Удалить категорию", f"settings:life_delete_ask:{uid}")],
             [("← Назад к категориям", "settings:life_categories")],
         ]),
     )
@@ -1219,7 +1285,18 @@ async def open_life_category(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("settings:life_rename:"))
 async def rename_life_category(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    old = callback.data.split(":", 2)[2]
+    token = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    old = next(
+        (name for name, uid in allocator.settings.life_category_ids.items() if uid == token),
+        token,
+    )
+    if old not in allocator.settings.life_categories:
+        await callback.message.answer(
+            "Эта категория уже изменена.",
+            reply_markup=keyboard([[("← Назад", "settings:life_categories")]]),
+        )
+        return
     await state.update_data(life_category_old=old)
     await state.set_state(EditSettingsStates.life_category_rename)
     await callback.message.answer(f"Введите новое название для категории «{escape(old)}».")
@@ -1227,22 +1304,96 @@ async def rename_life_category(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("settings:life_amount:"))
 async def change_life_category_amount(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    name = callback.data.split(":", 2)[2]
+    token = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    name = next(
+        (name for name, uid in allocator.settings.life_category_ids.items() if uid == token),
+        token,
+    )
+    if name not in allocator.settings.life_categories:
+        await callback.message.answer(
+            "Эта категория уже изменена.",
+            reply_markup=keyboard([[("← Назад", "settings:life_categories")]]),
+        )
+        return
     await state.update_data(life_category_old=name)
     await state.set_state(EditSettingsStates.life_category_amount)
     await callback.message.answer(f"Введите новую месячную сумму для категории «{escape(name)}».")
 
+@router.callback_query(F.data.startswith("settings:life_delete_ask:"))
+async def ask_delete_life_category(callback: CallbackQuery):
+    await callback.answer()
+    token = callback.data.split(":", 2)[2]
+    allocator = db.load_allocator(callback.from_user.id)
+    name = next(
+        (name for name, uid in allocator.settings.life_category_ids.items() if uid == token),
+        None,
+    )
+    if name is None:
+        await callback.message.answer(
+            "Эта категория уже изменена.",
+            reply_markup=keyboard([[("← Назад", "settings:life_categories")]]),
+        )
+        return
+    moved = Decimal(str(allocator.state.period_life_topups.get(name, 0)))
+    await callback.message.answer(
+        f"Удалить категорию <b>{escape(name)}</b>?\n\n"
+        f"Распределено за текущий период — <b>{rub(moved)}</b>. "
+        "Эта сумма останется в Балансе жизни и будет показана в конверте «Зарплата».",
+        reply_markup=keyboard([
+            [("🗑️ Удалить категорию", f"settings:life_delete:{token}")],
+            [("← Назад", f"settings:life_open:{token}"), ("← Главное меню", "menu:back")],
+        ]),
+    )
+
+
 @router.callback_query(F.data.startswith("settings:life_delete:"))
 async def delete_life_category(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    name = callback.data.split(":", 2)[2]
+    token = callback.data.split(":", 2)[2]
     allocator = db.load_allocator(callback.from_user.id)
+    name = next(
+        (name for name, uid in allocator.settings.life_category_ids.items() if uid == token),
+        token,
+    )
     if name in allocator.settings.life_categories:
+        uid = allocator.settings.life_category_ids.get(name, "")
         allocator.settings.life_categories.pop(name)
-        allocator.state.period_life_topups.pop(name, None)
-        db.save_allocator(callback.from_user.id, allocator)
+        allocator.settings.life_category_ids.pop(name, None)
+        moved = Decimal(str(allocator.state.period_life_topups.pop(name, Decimal("0"))))
+        if moved:
+            allocator.state.period_life_topups["Зарплата"] = (
+                Decimal(str(allocator.state.period_life_topups.get("Зарплата", 0))) + moved
+            )
+            source_key = f"КЖ:{name}"
+            allocator.state.period_allocations["КЖ:Зарплата"] = (
+                Decimal(str(allocator.state.period_allocations.get("КЖ:Зарплата", 0)))
+                + Decimal(str(allocator.state.period_allocations.pop(source_key, 0)))
+            )
+        with db.transaction():
+            if moved:
+                db.save_operation(
+                    callback.from_user.id,
+                    "envelope_transfer",
+                    {
+                        "source": f"КЖ:{name}",
+                        "source_id": f"life:{uid}" if uid else "",
+                        "destination": "КЖ:Зарплата",
+                        "source_kind": "life",
+                        "destination_kind": "life",
+                        "amount": str(moved),
+                        "reason": "life_category_deleted",
+                    },
+                )
+            db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
-    await callback.message.answer(f"Категория «{escape(name)}» удалена. Её сумма вернулась в конверт «Зарплата».", reply_markup=main_menu_keyboard(callback.from_user.id))
+    await callback.message.answer(
+        f"Категория «{escape(name)}» удалена. Её сумма осталась в Балансе жизни и перенесена в конверт «Зарплата».",
+        reply_markup=keyboard([
+            [("← К категориям", "settings:life_categories")],
+            [("← Главное меню", "menu:back")],
+        ]),
+    )
 
 @router.message(EditSettingsStates.life_categories)
 @router.message(EditSettingsStates.life_category_rename)
@@ -1271,7 +1422,7 @@ async def save_life_categories(message: Message, state: FSMContext):
     if current_state == EditSettingsStates.life_category_rename.state:
         data = await state.get_data()
         old, new = data.get("life_category_old", ""), text.strip()
-        if not new or new in allocator.settings.life_categories or new in {"Подушка", "Стабилизатор", "Фонд Зарплаты", "Бытовой резерв", "Инвестиции", "Налог"}:
+        if not new or new in allocator.settings.life_categories or is_system_envelope_name(new):
             await message.answer("Такое название недоступно. Введите другое название.")
             return
         allocator.settings.life_categories[new] = allocator.settings.life_categories.pop(old)
@@ -1296,8 +1447,7 @@ async def save_life_categories(message: Message, state: FSMContext):
             old, new = old.strip(), new.strip()
         except ValueError:
             old = new = ""
-        protected = {"Подушка", "Стабилизатор", "Фонд Зарплаты", "Бытовой резерв", "Инвестиции", "Налог"}
-        if (not old or not new or old in protected or new in protected
+        if (not old or not new or is_system_envelope_name(old) or is_system_envelope_name(new)
                 or old not in allocator.settings.life_categories
                 or new in allocator.settings.life_categories):
             await message.answer("Не удалось переименовать категорию. Проверьте старое и новое название.")
@@ -1318,8 +1468,10 @@ async def save_life_categories(message: Message, state: FSMContext):
         await message.answer(f"Категория переименована: <b>{escape(old)}</b> → <b>{escape(new)}</b>.", reply_markup=main_menu_keyboard(message.from_user.id))
         return
 
+    previous_category_ids = dict(allocator.settings.life_category_ids)
     if text.lower() in {"нет", "none", "0"}:
         allocator.settings.life_categories = {}
+        allocator.settings.life_category_ids = {}
     else:
         new_categories = {}
         try:
@@ -1327,7 +1479,7 @@ async def save_life_categories(message: Message, state: FSMContext):
                 name, raw_value = raw_item.split("=", 1)
                 name = name.strip()
                 value = parse_decimal(raw_value)
-                if not name or value is None or value <= 0:
+                if not name or is_system_envelope_name(name) or value is None or value <= 0:
                     raise ValueError
                 new_categories[name] = value
         except ValueError:
@@ -1347,6 +1499,10 @@ async def save_life_categories(message: Message, state: FSMContext):
             return
 
         allocator.settings.life_categories = new_categories
+        allocator.settings.life_category_ids = {
+            name: previous_category_ids.get(name) or allocator.settings.ensure_life_category_id(name)
+            for name in new_categories
+        }
 
     valid = set(allocator.settings.life_categories) | {"Зарплата"}
     allocator.state.period_life_topups = {

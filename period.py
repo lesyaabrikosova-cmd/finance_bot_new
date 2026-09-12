@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
 from financial_engine import goal_display_name
 from storage import db
+from time_utils import moscow_today
 from ui import keyboard, main_menu_keyboard
 
 router = Router()
@@ -863,7 +864,7 @@ async def confirm_new_period(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(str(error))
         return
     work_months_left = allocator.advance_work_month()
-    period_start, period_end = allocator.state.activate_budget_period(date.today())
+    period_start, period_end = allocator.state.activate_budget_period(moscow_today())
     db.save_allocator(callback.from_user.id, allocator)
     db.save_operation(
         callback.from_user.id,

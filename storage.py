@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import json
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -32,6 +34,7 @@ from financial_engine import (
     UserSettings,
     normalize_profile_id,
 )
+from time_utils import moscow_today
 
 
 # ============================================================
@@ -149,11 +152,13 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 10,
+        "version": 11,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
         },
+        "income_type_ids": dict(settings.income_type_ids),
+        "income_type_labels": dict(settings.income_type_labels),
         "rhythm": settings.income_rhythm,
         "profile_type": normalize_profile_id(
             settings.profile_type,
@@ -173,6 +178,9 @@ def serialize_income_types(settings: UserSettings) -> str:
             name: decimal_to_string(amount)
             for name, amount in settings.household_reserve_categories.items()
         },
+        "household_reserve_category_ids": dict(
+            settings.household_reserve_category_ids
+        ),
         "historical_gifts_monthly": decimal_to_string(settings.historical_gifts_monthly),
         "protective_stage_c_goals_share": decimal_to_string(
             settings.protective_stage_c_goals_share
@@ -207,7 +215,7 @@ def serialize_income_types(settings: UserSettings) -> str:
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8, 9, 10}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -219,7 +227,7 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8, 9, 10}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8, 9, 10, 11}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
@@ -239,6 +247,23 @@ def deserialize_income_rhythm(value) -> dict:
             "household_reserve_categories": {
                 str(name): string_to_decimal(amount)
                 for name, amount in raw.get("household_reserve_categories", {}).items()
+            },
+            "household_reserve_category_ids": {
+                str(name): str(uid)
+                for name, uid in raw.get(
+                    "household_reserve_category_ids", {}
+                ).items()
+                if str(name).strip() and str(uid).strip()
+            },
+            "income_type_ids": {
+                str(name): str(uid)
+                for name, uid in raw.get("income_type_ids", {}).items()
+                if str(name).strip() and str(uid).strip()
+            },
+            "income_type_labels": {
+                str(uid): str(name)
+                for uid, name in raw.get("income_type_labels", {}).items()
+                if str(uid).strip() and str(name).strip()
             },
             "historical_gifts_monthly": max(
                 Decimal("0"), string_to_decimal(raw.get("historical_gifts_monthly", "0"))
@@ -307,6 +332,13 @@ class Database:
             sqlite3.Row
         )
 
+        # Public save_* methods keep their historical auto-commit behaviour.
+        # A transaction() block temporarily suppresses those individual
+        # commits, so an income distribution and all of its dependent progress
+        # updates can be persisted as one SQLite unit.
+        self._transaction_depth = 0
+        self._savepoint_counter = 0
+
         # SQLite в нашем случае используется
         # как постоянное локальное хранилище.
         self.connection.execute(
@@ -318,6 +350,47 @@ class Database:
         )
 
         self.create_tables()
+
+    def _commit(self) -> None:
+        """Commit a standalone write, or defer it to the active transaction."""
+        if self._transaction_depth == 0:
+            self.connection.commit()
+
+    @contextmanager
+    def transaction(self) -> Iterator["Database"]:
+        """Group existing save_* calls into one atomic SQLite transaction.
+
+        Existing callers do not need to change: outside this context every
+        save_* method still commits immediately. Inside the context their
+        commits are deferred until the outer savepoint is released. Nested
+        blocks use independent savepoints and roll back only their own writes.
+
+        Keep the block synchronous; do not hold a database transaction across
+        an ``await`` in an async Telegram handler.
+
+        Example::
+
+            with db.transaction():
+                db.update_tax_obligation_saved(...)
+                db.update_planned_payment_saved(...)
+                db.save_allocator(telegram_id, allocator)
+        """
+        self._savepoint_counter += 1
+        savepoint = f"allocator_transaction_{self._savepoint_counter}"
+        self.connection.execute(f"SAVEPOINT {savepoint}")
+        self._transaction_depth += 1
+        try:
+            yield self
+        except BaseException:
+            try:
+                self.connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            finally:
+                self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+        else:
+            self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        finally:
+            self._transaction_depth -= 1
 
     # ========================================================
     # СОЗДАНИЕ ТАБЛИЦ
@@ -579,6 +652,8 @@ class Database:
                 paid_at TEXT NOT NULL,
                 obligation_id INTEGER,
                 tax_due_year INTEGER,
+                next_obligation_id INTEGER,
+                reversed_at TEXT,
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
                     ON DELETE CASCADE
@@ -598,13 +673,32 @@ class Database:
                 saved_before TEXT NOT NULL DEFAULT '0',
                 months INTEGER NOT NULL,
                 monthly_amount TEXT NOT NULL,
+                monthly_period TEXT,
                 annual_monthly_amount TEXT NOT NULL DEFAULT '0',
                 notice_received INTEGER NOT NULL DEFAULT 0,
                 ready_reminder_sent_at TEXT,
                 last_notice_reminder_at TEXT,
                 last_payment_reminder_at TEXT,
                 next_payment_reminder_date TEXT,
+                source_obligation_id INTEGER,
+                tracking_started_operation_id INTEGER NOT NULL DEFAULT 0,
+                tracking_closed_operation_id INTEGER,
+                closed_reason TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tax_global_reminders (
+                telegram_id INTEGER NOT NULL,
+                reminder_year INTEGER NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY (telegram_id, reminder_year),
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
                     ON DELETE CASCADE
@@ -645,6 +739,8 @@ class Database:
             cursor.execute(
                 "ALTER TABLE tax_obligations ADD COLUMN annual_monthly_amount TEXT NOT NULL DEFAULT '0'"
             )
+        if "monthly_period" not in tax_columns:
+            cursor.execute("ALTER TABLE tax_obligations ADD COLUMN monthly_period TEXT")
         if "notice_received" not in tax_columns:
             cursor.execute(
                 "ALTER TABLE tax_obligations ADD COLUMN notice_received INTEGER NOT NULL DEFAULT 0"
@@ -661,6 +757,19 @@ class Database:
             cursor.execute(
                 "ALTER TABLE tax_obligations ADD COLUMN next_payment_reminder_date TEXT"
             )
+        if "source_obligation_id" not in tax_columns:
+            cursor.execute("ALTER TABLE tax_obligations ADD COLUMN source_obligation_id INTEGER")
+        if "tracking_started_operation_id" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN "
+                "tracking_started_operation_id INTEGER NOT NULL DEFAULT 0"
+            )
+        if "tracking_closed_operation_id" not in tax_columns:
+            cursor.execute(
+                "ALTER TABLE tax_obligations ADD COLUMN tracking_closed_operation_id INTEGER"
+            )
+        if "closed_reason" not in tax_columns:
+            cursor.execute("ALTER TABLE tax_obligations ADD COLUMN closed_reason TEXT")
 
         payment_columns = {
             row["name"]
@@ -670,6 +779,10 @@ class Database:
             cursor.execute("ALTER TABLE tax_payments ADD COLUMN obligation_id INTEGER")
         if "tax_due_year" not in payment_columns:
             cursor.execute("ALTER TABLE tax_payments ADD COLUMN tax_due_year INTEGER")
+        if "next_obligation_id" not in payment_columns:
+            cursor.execute("ALTER TABLE tax_payments ADD COLUMN next_obligation_id INTEGER")
+        if "reversed_at" not in payment_columns:
+            cursor.execute("ALTER TABLE tax_payments ADD COLUMN reversed_at TEXT")
 
         state_columns = {
             row["name"]
@@ -808,7 +921,7 @@ class Database:
             """
         )
 
-        self.connection.commit()
+        self._commit()
 
     # ========================================================
     # ПОЛЬЗОВАТЕЛЬ
@@ -846,7 +959,7 @@ class Database:
             ),
         )
 
-        self.connection.commit()
+        self._commit()
 
     def user_exists(
         self,
@@ -881,7 +994,7 @@ class Database:
             "UPDATE state SET period_reminder_sent_for = ? WHERE telegram_id = ?",
             (activation_date, telegram_id),
         )
-        self.connection.commit()
+        self._commit()
 
     # ========================================================
     # СОХРАНЕНИЕ НАСТРОЕК
@@ -1290,7 +1403,7 @@ class Database:
                 ),
             )
 
-        self.connection.commit()
+        self._commit()
 
     # ========================================================
     # ЗАГРУЗКА НАСТРОЕК
@@ -1819,7 +1932,7 @@ class Database:
             ),
         )
 
-        self.connection.commit()
+        self._commit()
 
     # ========================================================
     # ЗАГРУЗКА STATE
@@ -1995,11 +2108,245 @@ class Database:
             ),
         )
 
-        self.connection.commit()
+        self._commit()
 
     # ========================================================
     # ЗАГРУЗКА ОПЕРАЦИЙ
     # ========================================================
+
+    @staticmethod
+    def _typed_envelope_id(key: str, entity_id: str) -> str:
+        """Normalize an entity ID saved by different schema generations."""
+        identifier = str(entity_id or "").strip()
+        if not identifier:
+            return ""
+        if identifier.startswith(("life:", "household:", "goal:")):
+            return identifier
+        if str(key).startswith("КЖ:"):
+            return f"life:{identifier}"
+        if str(key).startswith("БР:"):
+            return f"household:{identifier}"
+        if str(key).startswith("Цели:"):
+            return f"goal:{identifier}"
+        return identifier
+
+    def _operation_identity_context(self, telegram_id: int) -> dict:
+        """Read current labels for immutable operation identities.
+
+        This intentionally reads the compact settings/goals rows directly.
+        Calling ``load_allocator`` here would recurse through
+        ``load_operations`` via envelope normalization.
+        """
+        current_envelopes: dict[str, str] = {}
+        active_envelope_ids: dict[str, str] = {}
+        current_income_types: dict[str, str] = {}
+        active_income_type_ids: dict[str, str] = {}
+        income_type_labels: dict[str, str] = {}
+
+        row = self.connection.execute(
+            "SELECT life_category_ids, taxable_income_types FROM settings "
+            "WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        if row is not None:
+            life_ids = deserialize_json(row["life_category_ids"]) or {}
+            for name, raw_id in life_ids.items():
+                identifier = self._typed_envelope_id(f"КЖ:{name}", raw_id)
+                if identifier:
+                    key = f"КЖ:{name}"
+                    current_envelopes[identifier] = key
+                    active_envelope_ids[key] = identifier
+
+            metadata = deserialize_json(row["taxable_income_types"])
+            if isinstance(metadata, dict):
+                for name, raw_id in (
+                    metadata.get("household_reserve_category_ids", {}) or {}
+                ).items():
+                    identifier = self._typed_envelope_id(f"БР:{name}", raw_id)
+                    if identifier:
+                        key = f"БР:{name}"
+                        current_envelopes[identifier] = key
+                        active_envelope_ids[key] = identifier
+                for name, raw_id in (metadata.get("income_type_ids", {}) or {}).items():
+                    identifier = str(raw_id or "").strip()
+                    if identifier:
+                        current_income_types[identifier] = str(name)
+                        active_income_type_ids[str(name)] = identifier
+                income_type_labels = {
+                    str(identifier): str(name)
+                    for identifier, name in (
+                        metadata.get("income_type_labels", {}) or {}
+                    ).items()
+                    if str(identifier).strip() and str(name).strip()
+                }
+
+        goal_rows = self.connection.execute(
+            "SELECT name, uid FROM goals WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchall()
+        for goal_row in goal_rows:
+            identifier = self._typed_envelope_id(
+                f"Цели:{goal_row['name']}", goal_row["uid"],
+            )
+            if identifier:
+                key = f"Цели:{goal_row['name']}"
+                current_envelopes[identifier] = key
+                active_envelope_ids[key] = identifier
+
+        envelope_renames: list[dict] = []
+        income_type_renames: list[dict] = []
+        rename_rows = self.connection.execute(
+            "SELECT operation_type, payload FROM operation_log "
+            "WHERE telegram_id = ? AND operation_type IN "
+            "('envelope_rename', 'income_type_rename') ORDER BY id",
+            (telegram_id,),
+        ).fetchall()
+        for rename_row in rename_rows:
+            payload = deserialize_json(rename_row["payload"])
+            if not isinstance(payload, dict):
+                continue
+            if rename_row["operation_type"] == "envelope_rename":
+                old, new = payload.get("old"), payload.get("new")
+                if not isinstance(old, str) or not isinstance(new, str) or old == new:
+                    continue
+                envelope_renames.append({
+                    "old": old,
+                    "new": new,
+                    "entity_id": self._typed_envelope_id(
+                        old, payload.get("entity_id", ""),
+                    ),
+                })
+            else:
+                old, new = payload.get("old"), payload.get("new")
+                if not isinstance(old, str) or not isinstance(new, str) or old == new:
+                    continue
+                income_type_renames.append({
+                    "old": old,
+                    "new": new,
+                    "entity_id": str(payload.get("entity_id") or "").strip(),
+                })
+
+        historical_envelopes: dict[str, str] = {}
+        for rename in envelope_renames:
+            if rename["entity_id"]:
+                historical_envelopes[rename["entity_id"]] = rename["new"]
+        for rename in income_type_renames:
+            if rename["entity_id"]:
+                income_type_labels[rename["entity_id"]] = rename["new"]
+
+        return {
+            "current_envelopes": current_envelopes,
+            "active_envelope_ids": active_envelope_ids,
+            "historical_envelopes": historical_envelopes,
+            "envelope_renames": envelope_renames,
+            "current_income_types": current_income_types,
+            "active_income_type_ids": active_income_type_ids,
+            "income_type_labels": income_type_labels,
+            "income_type_renames": income_type_renames,
+        }
+
+    @staticmethod
+    def _legacy_redirect(name: str, renames: list[dict]) -> tuple[str, str]:
+        """Resolve a legacy name and return the identity learned on the way."""
+        resolved = str(name)
+        identifier = ""
+        seen: set[str] = set()
+        while resolved not in seen:
+            seen.add(resolved)
+            match = next(
+                (item for item in renames if item["old"] == resolved),
+                None,
+            )
+            if match is None:
+                break
+            resolved = match["new"]
+            identifier = match.get("entity_id") or identifier
+        return resolved, identifier
+
+    @staticmethod
+    def _archived_envelope_key(key: str, identifier: str) -> str:
+        """Keep a deleted identity distinct if its former label is reused."""
+        if ":" not in key:
+            return key
+        prefix, name = key.split(":", 1)
+        short_id = str(identifier).rsplit(":", 1)[-1][-6:]
+        return f"{prefix}:{name} · прежний {short_id}"
+
+    @staticmethod
+    def _merge_allocation_value(target: dict, key: str, value) -> None:
+        if key not in target:
+            target[key] = value
+            return
+        total = Decimal(str(target[key])) + Decimal(str(value))
+        if isinstance(target[key], Decimal) and isinstance(value, Decimal):
+            target[key] = total
+        else:
+            target[key] = decimal_to_string(total)
+
+    def _resolve_operation_payload_identities(self, payload: dict, context: dict) -> dict:
+        """Resolve editable labels by ID; names are only a legacy fallback."""
+        if not isinstance(payload, dict):
+            return payload
+
+        allocations = payload.get("allocations")
+        if isinstance(allocations, dict):
+            raw_ids = payload.get("envelope_ids")
+            envelope_ids = raw_ids if isinstance(raw_ids, dict) else {}
+            raw_kinds = payload.get("envelope_kinds")
+            envelope_kinds = raw_kinds if isinstance(raw_kinds, dict) else {}
+            resolved_allocations: dict = {}
+            resolved_ids: dict[str, str] = {}
+            resolved_kinds: dict[str, str] = {}
+            for raw_key, amount in allocations.items():
+                key = str(raw_key)
+                identifier = self._typed_envelope_id(
+                    key, envelope_ids.get(raw_key, envelope_ids.get(key, "")),
+                )
+                if identifier:
+                    resolved_key = context["current_envelopes"].get(identifier)
+                    if resolved_key is None:
+                        resolved_key = context["historical_envelopes"].get(
+                            identifier, key,
+                        )
+                        active_id = context["active_envelope_ids"].get(resolved_key)
+                        if active_id and active_id != identifier:
+                            resolved_key = self._archived_envelope_key(
+                                resolved_key, identifier,
+                            )
+                else:
+                    resolved_key, identifier = self._legacy_redirect(
+                        key, context["envelope_renames"],
+                    )
+                self._merge_allocation_value(
+                    resolved_allocations, resolved_key, amount,
+                )
+                if identifier:
+                    resolved_ids[resolved_key] = identifier
+                kind = str(envelope_kinds.get(raw_key, envelope_kinds.get(key, "")))
+                if kind:
+                    resolved_kinds[resolved_key] = kind
+            payload["allocations"] = resolved_allocations
+            if resolved_ids or isinstance(raw_ids, dict):
+                payload["envelope_ids"] = resolved_ids
+            if resolved_kinds or isinstance(raw_kinds, dict):
+                payload["envelope_kinds"] = resolved_kinds
+
+        if "income_type" in payload:
+            income_type = str(payload.get("income_type", "Без типа"))
+            income_type_id = str(payload.get("income_type_id") or "").strip()
+            if income_type_id:
+                payload["income_type"] = context["current_income_types"].get(
+                    income_type_id,
+                    context["income_type_labels"].get(income_type_id, income_type),
+                )
+            else:
+                resolved_name, inferred_id = self._legacy_redirect(
+                    income_type, context["income_type_renames"],
+                )
+                payload["income_type"] = resolved_name
+                if inferred_id:
+                    payload["income_type_id"] = inferred_id
+        return payload
 
     def record_envelope_rename(self, telegram_id, allocator, prefix, old, new, entity_id=""):
         """Record a changed label while retaining the envelope's immutable ID."""
@@ -2013,6 +2360,24 @@ class Database:
             {'old': old_key, 'new': new_key, 'entity_id': str(entity_id or '')},
         )
 
+    def record_income_type_rename(
+        self,
+        telegram_id: int,
+        old: str,
+        new: str,
+        entity_id: str,
+    ) -> None:
+        """Record the legacy-name bridge for operations saved before IDs."""
+        self.save_operation(
+            telegram_id,
+            "income_type_rename",
+            {
+                "old": str(old),
+                "new": str(new),
+                "entity_id": str(entity_id or ""),
+            },
+        )
+
     def normalize_envelope_names(self, telegram_id: int, allocator: FinancialAllocator) -> None:
         """Merge stale envelope aliases into their newest names everywhere in state.
 
@@ -2020,30 +2385,23 @@ class Database:
         aggregates and in goal balances. Reports must never treat those aliases
         as separate envelopes.
         """
-        rows = self.connection.execute(
-            "SELECT payload FROM operation_log WHERE telegram_id = ? "
-            "AND operation_type = 'envelope_rename' ORDER BY id",
-            (telegram_id,),
-        ).fetchall()
-        redirects = {}
-        for row in rows:
-            payload = deserialize_json(row["payload"])
-            old, new = payload.get("old"), payload.get("new")
-            if isinstance(old, str) and isinstance(new, str) and old != new:
-                redirects[old] = new
-
-        def current_name(name: str) -> str:
-            seen = set()
-            while name in redirects and name not in seen:
-                seen.add(name)
-                name = redirects[name]
-            return name
+        context = self._operation_identity_context(telegram_id)
 
         def merge(items: dict[str, Decimal], prefix: str = "") -> dict[str, Decimal]:
             result = {}
             for name, amount in items.items():
                 full_name = prefix + str(name)
-                resolved = current_name(full_name)
+                active_id = context["active_envelope_ids"].get(full_name)
+                resolved, rename_id = self._legacy_redirect(
+                    full_name, context["envelope_renames"],
+                )
+                # A newly-created category may deliberately reuse an old
+                # label. Its different ID makes the old redirect inapplicable.
+                if active_id and rename_id and active_id != rename_id:
+                    resolved = full_name
+                target_id = context["active_envelope_ids"].get(resolved)
+                if rename_id and target_id and target_id != rename_id:
+                    resolved = self._archived_envelope_key(resolved, rename_id)
                 final_name = resolved[len(prefix):] if prefix and resolved.startswith(prefix) else resolved
                 result[final_name] = result.get(final_name, Decimal("0")) + Decimal(str(amount))
             return result
@@ -2112,20 +2470,11 @@ class Database:
                     ),
             })
 
-        renames = self.connection.execute(
-            "SELECT id, payload FROM operation_log WHERE telegram_id = ? "
-            "AND operation_type = 'envelope_rename' ORDER BY id", (telegram_id,)
-        ).fetchall()
+        context = self._operation_identity_context(telegram_id)
         for operation in result:
-            allocations = operation['payload'].get('allocations')
-            if not isinstance(allocations, dict):
-                continue
-            for rename in renames:
-                names = deserialize_json(rename['payload'])
-                old, new = names['old'], names['new']
-                if old in allocations:
-                    allocations[new] = str(Decimal(str(allocations.get(new, 0)))
-                                           + Decimal(str(allocations.pop(old))))
+            operation["payload"] = self._resolve_operation_payload_identities(
+                operation["payload"], context,
+            )
         return result
 
     def update_income_note(
@@ -2154,8 +2503,28 @@ class Database:
             "UPDATE operation_log SET payload = ? WHERE id = ? AND telegram_id = ?",
             (serialize_json(payload), operation_id, telegram_id),
         )
-        self.connection.commit()
+        self._commit()
         return True
+
+    def update_income_operation_payload(
+        self,
+        telegram_id: int,
+        operation_id: int,
+        payload: dict,
+    ) -> bool:
+        """Replace a replayed income payload while preserving its ledger ID."""
+        cursor = self.connection.execute(
+            """
+            UPDATE operation_log
+            SET payload = ?
+            WHERE id = ?
+              AND telegram_id = ?
+              AND operation_type = 'income_distribution'
+            """,
+            (serialize_json(payload), operation_id, telegram_id),
+        )
+        self._commit()
+        return cursor.rowcount == 1
 
     def delete_income_operation(
         self,
@@ -2172,7 +2541,7 @@ class Database:
             """,
             (operation_id, telegram_id),
         )
-        self.connection.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     # ========================================================
@@ -2261,6 +2630,18 @@ class Database:
             settings.planned_taxes[
                 f"{item['tax_type']} · {item['object_name']}"
             ] = annual_monthly
+
+        # ``monthly_amount`` is the remaining accelerated contribution for
+        # the current calendar month.  It belongs to the obligation ledger,
+        # rather than to the serialized profile settings.  Rebuild the
+        # allocator cache from that canonical source on every load so a bot
+        # restart or a full history reset cannot silently lose the catch-up.
+        settings.tax_catchups = {}
+        for item in active_tax_obligations:
+            monthly = string_to_decimal(item.get("monthly_amount"))
+            settings.tax_catchups[
+                f"{item['tax_type']} · {item['object_name']}"
+            ] = max(Decimal("0"), monthly)
 
         # load_settings создаёт UserSettings до tax_configuration. Поэтому
         # для старого профиля отделяем налоговые взносы здесь, после загрузки
@@ -2398,7 +2779,7 @@ class Database:
                 int(settings.track_tax_payments),
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def load_tax_configuration(self, telegram_id: int) -> tuple[dict, bool]:
         row = self.connection.execute(
@@ -2417,13 +2798,15 @@ class Database:
         *,
         obligation_id: int | None = None,
         tax_due_year: int | None = None,
+        next_obligation_id: int | None = None,
     ) -> int:
         self.ensure_user(telegram_id)
         cursor = self.connection.execute(
             """
             INSERT INTO tax_payments (
-                telegram_id, tax_name, amount, paid_at, obligation_id, tax_due_year
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                telegram_id, tax_name, amount, paid_at, obligation_id,
+                tax_due_year, next_obligation_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 telegram_id,
@@ -2432,15 +2815,30 @@ class Database:
                 datetime.utcnow().isoformat(),
                 obligation_id,
                 tax_due_year,
+                next_obligation_id,
             ),
         )
-        self.connection.commit()
+        self._commit()
         return int(cursor.lastrowid)
 
-    def load_tax_payments(self, telegram_id: int, year: int | None = None) -> list[dict]:
+    def load_tax_payments(
+        self,
+        telegram_id: int,
+        year: int | None = None,
+        *,
+        tax_due_year: int | None = None,
+        include_reversed: bool = False,
+    ) -> list[dict]:
+        """Load recorded payments.
+
+        ``year`` remains the calendar year of the actual bank payment for
+        backward compatibility.  ``tax_due_year`` explicitly selects the
+        obligation's payment year; a property's tax period is one year earlier.
+        """
         rows = self.connection.execute(
             """
-            SELECT id, tax_name, amount, paid_at, obligation_id, tax_due_year
+            SELECT id, tax_name, amount, paid_at, obligation_id, tax_due_year,
+                   next_obligation_id, reversed_at
             FROM tax_payments
             WHERE telegram_id = ? ORDER BY id DESC
             """,
@@ -2451,6 +2849,10 @@ class Database:
             paid_at = datetime.fromisoformat(row["paid_at"])
             if year is not None and paid_at.year != year:
                 continue
+            if tax_due_year is not None and row["tax_due_year"] != tax_due_year:
+                continue
+            if not include_reversed and row["reversed_at"]:
+                continue
             result.append({
                 "id": int(row["id"]),
                 "tax_name": row["tax_name"],
@@ -2458,14 +2860,71 @@ class Database:
                 "paid_at": row["paid_at"],
                 "obligation_id": row["obligation_id"],
                 "tax_due_year": row["tax_due_year"],
+                "next_obligation_id": row["next_obligation_id"],
+                "reversed_at": row["reversed_at"],
             })
         return result
+
+    def load_tax_payment(
+        self,
+        telegram_id: int,
+        payment_id: int,
+        *,
+        include_reversed: bool = False,
+    ) -> dict | None:
+        return next(
+            (
+                item for item in self.load_tax_payments(
+                    telegram_id, include_reversed=include_reversed,
+                )
+                if item["id"] == payment_id
+            ),
+            None,
+        )
+
+    def link_tax_payment_next_cycle(
+        self, telegram_id: int, payment_id: int, next_obligation_id: int,
+    ) -> bool:
+        cursor = self.connection.execute(
+            """
+            UPDATE tax_payments SET next_obligation_id = ?
+            WHERE telegram_id = ? AND id = ? AND reversed_at IS NULL
+            """,
+            (next_obligation_id, telegram_id, payment_id),
+        )
+        self._commit()
+        return cursor.rowcount == 1
+
+    def reverse_tax_payment(self, telegram_id: int, payment_id: int) -> bool:
+        """Keep the audit row but remove it from every financial calculation."""
+        cursor = self.connection.execute(
+            """
+            UPDATE tax_payments SET reversed_at = ?
+            WHERE telegram_id = ? AND id = ? AND reversed_at IS NULL
+            """,
+            (datetime.utcnow().isoformat(), telegram_id, payment_id),
+        )
+        self._commit()
+        return cursor.rowcount == 1
+
+    def update_tax_payment_amount(
+        self, telegram_id: int, payment_id: int, amount: Decimal,
+    ) -> bool:
+        cursor = self.connection.execute(
+            """
+            UPDATE tax_payments SET amount = ?
+            WHERE telegram_id = ? AND id = ? AND reversed_at IS NULL
+            """,
+            (decimal_to_string(amount), telegram_id, payment_id),
+        )
+        self._commit()
+        return cursor.rowcount == 1
 
     def tax_obligation_paid_amount(self, telegram_id: int, obligation_id: int) -> Decimal:
         rows = self.connection.execute(
             """
             SELECT amount FROM tax_payments
-            WHERE telegram_id = ? AND obligation_id = ?
+            WHERE telegram_id = ? AND obligation_id = ? AND reversed_at IS NULL
             """,
             (telegram_id, obligation_id),
         ).fetchall()
@@ -2484,6 +2943,8 @@ class Database:
         annual_monthly_amount: Decimal | None = None,
         notice_received: bool = False,
         opening_amount: Decimal | None = None,
+        source_obligation_id: int | None = None,
+        monthly_period: str | None = None,
     ) -> int:
         self.ensure_user(telegram_id)
         if annual_monthly_amount is None:
@@ -2495,13 +2956,19 @@ class Database:
                 )
             else:
                 annual_monthly_amount = monthly_amount
+        operation_row = self.connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS max_id FROM operation_log WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        tracking_started_operation_id = int(operation_row["max_id"])
         cursor = self.connection.execute(
             """
             INSERT INTO tax_obligations (
                 telegram_id, tax_type, object_name, target_amount,
                 opening_amount, saved_before, months, monthly_amount, annual_monthly_amount,
-                notice_received, due_date, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                notice_received, due_date, source_obligation_id,
+                tracking_started_operation_id, monthly_period, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 telegram_id,
@@ -2517,9 +2984,12 @@ class Database:
                 decimal_to_string(annual_monthly_amount),
                 int(notice_received),
                 due_date,
+                source_obligation_id,
+                tracking_started_operation_id,
+                monthly_period,
             ),
         )
-        self.connection.commit()
+        self._commit()
         return int(cursor.lastrowid)
 
     def load_tax_obligations(self, telegram_id: int, active_only: bool = True) -> list[dict]:
@@ -2539,6 +3009,7 @@ class Database:
                 "saved_before": string_to_decimal(row["saved_before"]),
                 "months": row["months"],
                 "monthly_amount": string_to_decimal(row["monthly_amount"]),
+                "monthly_period": row["monthly_period"],
                 "annual_monthly_amount": string_to_decimal(row["annual_monthly_amount"]),
                 "notice_received": bool(row["notice_received"]),
                 "due_date": row["due_date"],
@@ -2546,10 +3017,55 @@ class Database:
                 "last_notice_reminder_at": row["last_notice_reminder_at"],
                 "last_payment_reminder_at": row["last_payment_reminder_at"],
                 "next_payment_reminder_date": row["next_payment_reminder_date"],
+                "source_obligation_id": row["source_obligation_id"],
+                "tracking_started_operation_id": int(row["tracking_started_operation_id"] or 0),
+                "tracking_closed_operation_id": row["tracking_closed_operation_id"],
+                "closed_reason": row["closed_reason"],
                 "active": bool(row["active"]),
             }
             for row in rows
         ]
+
+    def restore_tax_obligation_snapshot(self, telegram_id: int, row: dict) -> bool:
+        """Restore every mutable field of one existing tax obligation.
+
+        Income replay uses this API inside :meth:`transaction`; keeping the
+        complete lifecycle and reminder metadata together prevents a rollback
+        from accidentally turning an old cycle into the current one.
+        """
+        cursor = self.connection.execute(
+            """
+            UPDATE tax_obligations
+            SET tax_type = ?, object_name = ?, target_amount = ?,
+                opening_amount = ?, saved_before = ?, months = ?,
+                monthly_amount = ?, monthly_period = ?,
+                annual_monthly_amount = ?, notice_received = ?, due_date = ?,
+                ready_reminder_sent_at = ?, last_notice_reminder_at = ?,
+                last_payment_reminder_at = ?, next_payment_reminder_date = ?,
+                source_obligation_id = ?, tracking_started_operation_id = ?,
+                tracking_closed_operation_id = ?, closed_reason = ?, active = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (
+                str(row["tax_type"]), str(row["object_name"]),
+                decimal_to_string(string_to_decimal(row["target_amount"])),
+                decimal_to_string(string_to_decimal(row.get("opening_amount"))),
+                decimal_to_string(string_to_decimal(row.get("saved_before"))),
+                int(row.get("months") or 1),
+                decimal_to_string(string_to_decimal(row.get("monthly_amount"))),
+                row.get("monthly_period"),
+                decimal_to_string(string_to_decimal(row.get("annual_monthly_amount"))),
+                int(bool(row.get("notice_received"))), row.get("due_date"),
+                row.get("ready_reminder_sent_at"), row.get("last_notice_reminder_at"),
+                row.get("last_payment_reminder_at"), row.get("next_payment_reminder_date"),
+                row.get("source_obligation_id"),
+                int(row.get("tracking_started_operation_id") or 0),
+                row.get("tracking_closed_operation_id"), row.get("closed_reason"),
+                int(bool(row.get("active"))), telegram_id, int(row["id"]),
+            ),
+        )
+        self._commit()
+        return cursor.rowcount == 1
 
     def add_planned_payment(
         self,
@@ -2579,7 +3095,7 @@ class Database:
                 due_date,
             ),
         )
-        self.connection.commit()
+        self._commit()
         return int(cursor.lastrowid)
 
     def load_planned_payments(self, telegram_id: int, active_only: bool = True) -> list[dict]:
@@ -2603,6 +3119,29 @@ class Database:
             for row in rows
         ]
 
+    def restore_planned_payment_snapshot(self, telegram_id: int, row: dict) -> bool:
+        """Restore one existing planned-payment row for deterministic replay."""
+        cursor = self.connection.execute(
+            """
+            UPDATE planned_payments
+            SET category = ?, envelope_name = ?, payment_name = ?,
+                target_amount = ?, saved_amount = ?, monthly_amount = ?,
+                due_date = ?, active = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (
+                str(row["category"]), str(row["envelope_name"]),
+                str(row["payment_name"]),
+                decimal_to_string(string_to_decimal(row["target_amount"])),
+                decimal_to_string(string_to_decimal(row.get("saved_amount"))),
+                decimal_to_string(string_to_decimal(row.get("monthly_amount"))),
+                str(row["due_date"]), int(bool(row.get("active"))),
+                telegram_id, int(row["id"]),
+            ),
+        )
+        self._commit()
+        return cursor.rowcount == 1
+
     def update_planned_payment_saved(
         self,
         telegram_id: int,
@@ -2618,7 +3157,7 @@ class Database:
             """,
             (decimal_to_string(saved_amount), int(active), telegram_id, payment_id),
         )
-        self.connection.commit()
+        self._commit()
 
     def update_planned_payment_monthly(
         self, telegram_id: int, payment_id: int, monthly_amount: Decimal
@@ -2630,14 +3169,14 @@ class Database:
             """,
             (decimal_to_string(monthly_amount), telegram_id, payment_id),
         )
-        self.connection.commit()
+        self._commit()
 
     def deactivate_planned_payment(self, telegram_id: int, payment_id: int) -> None:
         self.connection.execute(
             "UPDATE planned_payments SET active = 0 WHERE telegram_id = ? AND id = ?",
             (telegram_id, payment_id),
         )
-        self.connection.commit()
+        self._commit()
 
     def update_planned_payment_details(
         self, telegram_id: int, payment_id: int, *,
@@ -2653,21 +3192,48 @@ class Database:
                 "UPDATE planned_payments SET due_date = ? WHERE telegram_id = ? AND id = ?",
                 (due_date, telegram_id, payment_id),
             )
-        self.connection.commit()
+        self._commit()
 
     def deactivate_all_planned_payments(self, telegram_id: int) -> None:
         self.connection.execute(
             "UPDATE planned_payments SET active = 0 WHERE telegram_id = ?",
             (telegram_id,),
         )
-        self.connection.commit()
+        self._commit()
 
-    def deactivate_tax_obligation(self, telegram_id: int, obligation_id: int) -> None:
+    def deactivate_tax_obligation(
+        self,
+        telegram_id: int,
+        obligation_id: int,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        operation_row = self.connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS max_id FROM operation_log WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
         self.connection.execute(
-            "UPDATE tax_obligations SET active = 0 WHERE telegram_id = ? AND id = ?",
+            """
+            UPDATE tax_obligations
+            SET active = 0, tracking_closed_operation_id = ?, closed_reason = ?
+            WHERE telegram_id = ? AND id = ?
+            """,
+            (int(operation_row["max_id"]), reason, telegram_id, obligation_id),
+        )
+        self._commit()
+
+    def reactivate_tax_obligation(self, telegram_id: int, obligation_id: int) -> bool:
+        cursor = self.connection.execute(
+            """
+            UPDATE tax_obligations
+            SET active = 1, tracking_closed_operation_id = NULL, closed_reason = NULL,
+                last_payment_reminder_at = NULL, next_payment_reminder_date = NULL
+            WHERE telegram_id = ? AND id = ?
+            """,
             (telegram_id, obligation_id),
         )
-        self.connection.commit()
+        self._commit()
+        return cursor.rowcount == 1
 
     def rename_tax_obligation(
         self,
@@ -2675,15 +3241,40 @@ class Database:
         tax_type: str,
         old_name: str,
         new_name: str,
+        *,
+        obligation_id: int | None = None,
     ) -> None:
-        """Rename one tax object without splitting its historical balance."""
+        """Rename one tax lifecycle without changing a reused historical name.
+
+        Calls without ``obligation_id`` retain the legacy all-history behaviour
+        for old integrations.  The interactive editor always supplies the ID.
+        """
         old_key = f"{tax_type} · {old_name}"
         new_key = f"{tax_type} · {new_name}"
+        selected = None
+        if obligation_id is not None:
+            selected = self.connection.execute(
+                """
+                SELECT tracking_started_operation_id, tracking_closed_operation_id
+                FROM tax_obligations
+                WHERE telegram_id = ? AND id = ? AND tax_type = ? AND object_name = ?
+                """,
+                (telegram_id, obligation_id, tax_type, old_name),
+            ).fetchone()
+            if selected is None:
+                return
+        start_id = int(selected["tracking_started_operation_id"] or 0) if selected else 0
+        close_id = selected["tracking_closed_operation_id"] if selected else None
         rows = self.connection.execute(
             "SELECT id, payload FROM operation_log WHERE telegram_id = ?",
             (telegram_id,),
         ).fetchall()
         for row in rows:
+            if selected is not None and (
+                int(row["id"]) <= start_id
+                or (close_id is not None and int(row["id"]) > int(close_id))
+            ):
+                continue
             payload = deserialize_json(row["payload"])
             details = payload.get("planned_tax_details")
             if not isinstance(details, dict) or old_key not in details:
@@ -2695,18 +3286,31 @@ class Database:
                 "UPDATE operation_log SET payload = ? WHERE id = ? AND telegram_id = ?",
                 (serialize_json(payload), row["id"], telegram_id),
             )
-        self.connection.execute(
-            """
-            UPDATE tax_obligations SET object_name = ?
-            WHERE telegram_id = ? AND tax_type = ? AND object_name = ?
-            """,
-            (new_name, telegram_id, tax_type, old_name),
-        )
-        self.connection.execute(
-            "UPDATE tax_payments SET tax_name = ? WHERE telegram_id = ? AND tax_name = ?",
-            (new_key, telegram_id, old_key),
-        )
-        self.connection.commit()
+        if obligation_id is None:
+            self.connection.execute(
+                """
+                UPDATE tax_obligations SET object_name = ?
+                WHERE telegram_id = ? AND tax_type = ? AND object_name = ?
+                """,
+                (new_name, telegram_id, tax_type, old_name),
+            )
+            self.connection.execute(
+                "UPDATE tax_payments SET tax_name = ? WHERE telegram_id = ? AND tax_name = ?",
+                (new_key, telegram_id, old_key),
+            )
+        else:
+            self.connection.execute(
+                "UPDATE tax_obligations SET object_name = ? WHERE telegram_id = ? AND id = ?",
+                (new_name, telegram_id, obligation_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE tax_payments SET tax_name = ?
+                WHERE telegram_id = ? AND obligation_id = ?
+                """,
+                (new_key, telegram_id, obligation_id),
+            )
+        self._commit()
 
     def update_tax_obligation_plan(
         self,
@@ -2717,12 +3321,14 @@ class Database:
         months: int,
         monthly_amount: Decimal,
         annual_monthly_amount: Decimal,
+        monthly_period: str | None = None,
     ) -> None:
+        monthly_period = monthly_period or moscow_today().strftime("%Y-%m")
         self.connection.execute(
             """
             UPDATE tax_obligations
             SET target_amount = ?, months = ?, monthly_amount = ?,
-                annual_monthly_amount = ?
+                annual_monthly_amount = ?, monthly_period = ?
             WHERE telegram_id = ? AND id = ? AND active = 1
             """,
             (
@@ -2730,11 +3336,12 @@ class Database:
                 int(months),
                 decimal_to_string(monthly_amount),
                 decimal_to_string(annual_monthly_amount),
+                monthly_period,
                 telegram_id,
                 obligation_id,
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def update_tax_obligation_saved(
         self,
@@ -2756,19 +3363,27 @@ class Database:
                 obligation_id,
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def update_tax_obligation_monthly(
-        self, telegram_id: int, obligation_id: int, monthly_amount: Decimal
+        self,
+        telegram_id: int,
+        obligation_id: int,
+        monthly_amount: Decimal,
+        monthly_period: str | None = None,
     ) -> None:
+        monthly_period = monthly_period or moscow_today().strftime("%Y-%m")
         self.connection.execute(
             """
-            UPDATE tax_obligations SET monthly_amount = ?
+            UPDATE tax_obligations SET monthly_amount = ?, monthly_period = ?
             WHERE telegram_id = ? AND id = ?
             """,
-            (decimal_to_string(monthly_amount), telegram_id, obligation_id),
+            (
+                decimal_to_string(monthly_amount), monthly_period,
+                telegram_id, obligation_id,
+            ),
         )
-        self.connection.commit()
+        self._commit()
 
     def update_tax_obligation_annual_monthly(
         self, telegram_id: int, obligation_id: int, annual_monthly_amount: Decimal
@@ -2780,7 +3395,7 @@ class Database:
             """,
             (decimal_to_string(annual_monthly_amount), telegram_id, obligation_id),
         )
-        self.connection.commit()
+        self._commit()
 
     def update_tax_obligation_notice(
         self,
@@ -2799,7 +3414,8 @@ class Database:
             UPDATE tax_obligations
             SET target_amount = ?, saved_before = ?, months = ?, monthly_amount = ?,
                 annual_monthly_amount = ?, due_date = ?, notice_received = 1,
-                ready_reminder_sent_at = NULL, last_notice_reminder_at = NULL
+                monthly_period = ?, ready_reminder_sent_at = NULL,
+                last_notice_reminder_at = NULL
             WHERE telegram_id = ? AND id = ? AND active = 1
             """,
             (
@@ -2809,11 +3425,12 @@ class Database:
                 decimal_to_string(monthly_amount),
                 decimal_to_string(annual_monthly_amount),
                 due_date,
+                moscow_today().strftime("%Y-%m"),
                 telegram_id,
                 obligation_id,
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def due_tax_readiness_reminders(self, today: str) -> list[dict]:
         """Return annual taxes due for the Nov 1/15/25 notice reminders."""
@@ -2854,10 +3471,44 @@ class Database:
             })
         return result
 
+    def due_global_tax_notice_reminders(self, today: str) -> list[int]:
+        """Users who still need the universal Nov 1 FNS check this year."""
+        today_date = date.fromisoformat(today)
+        if not (date(today_date.year, 11, 1) <= today_date < date(today_date.year, 12, 1)):
+            return []
+        rows = self.connection.execute(
+            """
+            SELECT settings.telegram_id
+            FROM settings
+            LEFT JOIN tax_global_reminders AS sent
+              ON sent.telegram_id = settings.telegram_id
+             AND sent.reminder_year = ?
+            WHERE sent.telegram_id IS NULL
+            ORDER BY settings.telegram_id
+            """,
+            (today_date.year,),
+        ).fetchall()
+        return [int(row["telegram_id"]) for row in rows]
+
+    def mark_global_tax_notice_reminder_sent(
+        self, telegram_id: int, reminder_year: int, sent_on: str | None = None,
+    ) -> None:
+        self.ensure_user(telegram_id)
+        sent_on = sent_on or moscow_today().isoformat()
+        self.connection.execute(
+            """
+            INSERT INTO tax_global_reminders (telegram_id, reminder_year, sent_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(telegram_id, reminder_year) DO UPDATE SET sent_at = excluded.sent_at
+            """,
+            (telegram_id, int(reminder_year), sent_on),
+        )
+        self._commit()
+
     def mark_tax_readiness_reminder_sent(
         self, telegram_id: int, obligation_id: int, sent_on: str | None = None,
     ) -> None:
-        sent_on = sent_on or date.today().isoformat()
+        sent_on = sent_on or moscow_today().isoformat()
         self.connection.execute(
             """
             UPDATE tax_obligations
@@ -2871,7 +3522,7 @@ class Database:
                 obligation_id,
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     def due_tax_payment_reminders(self, today: str) -> list[dict]:
         """Return unpaid annual taxes due today or overdue.
@@ -2883,7 +3534,6 @@ class Database:
             """
             SELECT * FROM tax_obligations
             WHERE active = 1
-              AND tax_type IN ('Налог на имущество', 'Транспортный налог', 'Земельный налог')
               AND due_date IS NOT NULL
             ORDER BY telegram_id, id
             """
@@ -2892,8 +3542,6 @@ class Database:
         result = []
         for row in rows:
             due = date.fromisoformat(row["due_date"])
-            if today_date < due:
-                continue
             paid = self.tax_obligation_paid_amount(int(row["telegram_id"]), int(row["id"]))
             target = string_to_decimal(row["target_amount"])
             remaining = max(Decimal("0"), target - paid)
@@ -2904,8 +3552,22 @@ class Database:
             last_raw = row["last_payment_reminder_at"]
             if next_raw:
                 should_send = date.fromisoformat(next_raw) <= today_date
+                reminder_kind = "snoozed"
+            elif row["tax_type"] not in (
+                "Налог на имущество", "Транспортный налог", "Земельный налог",
+            ) and today_date < due:
+                stages = (due - timedelta(days=30), due - timedelta(days=7), due - timedelta(days=1))
+                reached = [stage for stage in stages if stage <= today_date]
+                if not reached:
+                    continue
+                last_date = date.fromisoformat(last_raw[:10]) if last_raw else None
+                should_send = last_date is None or last_date < reached[-1]
+                reminder_kind = "upcoming"
+            elif today_date < due:
+                continue
             elif not last_raw:
                 should_send = True
+                reminder_kind = "due" if today_date == due else "overdue"
             else:
                 last_date = date.fromisoformat(last_raw[:10])
                 first_followup = due + timedelta(days=1)
@@ -2913,6 +3575,7 @@ class Database:
                     should_send = True
                 else:
                     should_send = today_date >= last_date + timedelta(days=7)
+                reminder_kind = "due" if today_date == due else "overdue"
             if not should_send:
                 continue
             result.append({
@@ -2924,13 +3587,14 @@ class Database:
                 "paid_amount": paid,
                 "remaining_amount": remaining,
                 "due_date": row["due_date"],
+                "reminder_kind": reminder_kind,
             })
         return result
 
     def mark_tax_payment_reminder_sent(
         self, telegram_id: int, obligation_id: int, sent_on: str | None = None,
     ) -> None:
-        sent_on = sent_on or date.today().isoformat()
+        sent_on = sent_on or moscow_today().isoformat()
         self.connection.execute(
             """
             UPDATE tax_obligations
@@ -2939,20 +3603,32 @@ class Database:
             """,
             (sent_on, telegram_id, obligation_id),
         )
-        self.connection.commit()
+        self._commit()
 
-    def snooze_tax_payment_reminders(self, telegram_id: int, days: int = 3) -> None:
-        next_date = (date.today() + timedelta(days=max(1, days))).isoformat()
-        self.connection.execute(
+    def snooze_tax_payment_reminder(
+        self,
+        telegram_id: int,
+        obligation_id: int,
+        days: int = 3,
+        *,
+        from_date: date | None = None,
+    ) -> bool:
+        next_date = ((from_date or moscow_today()) + timedelta(days=max(1, days))).isoformat()
+        cursor = self.connection.execute(
             """
             UPDATE tax_obligations
             SET next_payment_reminder_date = ?
-            WHERE telegram_id = ? AND active = 1
-              AND tax_type IN ('Налог на имущество', 'Транспортный налог', 'Земельный налог')
+            WHERE telegram_id = ? AND id = ? AND active = 1
             """,
-            (next_date, telegram_id),
+            (next_date, telegram_id, obligation_id),
         )
-        self.connection.commit()
+        self._commit()
+        return cursor.rowcount == 1
+
+    def snooze_tax_payment_reminders(self, telegram_id: int, days: int = 3) -> None:
+        """Legacy bulk API; new callbacks always snooze one obligation."""
+        for item in self.load_tax_obligations(telegram_id):
+            self.snooze_tax_payment_reminder(telegram_id, item["id"], days)
 
     # ========================================================
     # КЭШ АВТОМАТИЧЕСКИХ ВАЛЮТНЫХ КУРСОВ
@@ -3004,7 +3680,7 @@ class Database:
                 source,
             ),
         )
-        self.connection.commit()
+        self._commit()
 
     # ========================================================
     # ПОЛНОЕ УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ
@@ -3023,16 +3699,95 @@ class Database:
 
     def clear_accounting_history(self, telegram_id: int):
         """Clear persisted history and funded amounts, retaining configured targets."""
-        with self.connection:
+        with self.transaction():
             for table in ("operation_log", "tax_payments"):
                 self.connection.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (telegram_id,))
             self.connection.execute(
+                "DELETE FROM tax_global_reminders WHERE telegram_id = ?", (telegram_id,),
+            )
+            # Closed/deleted cycles are accounting history.  Keep only the
+            # current plans and detach them from removed predecessor rows.
+            self.connection.execute(
+                "DELETE FROM tax_obligations WHERE telegram_id = ? AND active = 0",
+                (telegram_id,),
+            )
+            self.connection.execute(
                 "UPDATE tax_obligations SET opening_amount = '0', saved_before = '0', "
                 "ready_reminder_sent_at = NULL, last_notice_reminder_at = NULL, "
-                "last_payment_reminder_at = NULL, next_payment_reminder_date = NULL "
+                "last_payment_reminder_at = NULL, next_payment_reminder_date = NULL, "
+                "source_obligation_id = NULL, tracking_started_operation_id = 0, "
+                "tracking_closed_operation_id = NULL, closed_reason = NULL "
                 "WHERE telegram_id = ?", (telegram_id,))
             self.connection.execute(
                 "UPDATE planned_payments SET saved_amount = '0' WHERE telegram_id = ?", (telegram_id,))
+
+            today = moscow_today()
+            rows = self.load_tax_obligations(telegram_id)
+            annual_types = {
+                "Налог на имущество", "Транспортный налог", "Земельный налог",
+            }
+            refreshed: list[tuple[dict, Decimal, Decimal]] = []
+            for item in rows:
+                due = date.fromisoformat(item["due_date"]) if item.get("due_date") else None
+                if due is not None:
+                    ready = (
+                        date(due.year, 11, 1)
+                        if item["tax_type"] in annual_types and not item.get("notice_received")
+                        else due
+                    )
+                    months = (
+                        1 if ready <= today else
+                        max(1, (ready.year - today.year) * 12 + ready.month - today.month)
+                    )
+                else:
+                    months = max(1, int(item.get("months", 1)))
+                target = Decimal(str(item["target_amount"]))
+                monthly = (target / Decimal(months)).quantize(
+                    Decimal("0.01"), rounding=ROUND_CEILING,
+                ) if target > Decimal("0") else Decimal("0")
+                annual = (
+                    (target / Decimal("12")).quantize(
+                        Decimal("0.01"), rounding=ROUND_CEILING,
+                    )
+                    if item["tax_type"] in annual_types else Decimal("0")
+                )
+                self.connection.execute(
+                    """
+                    UPDATE tax_obligations
+                    SET months = ?, monthly_amount = ?, annual_monthly_amount = ?,
+                        monthly_period = ?
+                    WHERE telegram_id = ? AND id = ?
+                    """,
+                    (
+                        months, decimal_to_string(monthly), decimal_to_string(annual),
+                        today.strftime("%Y-%m"),
+                        telegram_id, item["id"],
+                    ),
+                )
+                refreshed.append((item, monthly, annual))
+
+            allocator = self.load_allocator(telegram_id)
+            if allocator is not None:
+                settings = allocator.settings
+                for source in list(settings.automatic_life_obligations):
+                    if str(source).startswith("tax:"):
+                        settings.set_automatic_life_obligation(source, Decimal("0"))
+                settings.planned_taxes = {}
+                settings.tax_catchups = {}
+                for item, monthly, annual in refreshed:
+                    key = f"{item['tax_type']} · {item['object_name']}"
+                    if annual > Decimal("0"):
+                        settings.planned_taxes[key] = annual
+                        settings.set_automatic_life_obligation(f"tax:{key}", annual)
+                    if monthly > Decimal("0"):
+                        settings.tax_catchups[key] = monthly
+                total_annual = sum(settings.planned_taxes.values(), Decimal("0"))
+                if total_annual > Decimal("0"):
+                    settings.ensure_life_category_id("Налоги")
+                    settings.life_categories["Налоги"] = total_annual
+                else:
+                    settings.life_categories.pop("Налоги", None)
+                self.save_allocator(telegram_id, allocator)
 
     def delete_user(
         self,
@@ -3047,7 +3802,7 @@ class Database:
             (telegram_id,),
         )
 
-        self.connection.commit()
+        self._commit()
 
     # ========================================================
     # СТАТИСТИКА

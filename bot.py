@@ -69,7 +69,12 @@ from dashboard import (
     router as dashboard_router,
 )
 
-from taxes import router as taxes_router
+from taxes import (
+    ANNUAL_PROPERTY_TAXES,
+    router as taxes_router,
+    tax_obligation_key,
+    virtual_tax_balance,
+)
 from debts import router as debts_router
 from goals_manager import router as goals_manager_router
 from health_server import start_health_server
@@ -80,6 +85,7 @@ from ui import (
 )
 
 from storage import db
+from time_utils import moscow_today
 
 
 # ============================================================
@@ -663,6 +669,19 @@ async def menu_back(
     )
 
 
+# This router is included last.  Therefore this handler sees only callbacks
+# that no current screen understands (usually an old Telegram message kept
+# open across a deployment) and cannot shadow a valid button above.
+@router.callback_query()
+async def stale_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await callback.message.answer(
+        "Эта кнопка устарела. Откройте нужный раздел заново.",
+        reply_markup=keyboard([[("← Главное меню", "menu:back")]]),
+    )
+
+
 # ============================================================
 # НЕИЗВЕСТНОЕ СООБЩЕНИЕ
 # ============================================================
@@ -744,31 +763,39 @@ async def set_bot_commands(
 # ============================================================
 
 
-async def period_reminder_worker(bot: Bot):
-    """Раз в час проверяет запланированный старт и готовность годовых налогов."""
-    while True:
-        today = date.today().isoformat()
-        for telegram_id, activation_date in db.due_period_reminders(today):
-            try:
-                await bot.send_message(
-                    telegram_id,
-                    "<b>ПОРА НАЧАТЬ ПЕРВЫЙ РАСЧЁТНЫЙ ПЕРИОД</b>\n\n"
-                    "Вы выбрали эту дату при настройке. Начните период, когда будете готовы "
-                    "сделать первое распределение.",
-                    reply_markup=keyboard([[("Начать расчётный период", "periodsetup:today")]]),
-                )
-                db.mark_period_reminder_sent(telegram_id, activation_date)
-            except Exception:
-                logging.exception("Не удалось отправить напоминание пользователю %s", telegram_id)
+async def run_reminder_iteration(bot: Bot, today_value: date | None = None):
+    """One isolated, testable reminder pass."""
+    current = today_value or moscow_today()
+    today = current.isoformat()
+    for telegram_id, activation_date in db.due_period_reminders(today):
+        try:
+            await bot.send_message(
+                telegram_id,
+                "<b>ПОРА НАЧАТЬ ПЕРВЫЙ РАСЧЁТНЫЙ ПЕРИОД</b>\n\n"
+                "Вы выбрали эту дату при настройке. Начните период, когда будете готовы "
+                "сделать первое распределение.",
+                reply_markup=keyboard([[("Начать расчётный период", "periodsetup:today")]]),
+            )
+            db.mark_period_reminder_sent(telegram_id, activation_date)
+        except Exception:
+            logging.exception("Не удалось отправить напоминание пользователю %s", telegram_id)
 
-        tax_rows = db.due_tax_readiness_reminders(today)
-        by_user: dict[int, list[dict]] = {}
-        for item in tax_rows:
-            by_user.setdefault(item["telegram_id"], []).append(item)
-        for telegram_id, items in by_user.items():
+    # This reminder is universal: a person may have acquired property recently
+    # and forgotten to create a plan in the bot.
+    for telegram_id in db.due_global_tax_notice_reminders(today):
+        try:
+            items = [
+                item for item in db.load_tax_obligations(telegram_id)
+                if item["tax_type"] in ANNUAL_PROPERTY_TAXES
+                and item.get("due_date")
+                and str(item["due_date"]).startswith(f"{current.year}-")
+                and not item.get("notice_received")
+            ]
             lines = []
             for item in items:
-                missing = max(0, item["target_amount"] - item["saved_before"])
+                key = tax_obligation_key(item["tax_type"], item["object_name"])
+                saved = virtual_tax_balance(telegram_id, key, item["id"])
+                missing = max(0, item["target_amount"] - saved)
                 status = (
                     "предварительная сумма собрана"
                     if missing <= 0 else f"по предварительному плану не хватает {fmt_money(missing)} ₽"
@@ -776,58 +803,101 @@ async def period_reminder_worker(bot: Bot):
                 lines.append(
                     f"• {escape(item['tax_type'])} · {escape(item['object_name'])} — {status}"
                 )
-            heading = (
-                "К этому моменту ФНС должна направить налоговое уведомление. "
-                "Проверьте его в личном кабинете ФНС или на Госуслугах.\n\n"
-                "Затем нажмите «Получено уведомление ФНС» и введите полную сумму из него. "
-                "Аллокатор сам учтёт деньги, которые уже отнёс на этот налог."
+            plans = (
+                "\n\n" + "\n".join(lines)
+                if lines else
+                "\n\nДаже если налогов пока нет в Аллокаторе, проверьте уведомление: "
+                "там может появиться недавно купленная квартира, машина или земля."
             )
-            try:
-                await bot.send_message(
-                    telegram_id,
-                    "<b>ПРОВЕРЬТЕ НАЛОГОВОЕ УВЕДОМЛЕНИЕ</b>\n\n"
-                    + heading + "\n\n" + "\n".join(lines),
-                    reply_markup=keyboard([
-                        [("Получено уведомление ФНС", "taxes:notice")],
-                        [("← Главное меню", "taxes:back")],
-                    ]),
-                )
-                for item in items:
-                    db.mark_tax_readiness_reminder_sent(telegram_id, item["id"], today)
-            except Exception:
-                logging.exception("Не удалось отправить напоминание о налогах пользователю %s", telegram_id)
+            await bot.send_message(
+                telegram_id,
+                "<b>ПРОВЕРЬТЕ НАЛОГОВОЕ УВЕДОМЛЕНИЕ</b>\n\n"
+                "Проверьте личный кабинет ФНС или Госуслуги. Если уведомление пришло, "
+                "введите в Аллокатор полную сумму — накопленное он вычтет сам."
+                + plans,
+                reply_markup=keyboard([
+                    [("Получено уведомление ФНС", "taxes:notice")],
+                    [("+ Добавить налог", "taxes:add")],
+                    [("← Главное меню", "taxes:back")],
+                ]),
+            )
+            db.mark_global_tax_notice_reminder_sent(telegram_id, current.year, today)
+            for item in items:
+                db.mark_tax_readiness_reminder_sent(telegram_id, item["id"], today)
+        except Exception:
+            logging.exception("Не удалось отправить общее напоминание ФНС пользователю %s", telegram_id)
 
-        payment_rows = db.due_tax_payment_reminders(today)
-        payment_by_user: dict[int, list[dict]] = {}
-        for item in payment_rows:
-            payment_by_user.setdefault(item["telegram_id"], []).append(item)
-        for telegram_id, items in payment_by_user.items():
-            lines = [
-                f"• {escape(item['tax_type'])} · {escape(item['object_name'])} — "
-                f"осталось оплатить {fmt_money(item['remaining_amount'])} ₽"
-                for item in items
-            ]
-            overdue = any(today > item["due_date"] for item in items)
-            title = "НАЛОГ ЕЩЁ НЕ ОТМЕЧЕН КАК ОПЛАЧЕННЫЙ" if overdue else "СЕГОДНЯ СРОК ОПЛАТЫ НАЛОГА"
-            body = (
-                "Если вы уже заплатили налог, внесите фактическую "
-                "сумму. Пока вся сумма не отмечена как оплаченная, налог останется активным."
+    tax_rows = db.due_tax_readiness_reminders(today)
+    by_user: dict[int, list[dict]] = {}
+    for item in tax_rows:
+        by_user.setdefault(item["telegram_id"], []).append(item)
+    for telegram_id, items in by_user.items():
+        lines = []
+        for item in items:
+            key = tax_obligation_key(item["tax_type"], item["object_name"])
+            saved = virtual_tax_balance(telegram_id, key, item["id"])
+            missing = max(0, item["target_amount"] - saved)
+            status = (
+                "предварительная сумма собрана"
+                if missing <= 0 else f"по предварительному плану не хватает {fmt_money(missing)} ₽"
             )
-            try:
-                await bot.send_message(
-                    telegram_id,
-                    f"<b>{title}</b>\n\n" + "\n".join(lines) + "\n\n" + body,
-                    reply_markup=keyboard([
-                        [("Налог оплачен", "taxes:payment")],
-                        [("Ещё не оплачен", "taxreminder:not_paid")],
-                        [("Напомнить через 3 дня", "taxreminder:snooze")],
-                        [("← Главное меню", "taxes:back")],
-                    ]),
-                )
-                for item in items:
-                    db.mark_tax_payment_reminder_sent(telegram_id, item["id"], today)
-            except Exception:
-                logging.exception("Не удалось отправить напоминание об оплате налогов пользователю %s", telegram_id)
+            lines.append(f"• {escape(item['tax_type'])} · {escape(item['object_name'])} — {status}")
+        try:
+            await bot.send_message(
+                telegram_id,
+                "<b>ПРОВЕРЬТЕ НАЛОГОВОЕ УВЕДОМЛЕНИЕ</b>\n\n"
+                "Уведомление ещё не отмечено в Аллокаторе. Проверьте ФНС или Госуслуги, "
+                "затем введите полную сумму из уведомления.\n\n" + "\n".join(lines),
+                reply_markup=keyboard([
+                    [("Получено уведомление ФНС", "taxes:notice")],
+                    [("← Главное меню", "taxes:back")],
+                ]),
+            )
+            for item in items:
+                db.mark_tax_readiness_reminder_sent(telegram_id, item["id"], today)
+        except Exception:
+            logging.exception("Не удалось отправить напоминание о налогах пользователю %s", telegram_id)
+
+    for item in db.due_tax_payment_reminders(today):
+        telegram_id = item["telegram_id"]
+        due = date.fromisoformat(item["due_date"])
+        kind = item.get("reminder_kind")
+        if kind == "upcoming":
+            title = "СКОРО СРОК ОПЛАТЫ НАЛОГА"
+            body = f"Оплатить до {due.strftime('%d.%m.%Y')}."
+        elif current > due:
+            title = "НАЛОГ ЕЩЁ НЕ ОТМЕЧЕН КАК ОПЛАЧЕННЫЙ"
+            body = "Если вы уже заплатили налог, отметьте оплату. До этого налог останется активным."
+        else:
+            title = "СЕГОДНЯ СРОК ОПЛАТЫ НАЛОГА"
+            body = "После оплаты отметьте её в Аллокаторе."
+        try:
+            await bot.send_message(
+                telegram_id,
+                f"<b>{title}</b>\n\n"
+                f"{escape(item['tax_type'])} · {escape(item['object_name'])}\n"
+                f"Осталось оплатить — {fmt_money(item['remaining_amount'])} ₽\n\n{body}",
+                reply_markup=keyboard([
+                    [("Налог оплачен", f"taxpayment:obligation:{item['id']}")],
+                    [("Ещё не оплачен", f"taxreminder:not_paid:{item['id']}")],
+                    [("Напомнить через 3 дня", f"taxreminder:snooze:{item['id']}")],
+                    [("← Главное меню", "taxes:back")],
+                ]),
+            )
+            db.mark_tax_payment_reminder_sent(telegram_id, item["id"], today)
+        except Exception:
+            logging.exception("Не удалось отправить напоминание об оплате налога пользователю %s", telegram_id)
+
+
+async def period_reminder_worker(bot: Bot):
+    """Run forever; one storage error must not permanently stop reminders."""
+    while True:
+        try:
+            await run_reminder_iteration(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Ошибка фоновой проверки напоминаний")
         await asyncio.sleep(3600)
 
 

@@ -41,9 +41,9 @@ class LifeResultReviewTests(unittest.IsolatedAsyncioTestCase):
             [
                 "Продолжить →",
                 "КМ ⇄ БР",
-                "Редактировать расходы",
-                "Изменить сумму КМ",
-                "Изменить сумму БР",
+                "✎ Редактировать расходы",
+                "✎ Изменить сумму КМ",
+                "✎ Изменить сумму БР",
             ],
         )
         self.assertEqual(
@@ -82,8 +82,8 @@ class LifeResultReviewTests(unittest.IsolatedAsyncioTestCase):
         markup = message.answer.await_args.kwargs["reply_markup"]
         labels = [button.text for row in markup.inline_keyboard for button in row]
         self.assertIn("<b>АВТОМОБИЛЬ</b>", text)
-        self.assertIn("<b>Бензин</b> — 5 000,00 ₽ / мес.", text)
-        self.assertIn("Готово", labels)
+        self.assertIn("<b>Бензин</b> — 5 000 ₽ / мес.", text)
+        self.assertIn("✔️ Готово", labels)
         self.assertNotIn("Общественный транспорт", labels)
         self.assertIn("kmtransport:back", callbacks(markup))
 
@@ -141,8 +141,8 @@ class LifeResultReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b><u>БЫТОВОЙ РЕЗЕРВ</u></b>", text)
         self.assertIn("<b>ПИТАНИЕ</b>", text)
         self.assertEqual(text.count("Гибкая или нерегулярная часть питания."), 1)
-        self.assertIn("• Фастфуд — 400,00 ₽", text)
-        self.assertIn("• Доставка еды — 7 000,00 ₽", text)
+        self.assertIn("• Фастфуд — 400 ₽", text)
+        self.assertIn("• Доставка еды — 7 000 ₽", text)
         self.assertIn("<b>РАЗВЛЕЧЕНИЯ</b>", text)
         self.assertNotIn("Причина:", text)
 
@@ -159,12 +159,12 @@ class LifeResultReviewTests(unittest.IsolatedAsyncioTestCase):
         km_lines = life_result_breakdown_lines(km_items, br_items)
         br_lines = life_result_breakdown_lines(br_items, km_items)
 
-        self.assertIn("• Супермаркет — 24 500,00 ₽", km_lines)
-        self.assertIn("• Кафе и рестораны — 1 000,00 ₽", br_lines)
-        self.assertIn("• Здоровье — 1 000,00 ₽", km_lines)
-        self.assertIn("• Одежда — 2 000,00 ₽", br_lines)
-        self.assertNotIn("• Питание — 24 500,00 ₽", km_lines)
-        self.assertNotIn("• Питание — 1 000,00 ₽", br_lines)
+        self.assertIn("• Супермаркет — 24 500 ₽", km_lines)
+        self.assertIn("• Кафе и рестораны — 1 000 ₽", br_lines)
+        self.assertIn("• Здоровье — 1 000 ₽", km_lines)
+        self.assertIn("• Одежда — 2 000 ₽", br_lines)
+        self.assertNotIn("• Питание — 24 500 ₽", km_lines)
+        self.assertNotIn("• Питание — 1 000 ₽", br_lines)
 
     async def test_classification_screen_uses_approved_intro(self):
         callback = AsyncMock()

@@ -30,7 +30,7 @@ class ReportCharts(unittest.TestCase):
         data = make_chart({k: v['total'] for k,v in groups.items()}, 'НАЛОГИ', colors=TAX_COLORS)
         colors = {rgb for count, rgb in Image.open(BytesIO(data)).getcolors(2_000_000)}
         self.assertIn((118, 86, 216), colors)
-        self.assertIn((79, 157, 217), colors)
+        self.assertIn((226, 185, 59), colors)
 
     def test_empty_and_many_categories(self):
         self.assertIsNone(make_chart({'Нет': 0}, 'БАЛАНСЫ'))

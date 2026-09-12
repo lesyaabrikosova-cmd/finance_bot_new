@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, patch
 _DATA = tempfile.TemporaryDirectory()
 os.environ['ALLOCATOR_DATA_DIR'] = _DATA.name
 from storage import Database
-from settings_editor import confirm_erase_all
+from financial_engine import FinancialAllocator, UserSettings
+from settings_editor import confirm_erase_all, confirm_full_reset
 
 
 class ResetStorageTests(unittest.TestCase):
@@ -27,7 +28,7 @@ class ResetStorageTests(unittest.TestCase):
                     name = col['name']
                     if name == 'telegram_id':
                         names.append(name); values.append(uid)
-                    elif col['notnull'] and col['dflt_value'] is None and not col['pk']:
+                    elif col['notnull'] and col['dflt_value'] is None:
                         names.append(name); values.append(1 if col['type'] == 'INTEGER' else '0')
                 self.db.connection.execute(f"INSERT INTO {table} ({','.join(names)}) VALUES ({','.join('?' for _ in names)})", values)
         self.db.connection.commit()
@@ -43,6 +44,14 @@ class ResetStorageTests(unittest.TestCase):
             self.assertEqual(self.db.connection.execute(f'SELECT COUNT(*) FROM {table} WHERE telegram_id=202').fetchone()[0], 1, table)
 
     def test_accounting_reset_removes_sql_history_and_preserves_configuration(self):
+        self.db.save_allocator(101, FinancialAllocator(UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=D("1000"),
+            household_reserve=D("100"),
+            average_income=D("2000"),
+            life_categories={"Жизнь": D("1000")},
+        )))
         self.db.connection.execute("UPDATE tax_obligations SET opening_amount='300', saved_before='500' WHERE telegram_id=101")
         self.db.connection.commit()
         self.db.clear_accounting_history(101)
@@ -63,3 +72,41 @@ class ResetGuardTests(unittest.IsolatedAsyncioTestCase):
             db.load_allocator.return_value = SimpleNamespace(settings=SimpleNamespace(developer_mode=True))
             await confirm_erase_all(callback, state)
             db.delete_user.assert_not_called()
+
+    async def test_accounting_reset_rolls_back_visible_balances_when_history_clear_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "atomic-reset.db")
+            user = 303
+            allocator = FinancialAllocator(UserSettings(
+                has_debts=False,
+                employment_type="Фрилансер",
+                critical_life=D("1000"),
+                household_reserve=D("100"),
+                average_income=D("2000"),
+                life_categories={"Жизнь": D("1000")},
+            ))
+            allocator.state.life_balance = D("777")
+            database.save_allocator(user, allocator)
+            callback = SimpleNamespace(
+                answer=AsyncMock(),
+                message=SimpleNamespace(answer=AsyncMock()),
+                from_user=SimpleNamespace(id=user),
+            )
+            state = AsyncMock()
+            original_clear = database.clear_accounting_history
+
+            def failed_clear(_telegram_id):
+                raise RuntimeError("simulated reset failure")
+
+            try:
+                with patch("settings_editor.db", database), patch.object(
+                    database, "clear_accounting_history", side_effect=failed_clear,
+                ):
+                    await confirm_full_reset(callback, state)
+                restored = database.load_allocator(user)
+            finally:
+                database.clear_accounting_history = original_clear
+                database.close()
+
+        self.assertEqual(restored.state.life_balance, D("777"))
+        self.assertIn("данные сохранены", callback.message.answer.await_args.args[0])

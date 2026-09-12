@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 from html import escape
 from pathlib import Path
+import re
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -23,6 +23,7 @@ from ui import keyboard, main_menu_keyboard
 from mode_presentation import mode_image_path
 from charts import send_chart_report
 from taxes import reconcile_tax_obligation_balances
+from income_deletion import IncomeDeletionError, delete_income_safely
 
 
 router = Router()
@@ -282,34 +283,98 @@ def pct(
     )
 
 
-def operation_is_in_current_period(
-    operation: dict,
-    period_started_at: str | None,
-) -> bool:
+class PeriodAllocations(dict):
+    """Allocation totals with presentation metadata kept beside the mapping."""
 
-    if not period_started_at:
-        return True
+    def __init__(
+        self,
+        *args,
+        envelope_kinds: dict[str, str] | None = None,
+        period_income: Decimal | None = None,
+        period_tax: Decimal | None = None,
+        has_income_records: bool = False,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.envelope_kinds = dict(envelope_kinds or {})
+        self.period_income = None if period_income is None else D(period_income)
+        self.period_tax = None if period_tax is None else D(period_tax)
+        self.has_income_records = bool(has_income_records)
 
-    try:
-        start_date = datetime.fromisoformat(
-            period_started_at
-        ).date()
-    except ValueError:
-        return True
 
-    raw_date = operation.get("date")
+def period_ledger_snapshot(
+    operations: list[dict],
+) -> tuple[Decimal, Decimal, dict[str, Decimal], bool]:
+    """Fold the open-period ledger, including explicit envelope transfers."""
+    period_income = Decimal("0")
+    period_tax = Decimal("0")
+    allocations: PeriodAllocations = PeriodAllocations()
+    key_by_identity: dict[str, str] = {}
+    transfers: list[dict] = []
+    has_income_records = False
 
-    if not raw_date:
-        return True
+    # Database rows are newest first. Additive income totals are order
+    # independent; transfers are replayed oldest first afterwards.
+    for operation in operations:
+        operation_type = operation.get("type")
+        if operation_type == "period_reset":
+            break
+        payload = operation.get("payload") or {}
+        if operation_type == "envelope_transfer":
+            transfers.append(payload)
+            continue
+        if operation_type != "income_distribution":
+            continue
 
-    try:
-        operation_date = date.fromisoformat(
-            str(raw_date)[:10]
+        has_income_records = True
+        period_income += D(payload.get("income", 0))
+        period_tax += D(payload.get("tax", 0))
+        envelope_ids = payload.get("envelope_ids") or {}
+        envelope_kinds = payload.get("envelope_kinds") or {}
+        for raw_key, value in (payload.get("allocations") or {}).items():
+            key = str(raw_key)
+            allocations[key] = allocations.get(key, Decimal("0")) + D(value)
+            identity = str(envelope_ids.get(raw_key, envelope_ids.get(key, "")) or "")
+            if identity:
+                key_by_identity[identity] = key
+            kind = str(envelope_kinds.get(raw_key, envelope_kinds.get(key, "")) or "")
+            if kind:
+                allocations.envelope_kinds[key] = kind
+
+    for transfer in reversed(transfers):
+        source_identity = str(transfer.get("source_id") or "")
+        destination_identity = str(transfer.get("destination_id") or "")
+        source = key_by_identity.get(source_identity) or str(transfer.get("source") or "")
+        destination = (
+            key_by_identity.get(destination_identity)
+            or str(transfer.get("destination") or "")
         )
-    except ValueError:
-        return True
+        if not source or not destination or source == destination:
+            continue
+        available = max(Decimal("0"), D(allocations.get(source, 0)))
+        requested = max(Decimal("0"), D(transfer.get("amount", 0)))
+        # A goal transfer may contain its all-time bank balance. The period
+        # report moves only the part actually earned in this open period.
+        moved = min(available, requested)
+        if moved <= 0:
+            continue
+        remaining = available - moved
+        if remaining > 0:
+            allocations[source] = remaining
+        else:
+            allocations.pop(source, None)
+            allocations.envelope_kinds.pop(source, None)
+        allocations[destination] = allocations.get(destination, Decimal("0")) + moved
+        destination_kind = str(transfer.get("destination_kind") or "")
+        if destination_kind:
+            allocations.envelope_kinds[destination] = destination_kind
+        if destination_identity:
+            key_by_identity[destination_identity] = destination
 
-    return operation_date >= start_date
+    allocations.period_income = period_income
+    allocations.period_tax = period_tax
+    allocations.has_income_records = has_income_records
+    return period_income, period_tax, allocations, has_income_records
 
 
 def get_period_allocations(
@@ -324,49 +389,17 @@ def get_period_allocations(
     подписи конверта. Значения state нужны только старым профилям без журнала.
     """
 
-    result: dict[str, Decimal] = {}
-    has_income_records = False
-
+    # SQLite treats LIMIT -1 as "all rows". A period can contain more than
+    # 1000 service and income records, so a fixed slice would silently remove
+    # the oldest part of the still-open period from the report.
     operations = db.load_operations(
         telegram_id,
-        limit=1000,
+        limit=-1,
     )
 
-    # Операции идут от новых к старым.
-    # Всё после последнего period_reset относится
-    # к текущему расчётному периоду.
-    for operation in operations:
-
-        operation_type = operation.get(
-            "type"
-        )
-
-        if operation_type == "period_reset":
-            break
-
-        if operation_type != "income_distribution":
-            continue
-
-        has_income_records = True
-
-        payload = (
-            operation.get("payload")
-            or {}
-        )
-
-        allocations = (
-            payload.get("allocations")
-            or {}
-        )
-
-        for key, value in allocations.items():
-            result[key] = (
-                result.get(
-                    key,
-                    Decimal("0"),
-                )
-                + D(value)
-            )
+    period_income, period_tax, result, has_income_records = period_ledger_snapshot(
+        operations
+    )
 
     # История доходов — единственный источник, который содержит все операции
     # до и после смены подписи конверта. Состояние оставляем лишь как запасной
@@ -375,7 +408,12 @@ def get_period_allocations(
         return result
 
     stored = getattr(allocator.state, "period_allocations", None) or {}
-    return {key: D(value) for key, value in stored.items()}
+    return PeriodAllocations(
+        {key: D(value) for key, value in stored.items()},
+        period_income=D(getattr(allocator.state, "period_income", 0)),
+        period_tax=D(getattr(allocator.state, "period_tax", 0)),
+        has_income_records=False,
+    )
 
 
 # ============================================================
@@ -714,7 +752,14 @@ async def confirm_reserve_rebalancing(callback: CallbackQuery):
 # ============================================================
 
 def period_balance_chart(allocator, allocations):
-    """Disjoint period flows: no opening balances or aggregate/detail duplication."""
+    """Return every positive flow of the current period in UI order.
+
+    ``load_operations`` has already resolved current labels by immutable IDs.
+    A deleted identity is deliberately retained under an internal
+    ``· прежний <id>`` suffix.  The chart turns that suffix into a readable
+    archived label instead of dropping the money or merging it with a newly
+    created envelope that happens to reuse the same name.
+    """
     from hashlib import sha256
     values, colors = {}, {}
 
@@ -730,6 +775,31 @@ def period_balance_chart(allocator, allocations):
         '#7A4B2B', '#9C6338', '#B87943', '#6B3E25',
         '#C68A50', '#8A5732', '#A96D3D', '#704126',
     )
+    reserve_colors = (
+        '#24734A', '#2F8F5B', '#48A66F', '#1F6440',
+        '#65B985', '#3A8055', '#79C596', '#185337',
+    )
+    archived_suffix = re.compile(r"^(?P<name>.+?) · прежний (?P<id>[^ ]+)$")
+    archived_counts: dict[tuple[str, str], int] = {}
+
+    def readable_name(raw_name: str, kind: str) -> tuple[str, str, bool]:
+        """Hide the technical ID while keeping archived identities distinct."""
+        raw_name = str(raw_name)
+        match = archived_suffix.match(raw_name)
+        if match is None:
+            return raw_name, raw_name, False
+        base = match.group("name")
+        identity = match.group("id")
+        key = (kind, base)
+        archived_counts[key] = archived_counts.get(key, 0) + 1
+        number = archived_counts[key]
+        noun = {
+            "life": "прежняя категория",
+            "reserve": "прежний конверт",
+            "goal": "прежняя позиция",
+        }.get(kind, "прежний конверт")
+        suffix = noun if number == 1 else f"{noun} {number}"
+        return f"{base} · {suffix}", identity, True
 
     def add(label, value, color):
         value = D(value)
@@ -748,74 +818,217 @@ def period_balance_chart(allocator, allocations):
                 return color
         return palette[start]
 
-    add('Налог', allocator.state.period_tax, '#7656D8')
+    consumed: set[str] = set()
+    planned_tax = D(allocations.get('КЖ:Налоги', 0))
+    direct_tax = D(allocations.get('Налог', 0))
+    ledger_tax = getattr(allocations, 'period_tax', None)
+    if ledger_tax is None:
+        # Compatibility for direct calls with a plain dict and legacy users
+        # whose operation ledger predates income snapshots.
+        ledger_tax = D(allocator.state.period_tax)
+    add('Налог', D(ledger_tax) + planned_tax + direct_tax, '#7656D8')
+    consumed.update({'КЖ:Налоги', 'Налог'})
+
     add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), '#00B7E8')
     add('Подушка', allocations.get('Подушка', 0), '#173F8A')
     add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), '#7EC8F5')
     add('Инвестиции', allocations.get('Инвестиции', 0), '#32A9E0')
     add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), '#9C7BAB')
     add('Досрочное погашение', allocations.get('Досрочное', 0), '#74608C')
-    for key, value in allocations.items():
-        if key.startswith('Рабочие обязательства:'):
-            add(key.replace(':', ' · '), value, '#B36C75')
+    consumed.update({
+        'Фонд Зарплаты', 'Подушка', 'Стабилизатор дохода',
+        'Инвестиции', 'Мин. платеж', 'Досрочное',
+    })
+    work_obligations = [
+        (str(key), value)
+        for key, value in allocations.items()
+        if str(key).startswith('Рабочие обязательства:')
+    ]
+    for key, value in sorted(work_obligations, key=lambda item: D(item[1]), reverse=True):
+        add(key.replace(':', ' · '), value, '#B36C75')
+        consumed.add(key)
 
     settings = getattr(allocator, 'settings', None)
-    configured_life = getattr(settings, 'life_categories', None)
+    envelope_kinds = getattr(allocations, 'envelope_kinds', {}) or {}
     category_ids = getattr(settings, 'life_category_ids', {}) or {}
-    # Состояние старых версий могло содержать прежнюю подпись категории.
-    # В отчёте допустимы только действующие категории профиля: их постоянный
-    # ID переживает переименование, а имя остаётся лишь подписью.
-    allocation_life = {
-        key[3:]: D(value)
+    life = {
+        str(key)[3:]: D(value)
         for key, value in allocations.items()
-        if str(key).startswith('КЖ:')
+        if str(key).startswith('КЖ:') and str(key) != 'КЖ:Налоги'
     }
-    if configured_life is not None:
+    consumed.update(
+        str(key) for key in allocations
+        if str(key).startswith('КЖ:')
+    )
+    # Very old ledgers did not keep detailed allocation keys. Only in that
+    # case is the state snapshot the best available compatibility source.
+    if not life:
         life = {
-            name: allocation_life.get(
-                name,
-                D(allocator.state.period_life_topups.get(name, 0)),
-            )
-            for name in configured_life
+            str(name): D(value)
+            for name, value in (
+                getattr(allocator.state, 'period_life_topups', {}) or {}
+            ).items()
+            if str(name) != 'Налоги'
         }
-        if 'Зарплата' not in configured_life:
-            life['Зарплата'] = D(allocator.state.period_life_topups.get('Зарплата', 0))
-    else:
-        life = dict(allocator.state.period_life_topups)
-        for key, value in allocations.items():
-            if key.startswith('КЖ:') and not allocator.state.period_life_topups:
-                life[key[3:]] = value
-    # Все налоговые обязательства — один фиолетовый банковский конверт.
-    planned_tax = life.pop('Налоги', Decimal(0))
-    if planned_tax > 0:
-        values['Налог'] = values.get('Налог', Decimal(0)) + planned_tax
-        colors['Налог'] = '#7656D8'
+
     salary = life.pop('Зарплата', None)
     used_life_colors = set()
-    for name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
+    for raw_name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
+        name, identity, _ = readable_name(raw_name, 'life')
         add(
             f'КМ · {name}', value,
-            shade(category_ids.get(name, name), life_colors, used_life_colors),
+            shade(category_ids.get(raw_name, identity), life_colors, used_life_colors),
         )
     if salary is not None:
         add('КМ · Зарплата', salary, shade(category_ids.get('Зарплата', 'Зарплата'), life_colors, used_life_colors))
+
+    reserve_items = [
+        (str(key)[3:], value)
+        for key, value in allocations.items()
+        if str(key).startswith('БР:')
+    ]
+    consumed.update(
+        str(key) for key in allocations
+        if str(key).startswith('БР:')
+    )
+    used_reserve_colors = set()
+    for raw_name, value in sorted(reserve_items, key=lambda item: D(item[1]), reverse=True):
+        name, identity, _ = readable_name(raw_name, 'reserve')
+        add(
+            f'Бытовой резерв · {name}', value,
+            shade(
+                getattr(settings, 'household_reserve_category_ids', {}).get(
+                    raw_name, identity,
+                ),
+                reserve_colors,
+                used_reserve_colors,
+            ),
+        )
     add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#24734A')
+    consumed.add('Бытовой резерв')
+
     goal_map = {goal.name: goal for goal in getattr(settings, 'goals', [])}
     goal_items = [
-        (key[5:], value)
+        (key[5:], value, str(envelope_kinds.get(key, "")))
         for key, value in allocations.items()
         if key.startswith('Цели:')
-        and (not goal_map or key[5:] in goal_map)
     ]
+    consumed.update(
+        str(key) for key in allocations
+        if str(key).startswith('Цели:')
+    )
     used_goal_colors, used_chest_colors = set(), set()
-    for name, value in sorted(goal_items, key=lambda item: D(item[1]), reverse=True):
-        goal = goal_map.get(name)
-        display = goal_display_name(name, bool(goal and goal.is_chest))
-        palette = chest_colors if goal and goal.is_chest else goal_colors
-        used = used_chest_colors if goal and goal.is_chest else used_goal_colors
-        identity = getattr(goal, 'uid', '') or name
+    for raw_name, value, recorded_kind in sorted(
+        goal_items, key=lambda item: D(item[1]), reverse=True,
+    ):
+        clean_name, identity, archived = readable_name(raw_name, 'goal')
+        base_name = clean_name.split(' · прежняя позиция', 1)[0]
+        goal = None if archived else goal_map.get(base_name)
+        is_chest = (
+            recorded_kind == 'chest'
+            or bool(goal and goal.is_chest)
+            or base_name.casefold().startswith('сундук ')
+        )
+        display = goal_display_name(base_name, is_chest)
+        if archived:
+            display += clean_name[len(base_name):]
+        palette = chest_colors if is_chest else goal_colors
+        used = used_chest_colors if is_chest else used_goal_colors
+        identity = getattr(goal, 'uid', '') or identity
         add(f'Цели и Сундуки · {display}', value, shade(identity, palette, used))
+
+    # Keep future/legacy one-off destinations visible until the presentation
+    # layer receives an explicit family for them. Silently omitting a positive
+    # allocation would make the period diagram fail its accounting purpose.
+    for key, value in allocations.items():
+        key = str(key)
+        if key not in consumed:
+            add(f'Прочее · {key.replace(":", " · ")}', value, '#8B7D91')
     return values, colors
+
+
+def period_balance_fallback_text(
+    allocator,
+    balances: dict[str, Decimal],
+    income: Decimal,
+    until_critical: Decimal,
+    until_sustainable: Decimal,
+    next_info: dict | None,
+) -> str:
+    """Readable complete report when Telegram cannot receive the diagram."""
+
+    def presentation(label: str) -> tuple[int, str, str]:
+        fixed = {
+            'Налог': (0, '🏛️', 'Налог'),
+            'Фонд Зарплаты': (1, '🏦', 'Фонд Зарплаты'),
+            'Подушка': (1, '🛡️', 'Подушка'),
+            'Стабилизатор': (1, '🛟', 'Стабилизатор'),
+            'Инвестиции': (1, '📈', 'Инвестиции'),
+            'Минимальные платежи по долгам': (2, '💳', 'Минимальные платежи по долгам'),
+            'Досрочное погашение': (2, '💳', 'Досрочное погашение'),
+            'Бытовой резерв': (4, '💚', 'Бытовой резерв'),
+        }
+        if label in fixed:
+            return fixed[label]
+        if label.startswith('Рабочие обязательства · '):
+            return 2, '💳', label.removeprefix('Рабочие обязательства · ')
+        if label.startswith('КМ · '):
+            return 3, '❤️', label.removeprefix('КМ · ')
+        if label.startswith('Бытовой резерв · '):
+            return 4, '💚', label.removeprefix('Бытовой резерв · ')
+        if label.startswith('Цели и Сундуки · '):
+            name = label.removeprefix('Цели и Сундуки · ')
+            return 5, ('🧳' if name.casefold().startswith('сундук ') else '⭐️'), name
+        return 6, '•', label.removeprefix('Прочее · ')
+
+    allocation_lines: list[str] = []
+    previous_group: int | None = None
+    for label, amount in balances.items():
+        group, icon, display = presentation(label)
+        if previous_group is not None and group != previous_group:
+            allocation_lines.append('')
+        allocation_lines.append(
+            f"{icon} <b>{escape(display)}</b> — {rub_plain(amount)} • {pct(D(amount), income)}"
+        )
+        previous_group = group
+
+    lines = [
+        '<b>БАЛАНСЫ ЗА ПЕРИОД</b>',
+        '',
+        f"💲 <b>Доход</b> — {rub(income)}",
+    ]
+    if allocation_lines:
+        lines.extend([
+            '',
+            '<blockquote>' + '\n'.join(allocation_lines) + '</blockquote>',
+        ])
+    lines.extend([
+        '—————————',
+        f"↺ <b>Баланс жизни</b> — {rub_plain(allocator.state.life_balance)}",
+        f"➤ До <b>Критич. минимума</b> — {rub_plain(until_critical)}",
+        f"➤ До <b>Устойч. жизни</b> — {rub_plain(until_sustainable)}",
+    ])
+    if next_info:
+        lines.append(
+            f"➤ До следующего уровня — {escape(str(next_info['next_name']))}: "
+            f"<b>{rub_plain(next_info['remaining'])}</b>"
+        )
+    else:
+        lines.append(
+            '➤ До следующего уровня — <b>максимальный уровень достигнут</b>'
+        )
+    if allocator.settings.developer_mode:
+        lines.extend([
+            '',
+            '<b>ЗАЩИТНЫЕ РЕЗЕРВЫ — УРОВЕНЬ РАЗРАБОТЧИКА</b>',
+            f"МП: {rub(allocator.state.pillow_minimum)} / "
+            f"{rub(allocator.settings.minimum_reserve_limit)}",
+            f"ФМ: {rub(allocator.state.pillow_force_majeure)} / "
+            f"{rub(allocator.settings.force_majeure_limit)}",
+            f"Стабилизатор дохода: {rub(allocator.state.pillow_stabilizer)} / "
+            f"{rub(allocator.settings.stabilizer_full_limit)}",
+        ])
+    return '\n'.join(lines)
 
 
 async def send_balances(
@@ -831,21 +1044,14 @@ async def send_balances(
 
         await message.answer(
             "Сначала создайте финансовый профиль "
-            "через /start."
+            "через /start.",
+            reply_markup=keyboard([[("Настроить профиль", "setup:start")]]),
         )
 
         return
 
     settings = allocator.settings
     state = allocator.state
-
-    income = D(
-        state.period_income
-    )
-
-    tax = D(
-        state.period_tax
-    )
 
     allocations = (
         get_period_allocations(
@@ -854,41 +1060,15 @@ async def send_balances(
         )
     )
 
-    # --------------------------------------------------------
-    # Основные суммы периода
-    # --------------------------------------------------------
-
-    pillow_period = allocations.get(
-        "Подушка",
-        Decimal("0"),
+    # The ledger is the source of truth for every number in this report.
+    # Reading the centre total and the slices from different snapshots can
+    # produce a mathematically impossible diagram after a migration or a
+    # repaired/deleted operation.
+    income = D(
+        getattr(allocations, "period_income", None)
+        if getattr(allocations, "period_income", None) is not None
+        else state.period_income
     )
-    stabilizer_period = allocations.get("Стабилизатор дохода", Decimal("0"))
-    fund_salary_period = allocations.get("Фонд Зарплаты", Decimal("0"))
-
-    investment_period = allocations.get(
-        "Инвестиции",
-        Decimal("0"),
-    )
-
-    household_period = allocations.get(
-        "Бытовой резерв",
-        Decimal("0"),
-    )
-
-    minimum_period = allocations.get(
-        "Мин. платеж",
-        Decimal("0"),
-    )
-
-    early_period = allocations.get(
-        "Досрочное",
-        Decimal("0"),
-    )
-
-    # --------------------------------------------------------
-    # Заголовок периода
-    # --------------------------------------------------------
-
     period_label = (
         "текущий расчётный период"
     )
@@ -913,113 +1093,6 @@ async def send_balances(
 
         except ValueError:
             pass
-
-    lines = [
-        "<b>БАЛАНСЫ ЗА ПЕРИОД</b>", "",
-        f"💲 <b>Доход</b> — {rub(income)}", "",
-        f"🏛️ <b>Налог</b> — {rub_plain(tax)} • {pct(tax, income)}", "",
-    ]
-    if settings.income_rhythm == "cyclic" and fund_salary_period > 0:
-        lines.append(f"🏦 <b>Фонд Зарплаты</b> — {rub_plain(fund_salary_period)} • {pct(fund_salary_period, income)}")
-    if pillow_period > 0:
-        lines.append(f"🛡️ <b>Подушка</b> — {rub_plain(pillow_period)} • {pct(pillow_period, income)}")
-    if settings.needs_stabilizer and stabilizer_period > 0:
-        lines.append(f"🛟 <b>Стабилизатор</b> — {rub_plain(stabilizer_period)} • {pct(stabilizer_period, income)}")
-    if investment_period > 0:
-        lines.append(f"📈 <b>Инвестиции</b> — {rub_plain(investment_period)} • {pct(investment_period, income)}")
-    if minimum_period > 0 or early_period > 0:
-        lines.append("")
-        if minimum_period > 0:
-            lines.append(f"💳 <b>Минимальные платежи по долгам</b> — {rub_plain(minimum_period)} • {pct(minimum_period, income)}")
-        if early_period > 0:
-            lines.append(f"💳 <b>Досрочное погашение</b> — {rub_plain(early_period)} • {pct(early_period, income)}")
-    if lines[-1] != "":
-        lines.append("")
-
-    # --------------------------------------------------------
-    # Каждая категория КЖ
-    #
-    # period_life_topups — самый надёжный источник именно
-    # для КЖ текущего расчётного периода.
-    # Нулевые категории текущего периода не показываем.
-    # --------------------------------------------------------
-
-    category_names = list(
-        settings.life_categories.keys()
-    )
-
-    if "Зарплата" not in category_names:
-
-        category_names.append(
-            "Зарплата"
-        )
-
-    for name in sorted(
-        category_names,
-        key=lambda name: D(state.period_life_topups.get(name, 0)),
-        reverse=True,
-    ):
-
-        amount = D(
-            state.period_life_topups.get(
-                name,
-                Decimal("0"),
-            )
-        )
-
-        if amount > 0:
-            lines.append(f"❤️ <b>{escape(name)}</b> — {rub_plain(amount)} • {pct(amount, income)}")
-
-    # --------------------------------------------------------
-    # Бытовой резерв
-    # --------------------------------------------------------
-
-    if household_period > 0:
-        lines.extend(["", f"💚 <b>Бытовой резерв</b> — {rub_plain(household_period)} • {pct(household_period, income)}"])
-
-    # --------------------------------------------------------
-    # Каждая цель
-    #
-    goal_lines = []
-    # --------------------------------------------------------
-
-    if settings.goals:
-
-        for goal in sorted(
-            settings.goals,
-            key=lambda goal: D(allocations.get(f"Цели:{goal.name}", 0)),
-            reverse=True,
-        ):
-
-            amount = allocations.get(
-                f"Цели:{goal.name}",
-                Decimal("0"),
-            )
-
-            goal_icon = "🧳" if goal.is_chest else "⭐️"
-            display_name = goal_display_name(goal.name, goal.is_chest)
-            if amount > 0:
-                goal_lines.append(f"{goal_icon} <b>{escape(display_name)}</b> — {rub_plain(amount)} • {pct(amount, income)}")
-
-    else:
-
-        amount = allocations.get(
-            "Цели:ЦЕЛИ (всего)",
-            Decimal("0"),
-        )
-
-        if amount > 0:
-            goal_lines.append(f"⭐️ <b>Цели (всего)</b> — {rub_plain(amount)} • {pct(amount, income)}")
-    if goal_lines:
-        lines.extend(["", *goal_lines])
-
-    # --------------------------------------------------------
-    # Кредиты
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-    # Пороги
-    # --------------------------------------------------------
 
     critical_minimum = D(
         settings.critical_life
@@ -1050,57 +1123,6 @@ async def send_balances(
         allocator.next_mode_info()
     )
 
-    # Выделяем все периодические поступления в конверты одной цитатой.
-    threshold_index = lines.index("<b>ПОРОГИ</b>") if "<b>ПОРОГИ</b>" in lines else len(lines)
-    tax_index = next((i for i, line in enumerate(lines) if line.startswith("🏛️ <b>Налог</b>")), None)
-    if tax_index is not None and tax_index < threshold_index:
-        quoted = "\n".join(lines[tax_index:threshold_index]).strip()
-        lines[tax_index:threshold_index] = ["<blockquote>" + quoted + "</blockquote>"]
-
-    lines.extend([
-        "",
-        "—————————",
-        f"↺ <b>Баланс жизни</b> — {rub_plain(state.life_balance)}",
-        f"➤ До <b>Критич. минимума</b> — {rub_plain(until_kzh)}",
-        f"➤ До <b>Устойч. жизни</b> — {rub_plain(until_uzh)}",
-    ])
-
-    if next_info:
-
-        lines.append(
-            f"➤ До следующего уровня — "
-            f"{next_info['next_name']}: "
-            f"<b>{rub_plain(next_info['remaining'])}</b>"
-        )
-
-    else:
-
-        lines.append(
-            "➤ До следующего уровня — "
-            "<b>максимальный уровень достигнут</b>"
-        )
-
-    # --------------------------------------------------------
-    # Только уровень разработчика
-    # --------------------------------------------------------
-
-    if settings.developer_mode:
-
-        lines.extend([
-            "",
-            "<b>ЗАЩИТНЫЕ РЕЗЕРВЫ — "
-            "УРОВЕНЬ РАЗРАБОТЧИКА</b>",
-            f"МП: "
-            f"{rub(state.pillow_minimum)} / "
-            f"{rub(settings.minimum_reserve_limit)}",
-            f"ФМ: "
-            f"{rub(state.pillow_force_majeure)} / "
-            f"{rub(settings.force_majeure_limit)}",
-            f"Стабилизатор дохода: "
-            f"{rub(state.pillow_stabilizer)} / "
-            f"{rub(settings.stabilizer_full_limit)}",
-        ])
-
     balances, colors = period_balance_chart(allocator, allocations)
     summary_lines = [
         "<b>БАЛАНСЫ ЗА ПЕРИОД</b>", "",
@@ -1119,7 +1141,14 @@ async def send_balances(
         message, balances, "БАЛАНСЫ", "\n".join(summary_lines),
         subtitle=f"Пополнения конвертов · {period_label}",
         colors=colors, preserve_order=True, center_amount=income,
-        fallback_text="\n".join(lines),
+        fallback_text=period_balance_fallback_text(
+            allocator,
+            balances,
+            income,
+            until_kzh,
+            until_uzh,
+            next_info,
+        ),
         reply_markup=keyboard([
             [("← Главное меню", "menu:back")],
         ]),
@@ -1231,36 +1260,24 @@ def income_history_operations(telegram_id: int) -> list[dict]:
     """Return recorded income operations, newest first, for one user only."""
     return [
         operation
-        for operation in db.load_operations(telegram_id, limit=1000)
+        for operation in db.load_operations(telegram_id, limit=-1)
         if operation.get("type") == "income_distribution"
     ]
 
 
 def rebuild_period_analytics_from_history(allocator, telegram_id: int) -> None:
     """Make chart data match the remaining income ledger after a deletion."""
-    period_income = Decimal("0")
-    period_tax = Decimal("0")
-    allocations: dict[str, Decimal] = {}
+    operations = db.load_operations(telegram_id, limit=-1)
+    period_income, period_tax, allocations, _ = period_ledger_snapshot(operations)
     life_topups = {
         name: Decimal("0")
         for name in allocator.settings.life_categories
     }
     life_topups.setdefault("Зарплата", Decimal("0"))
-
-    for operation in db.load_operations(telegram_id, limit=1000):
-        if operation.get("type") == "period_reset":
-            break
-        if operation.get("type") != "income_distribution":
-            continue
-        payload = operation.get("payload") or {}
-        period_income += D(payload.get("income", 0))
-        period_tax += D(payload.get("tax", 0))
-        for key, amount in (payload.get("allocations") or {}).items():
-            value = D(amount)
-            allocations[key] = allocations.get(key, Decimal("0")) + value
-            if str(key).startswith("КЖ:"):
-                name = str(key)[3:]
-                life_topups[name] = life_topups.get(name, Decimal("0")) + value
+    for key, amount in allocations.items():
+        if str(key).startswith("КЖ:"):
+            name = str(key)[3:]
+            life_topups[name] = life_topups.get(name, Decimal("0")) + D(amount)
 
     allocator.state.period_income = period_income
     allocator.state.period_tax = period_tax
@@ -1280,12 +1297,15 @@ def income_history_date(operation: dict) -> str:
 def income_history_button_label(operation: dict) -> str:
     payload = operation.get("payload") or {}
     income_type = " ".join(str(payload.get("income_type", "Без типа")).split())
-    if len(income_type) > 24:
-        income_type = income_type[:23] + "…"
-    return (
-        f"{income_history_date(operation)[:5]} · {income_type} · "
-        f"{rub_plain(payload.get('income', 0))}"
-    )
+    operation_date = income_history_date(operation)
+    amount = rub_plain(payload.get('income', 0))
+    # Keep the year visible while leaving room for the amount in Telegram's
+    # compact inline button. The full type remains on the detail card.
+    fixed_length = len(operation_date) + len(amount) + len(" ·  · ")
+    available = max(4, 64 - fixed_length)
+    if len(income_type) > available:
+        income_type = income_type[:available - 1] + "…"
+    return f"{operation_date} · {income_type} · {amount}"
 
 
 def find_income_history_operation(telegram_id: int, operation_id: int) -> dict | None:
@@ -1297,6 +1317,74 @@ def find_income_history_operation(telegram_id: int, operation_id: int) -> dict |
         ),
         None,
     )
+
+
+def current_period_income_ids(telegram_id: int) -> set[int]:
+    """IDs that may be replayed safely inside the still-open period."""
+    result: set[int] = set()
+    found_reset = False
+    operations = db.load_operations(telegram_id, limit=-1)
+    for operation in operations:
+        if operation.get("type") == "period_reset":
+            found_reset = True
+            break
+        if operation.get("type") == "income_distribution":
+            try:
+                result.add(int(operation["id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if found_reset:
+        return result
+
+    # Compatibility for profiles whose active-period timestamp predates the
+    # persistent period_reset event.  In ambiguous legacy history we hide the
+    # destructive action instead of treating every old income as current.
+    allocator = db.load_allocator(telegram_id)
+    raw_start = getattr(getattr(allocator, "state", None), "period_started_at", None)
+    if not raw_start:
+        return result
+    try:
+        start_date = datetime.fromisoformat(str(raw_start)).date()
+    except (TypeError, ValueError):
+        return set()
+    safe_ids: set[int] = set()
+    operations_by_id = {
+        int(operation["id"]): operation
+        for operation in operations
+        if operation.get("type") == "income_distribution" and operation.get("id") is not None
+    }
+    for operation_id in result:
+        payload = (operations_by_id.get(operation_id) or {}).get("payload") or {}
+        try:
+            operation_date = date.fromisoformat(str(payload["date"])[:10])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if operation_date >= start_date:
+            safe_ids.add(operation_id)
+    return safe_ids
+
+
+def income_history_navigation():
+    return keyboard([
+        [("← К истории", "incomehistory:open")],
+        [("← Главное меню", "menu:back")],
+    ])
+
+
+def income_note_edit_keyboard(operation_id: int, has_note: bool):
+    rows = []
+    if has_note:
+        rows.append([
+            ("🗑️ Удалить заметку", f"incomehistory:note_delete:{operation_id}"),
+        ])
+    rows.extend([
+        [
+            ("← Назад", f"incomehistory:note_back:{operation_id}"),
+            ("✗ Отмена", f"incomehistory:note_cancel:{operation_id}"),
+        ],
+        [("← Главное меню", "menu:back")],
+    ])
+    return keyboard(rows)
 
 
 async def send_income_history(message: Message, telegram_id: int, page: int = 0):
@@ -1368,20 +1456,28 @@ async def send_income_history_detail(
 ) -> bool:
     operation = find_income_history_operation(telegram_id, operation_id)
     if operation is None:
-        await message.answer("Это поступление уже недоступно в истории.")
+        await message.answer(
+            "Это поступление уже недоступно в истории.",
+            reply_markup=income_history_navigation(),
+        )
         return False
     has_note = bool((operation.get("payload") or {}).get("note"))
+    current_period = operation_id in current_period_income_ids(telegram_id)
+    edit_row = [
+        (
+            "✎ Заметка" if has_note else "+ Заметка",
+            f"incomehistory:note:{operation_id}",
+        ),
+    ]
+    if current_period:
+        edit_row.append(
+            ("🗑️ Удалить доход", f"incomehistory:delete:{operation_id}")
+        )
     await message.answer(
         income_operation_card_text(operation),
         reply_markup=keyboard([
             [("Показать распределение", f"incomehistory:distribution:{operation_id}")],
-            [
-                (
-                    "✎ Заметка" if has_note else "+ Заметка",
-                    f"incomehistory:note:{operation_id}",
-                ),
-                ("🗑️ Удалить доход", f"incomehistory:delete:{operation_id}"),
-            ],
+            edit_row,
             [
                 ("← Главное меню", "menu:back"),
                 ("← К истории", "incomehistory:open"),
@@ -1398,14 +1494,25 @@ def income_distribution_text(operation: dict, allocator) -> str:
         for key, value in (payload.get("allocations") or {}).items()
     }
     groups: list[list[str]] = [[], [], [], [], [], []]
+    envelope_kinds = {
+        str(key): str(value)
+        for key, value in (payload.get("envelope_kinds") or {}).items()
+    }
 
     def add(group: int, emoji: str, name: str, amount) -> None:
         amount = D(amount)
         if amount > 0:
             groups[group].append(f"{emoji} <b>{escape(name)}</b> — {rub_plain(amount)}")
 
-    add(0, "🏛️", "Налог", payload.get("tax", 0))
-    add(0, "🏛️", "Налоги", allocations.get("КЖ:Налоги", 0))
+    # Налог с самого дохода и накопления на имущественные/прочие налоги
+    # физически лежат в одном банковском конверте. Показываем пользователю
+    # одну строку и не заставляем его разбираться во внутренних маршрутах.
+    tax_total = (
+        D(payload.get("tax", 0))
+        + D(allocations.get("КЖ:Налоги", 0))
+        + D(allocations.get("Налог", 0))
+    )
+    add(0, "🏛️", "Налоги", tax_total)
     add(1, "🏦", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", 0))
     add(1, "🛡️", "Подушка", allocations.get("Подушка", 0))
     add(1, "🛟", "Стабилизатор", allocations.get("Стабилизатор дохода", 0))
@@ -1428,16 +1535,34 @@ def income_distribution_text(operation: dict, allocator) -> str:
         add(3, "❤️", name, amount)
     add(3, "❤️", "Зарплата", allocations.get("КЖ:Зарплата", 0))
 
+    reserve_items = [
+        (key[3:], amount)
+        for key, amount in allocations.items()
+        if key.startswith("БР:")
+    ]
+    for name, amount in sorted(
+        reserve_items, key=lambda item: item[1], reverse=True,
+    ):
+        add(4, "💚", name, amount)
     add(4, "💚", "Бытовой резерв", allocations.get("Бытовой резерв", 0))
     goal_map = {goal.name: goal for goal in allocator.settings.goals}
     goal_items = [
-        (key[5:], amount)
+        (key, key[5:], amount)
         for key, amount in allocations.items()
         if key.startswith("Цели:")
     ]
-    for name, amount in sorted(goal_items, key=lambda item: item[1], reverse=True):
+    for key, name, amount in sorted(
+        goal_items, key=lambda item: item[2], reverse=True,
+    ):
         goal = goal_map.get(name)
-        add(5, "🧳" if goal and goal.is_chest else "⭐️", goal_display_name(name, bool(goal and goal.is_chest)), amount)
+        recorded_kind = envelope_kinds.get(key, "")
+        is_chest = recorded_kind == "chest" or bool(goal and goal.is_chest)
+        archived = re.match(r"^(?P<name>.+?) · прежний [^ ]+$", name)
+        clean_name = archived.group("name") if archived else name
+        display_name = goal_display_name(clean_name, is_chest)
+        if archived:
+            display_name += " · прежняя позиция"
+        add(5, "🧳" if is_chest else "⭐️", display_name, amount)
 
     quote = "\n\n".join("\n".join(group) for group in groups if group)
     return (
@@ -1463,7 +1588,10 @@ async def income_history_page(callback: CallbackQuery, state: FSMContext):
     try:
         page = int(callback.data.rsplit(":", 1)[1])
     except (AttributeError, ValueError):
-        await callback.message.answer("Не удалось открыть эту страницу истории.")
+        await callback.message.answer(
+            "Не удалось открыть эту страницу истории.",
+            reply_markup=income_history_navigation(),
+        )
         return
     await state.clear()
     await send_income_history(callback.message, callback.from_user.id, page)
@@ -1491,44 +1619,93 @@ async def ask_history_income_note(callback: CallbackQuery, state: FSMContext):
         operation_id = int(callback.data.rsplit(":", 1)[1])
     except (AttributeError, ValueError):
         operation_id = 0
-    if find_income_history_operation(callback.from_user.id, operation_id) is None:
-        await callback.message.answer("Это поступление уже недоступно в истории.")
+    operation = find_income_history_operation(callback.from_user.id, operation_id)
+    if operation is None:
+        await callback.message.answer(
+            "Это поступление уже недоступно в истории.",
+            reply_markup=income_history_navigation(),
+        )
         return
     await state.update_data(history_note_operation_id=operation_id)
     await state.set_state(IncomeHistoryStates.note)
     await callback.message.answer(
         "<b>ЗАМЕТКА К ПОСТУПЛЕНИЮ</b>\n\n"
         "Введите новую короткую заметку. Не более 60 символов.",
-        reply_markup=keyboard([
-            [
-                ("← Назад", f"incomehistory:note_back:{operation_id}"),
-                ("✗ Отмена", f"incomehistory:note_cancel:{operation_id}"),
-            ],
-        ]),
+        reply_markup=income_note_edit_keyboard(
+            operation_id,
+            bool((operation.get("payload") or {}).get("note")),
+        ),
     )
 
 
 @router.message(IncomeHistoryStates.note)
 async def save_history_income_note(message: Message, state: FSMContext):
     note = " ".join((message.text or "").split())
-    if not note:
-        await message.answer("Введите короткую заметку или нажмите «← Назад».")
-        return
-    if len(note) > 60:
-        await message.answer("Заметка должна быть не длиннее 60 символов.")
-        return
     data = await state.get_data()
     operation_id = data.get("history_note_operation_id")
-    if not isinstance(operation_id, int) or not db.update_income_note(
+    operation = (
+        find_income_history_operation(message.from_user.id, operation_id)
+        if isinstance(operation_id, int)
+        else None
+    )
+    if operation is None:
+        await state.clear()
+        await message.answer(
+            "Это поступление уже недоступно в истории.",
+            reply_markup=income_history_navigation(),
+        )
+        return
+    note_keyboard = income_note_edit_keyboard(
+        operation_id,
+        bool((operation.get("payload") or {}).get("note")),
+    )
+    if not note:
+        await message.answer(
+            "Введите короткую заметку или выберите действие ниже.",
+            reply_markup=note_keyboard,
+        )
+        return
+    if len(note) > 60:
+        await message.answer(
+            "Заметка должна быть не длиннее 60 символов.",
+            reply_markup=note_keyboard,
+        )
+        return
+    if not db.update_income_note(
         message.from_user.id,
         operation_id,
         note,
     ):
         await state.clear()
-        await message.answer("Не удалось сохранить заметку. Попробуйте открыть доход снова.")
+        await message.answer(
+            "Не удалось сохранить заметку. Попробуйте открыть доход снова.",
+            reply_markup=income_history_navigation(),
+        )
         return
     await state.clear()
     await send_income_history_detail(message, message.from_user.id, operation_id)
+
+
+@router.callback_query(F.data.startswith("incomehistory:note_delete:"))
+async def delete_history_income_note(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        operation_id = 0
+    if not db.update_income_note(callback.from_user.id, operation_id, ""):
+        await state.clear()
+        await callback.message.answer(
+            "Заметку не удалось удалить: поступление больше недоступно.",
+            reply_markup=income_history_navigation(),
+        )
+        return
+    await state.clear()
+    await send_income_history_detail(
+        callback.message,
+        callback.from_user.id,
+        operation_id,
+    )
 
 
 @router.callback_query(F.data.startswith("incomehistory:note_back:"))
@@ -1552,7 +1729,10 @@ async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
         operation_id = 0
     operation = find_income_history_operation(callback.from_user.id, operation_id)
     if operation is None:
-        await callback.message.answer("Это поступление уже недоступно в истории.")
+        await callback.message.answer(
+            "Это поступление уже недоступно в истории.",
+            reply_markup=income_history_navigation(),
+        )
         return
     await state.clear()
     payload = operation.get("payload") or {}
@@ -1570,6 +1750,10 @@ async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
                 ("🗑️ Удалить доход", f"incomehistory:delete_confirm:{operation_id}"),
             ],
             [("← К доходу", f"incomehistory:detail:{operation_id}")],
+            [
+                ("← Главное меню", "menu:back"),
+                ("← К истории", "incomehistory:open"),
+            ],
         ]),
     )
 
@@ -1592,24 +1776,15 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
         operation_id = int(callback.data.rsplit(":", 1)[1])
     except (AttributeError, ValueError):
         operation_id = 0
-    operations = income_history_operations(callback.from_user.id)
-    operation = next((item for item in operations if item.get("id") == operation_id), None)
-    allocator = db.load_allocator(callback.from_user.id)
-    if operation is None or allocator is None:
-        await callback.message.answer("Это поступление уже недоступно в истории.")
-        return
-
-    # A snapshot gives an exact restoration for the newest income. For an
-    # earlier entry, the engine reverses only its recorded contribution and
-    # keeps all subsequent, unrelated operations in place.
-    restored = deepcopy(allocator)
-    payload = operation.get("payload") or {}
     try:
-        restored.rollback_income_operation(
-            payload,
-            restore_snapshot=bool(operations and operations[0].get("id") == operation_id),
+        delete_income_safely(
+            db,
+            callback.from_user.id,
+            operation_id,
+            reconcile_taxes=reconcile_tax_obligation_balances,
+            rebuild_period_analytics=rebuild_period_analytics_from_history,
         )
-    except ValueError as error:
+    except IncomeDeletionError as error:
         await callback.message.answer(
             "<b>ДОХОД НЕ УДАЛЁН</b>\n\n"
             f"{escape(str(error))}\n\n"
@@ -1617,18 +1792,22 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
             reply_markup=keyboard([
                 [("← К доходу", f"incomehistory:detail:{operation_id}")],
                 [("← К истории", "incomehistory:open")],
+                [("← Главное меню", "menu:back")],
             ]),
         )
         return
-
-    if not db.delete_income_operation(callback.from_user.id, operation_id):
+    except Exception:
         await callback.message.answer(
-            "Не удалось завершить удаление. Балансы не изменяйте и обратитесь в поддержку."
+            "<b>ДОХОД НЕ УДАЛЁН</b>\n\n"
+            "Не удалось завершить удаление. Бот сохранил все балансы без изменений.\n\n"
+            "Попробуйте ещё раз или обратитесь в поддержку.",
+            reply_markup=keyboard([
+                [("← К доходу", f"incomehistory:detail:{operation_id}")],
+                [("← К истории", "incomehistory:open")],
+                [("← Главное меню", "menu:back")],
+            ]),
         )
         return
-    reconcile_tax_obligation_balances(callback.from_user.id, restored)
-    rebuild_period_analytics_from_history(restored, callback.from_user.id)
-    db.save_allocator(callback.from_user.id, restored)
     await state.clear()
     await callback.message.answer(
         "<b>ДОХОД УДАЛЁН</b>\n\n"
@@ -1650,7 +1829,10 @@ async def income_history_distribution(callback: CallbackQuery, state: FSMContext
     operation = find_income_history_operation(callback.from_user.id, operation_id)
     allocator = db.load_allocator(callback.from_user.id)
     if operation is None or allocator is None:
-        await callback.message.answer("Не удалось открыть распределение этого поступления.")
+        await callback.message.answer(
+            "Не удалось открыть распределение этого поступления.",
+            reply_markup=income_history_navigation(),
+        )
         return
     await state.clear()
     await callback.message.answer(
@@ -1661,6 +1843,98 @@ async def income_history_distribution(callback: CallbackQuery, state: FSMContext
             [("← Главное меню", "menu:back")],
         ]),
     )
+
+
+def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decimal]:
+    """Aggregate income by immutable type ID and expose readable chart labels.
+
+    Records created before income-type IDs use their (possibly migrated)
+    normalized name as a compatibility identity.  Equal visible names that
+    belong to different IDs are disambiguated instead of being added together.
+    """
+    current_by_id = {
+        str(identifier): str(name)
+        for name, identifier in (
+            getattr(allocator.settings, "income_type_ids", {}) or {}
+        ).items()
+    }
+    stored_labels = {
+        str(identifier): str(name)
+        for identifier, name in (
+            getattr(allocator.settings, "income_type_labels", {}) or {}
+        ).items()
+    }
+    grouped: dict[str, dict] = {}
+
+    for operation in operations:
+        operation_type = operation.get("type")
+        if operation_type == "period_reset":
+            break
+        if operation_type != "income_distribution":
+            continue
+        payload = operation.get("payload") or {}
+        amount = D(payload.get("income", Decimal("0")))
+        if amount <= 0:
+            continue
+        recorded_name = str(payload.get("income_type", "Без типа"))
+        identifier = str(payload.get("income_type_id") or "").strip()
+        identity = f"id:{identifier}" if identifier else f"legacy:{recorded_name.casefold()}"
+        label = (
+            current_by_id.get(identifier)
+            or stored_labels.get(identifier)
+            or recorded_name
+        )
+        item = grouped.setdefault(identity, {
+            "label": label,
+            "amount": Decimal("0"),
+            "active": bool(identifier and identifier in current_by_id),
+        })
+        item["amount"] += amount
+
+    label_counts: dict[str, int] = {}
+    for item in grouped.values():
+        label_counts[item["label"]] = label_counts.get(item["label"], 0) + 1
+
+    totals: dict[str, Decimal] = {}
+    duplicate_indexes: dict[str, int] = {}
+    for item in grouped.values():
+        label = item["label"]
+        if label_counts[label] > 1:
+            if item["active"] and label not in totals:
+                display_label = label
+            else:
+                duplicate_indexes[label] = duplicate_indexes.get(label, 0) + 1
+                suffix = duplicate_indexes[label]
+                display_label = f"{label} · прежний тип"
+                if display_label in totals:
+                    display_label = f"{display_label} {suffix}"
+        else:
+            display_label = label
+        totals[display_label] = item["amount"]
+    return totals
+
+
+def income_analysis_fallback_text(
+    totals: dict[str, Decimal],
+    total_income: Decimal,
+) -> str:
+    """Complete text equivalent used when the chart cannot be delivered."""
+    lines = [
+        '<b>АНАЛИЗ ДОХОДОВ</b>',
+        '',
+        f"💲 <b>Доход итого</b> — {rub(total_income)}",
+    ]
+    if totals:
+        lines.append('')
+        for name, amount in totals.items():
+            lines.append(
+                f"<b>{escape(name)}</b> — {rub_plain(amount)} • "
+                f"{pct(D(amount), total_income)}"
+            )
+    else:
+        lines.extend(['', 'В текущем расчётном периоде пока нет поступлений.'])
+    return '\n'.join(lines)
+
 
 async def send_income_analysis(
     message: Message,
@@ -1678,7 +1952,8 @@ async def send_income_analysis(
     if allocator is None:
         await message.answer(
             "Сначала создайте финансовый профиль "
-            "через /start."
+            "через /start.",
+            reply_markup=keyboard([[("Настроить профиль", "setup:start")]]),
         )
         return
 
@@ -1687,68 +1962,15 @@ async def send_income_analysis(
     # сначала самые новые.
     operations = db.load_operations(
         telegram_id,
-        limit=1000,
+        limit=-1,
     )
 
-    totals: dict[str, Decimal] = {}
-    total_income = Decimal("0")
-
-    # ========================================================
-    # ВАЖНО
-    #
-    # Идём от самых новых операций назад.
-    # Как только встретили последний period_reset —
-    # останавливаемся.
-    #
-    # Значит учитываются ТОЛЬКО доходы,
-    # сделанные после последнего сброса периода.
-    # ========================================================
-
-    for operation in operations:
-
-        operation_type = operation.get(
-            "type"
-        )
-
-        # Дошли до начала текущего периода.
-        if operation_type == "period_reset":
-            break
-
-        # Остальные типы операций нам не нужны.
-        if operation_type != "income_distribution":
-            continue
-
-        payload = (
-            operation.get("payload")
-            or {}
-        )
-
-        income_type = str(
-            payload.get(
-                "income_type",
-                "Без типа",
-            )
-        )
-
-        amount = D(
-            payload.get(
-                "income",
-                Decimal("0"),
-            )
-        )
-
-        if amount <= 0:
-            continue
-
-        totals[income_type] = (
-            totals.get(
-                income_type,
-                Decimal("0"),
-            )
-            + amount
-        )
-
-        total_income += amount
+    totals = dict(sorted(
+        income_analysis_totals(allocator, operations).items(),
+        key=lambda item: item[1],
+        reverse=True,
+    ))
+    total_income = sum(totals.values(), Decimal("0"))
 
     # ========================================================
     # НЕТ ПОСТУПЛЕНИЙ
@@ -1760,6 +1982,7 @@ async def send_income_analysis(
             message, {}, "АНАЛИЗ ДОХОДОВ",
             "В текущем расчётном периоде "
             "пока нет поступлений.",
+            fallback_text=income_analysis_fallback_text({}, total_income),
             reply_markup=analysis_keyboard,
         )
 
@@ -1769,6 +1992,8 @@ async def send_income_analysis(
         message, totals, "АНАЛИЗ ДОХОДОВ", "",
         subtitle="Источники дохода · текущий расчётный период",
         center_amount=total_income,
+        preserve_order=True,
+        fallback_text=income_analysis_fallback_text(totals, total_income),
         reply_markup=analysis_keyboard,
     )
 
@@ -1803,7 +2028,7 @@ async def menu_reserves(callback: CallbackQuery):
         rows.append([("Баланс Стабилизатора", "settings:stabilizer_balance")])
     if allocator.profile_id == "cyclic":
         rows.append([("Баланс Фонда Зарплаты", "settings:intercontract_balance")])
-    rows.append([("Главное меню", "menu:back")])
+    rows.append([("← Главное меню", "menu:back")])
     await callback.message.answer(
         "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
         "Выберите резерв и укажите, сколько денег в нём сейчас. "

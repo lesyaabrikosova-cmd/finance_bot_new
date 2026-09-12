@@ -8,6 +8,8 @@ from datetime import date, datetime, timedelta
 from calendar import monthrange
 from uuid import uuid4
 
+from time_utils import moscow_now, moscow_today
+
 
 # ============================================================
 # ФИНАНСОВЫЙ AI-АЛЛОКАТОР
@@ -27,6 +29,23 @@ ZERO = Decimal("0")
 ONE = Decimal("1")
 HUNDRED = Decimal("100")
 CENT = Decimal("0.01")
+
+# These labels identify allocator-owned routes. User-created life envelopes
+# must not reuse them, otherwise a tax/reserve allocation can overwrite a
+# category that merely happens to have the same visible name.
+SYSTEM_ENVELOPE_NAMES = frozenset(
+    name.casefold()
+    for name in {
+        "Налог", "Налоги", "Подушка", "МП-подушка", "ФМ-подушка",
+        "Стабилизатор", "Стабилизатор дохода", "Фонд Зарплаты",
+        "Бытовой резерв", "Инвестиции", "Зарплата", "Мин. платеж",
+        "Минимальные платежи", "Досрочное", "Досрочное погашение",
+    }
+)
+
+
+def is_system_envelope_name(name: str) -> bool:
+    return " ".join(str(name or "").split()).casefold() in SYSTEM_ENVELOPE_NAMES
 
 @dataclass(frozen=True)
 class BracketPolicy:
@@ -631,6 +650,11 @@ class UserSettings:
     tax_rate: Decimal = Decimal("0")
     taxable_income_types: List[str] = field(default_factory=list)
     income_type_tax_rates: Dict[str, Decimal] = field(default_factory=dict)
+    # Название можно менять, поэтому история доходов ссылается на тип через
+    # постоянный ID. ``income_type_labels`` сохраняет последнее понятное имя
+    # даже после удаления типа из активных настроек.
+    income_type_ids: Dict[str, str] = field(default_factory=dict)
+    income_type_labels: Dict[str, str] = field(default_factory=dict)
     # Плановые налоги, которые входят в Критический минимум.
     # Ключ — понятное пользователю обязательство/объект,
     # значение — его среднемесячная сумма.
@@ -675,6 +699,7 @@ class UserSettings:
     # Постоянная ссылка на категорию. Имя остаётся подписью интерфейса.
     life_category_ids: Dict[str, str] = field(default_factory=dict)
     household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
+    household_reserve_category_ids: Dict[str, str] = field(default_factory=dict)
     # Подарки вводятся в меню Жизни только как история будущей Цели.
     # Они не входят в БР и УЖ.
     historical_gifts_monthly: Decimal = ZERO
@@ -761,6 +786,22 @@ class UserSettings:
             for name, rate in self.income_type_tax_rates.items()
             if rate > ZERO
         ]
+        supplied_income_type_ids = {
+            str(name): str(uid)
+            for name, uid in (self.income_type_ids or {}).items()
+            if str(name).strip() and str(uid).strip()
+        }
+        self.income_type_ids = {
+            name: supplied_income_type_ids.get(name, uuid4().hex)
+            for name in self.income_type_tax_rates
+        }
+        self.income_type_labels = {
+            str(uid): str(name)
+            for uid, name in (self.income_type_labels or {}).items()
+            if str(uid).strip() and str(name).strip()
+        }
+        for name, uid in self.income_type_ids.items():
+            self.income_type_labels[uid] = name
         self.planned_taxes = {
             name: D(amount)
             for name, amount in self.planned_taxes.items()
@@ -823,6 +864,15 @@ class UserSettings:
             name: D(amount)
             for name, amount in self.household_reserve_categories.items()
         }
+        supplied_household_ids = {
+            str(name): str(uid)
+            for name, uid in (self.household_reserve_category_ids or {}).items()
+            if str(name).strip() and str(uid).strip()
+        }
+        self.household_reserve_category_ids = {
+            name: supplied_household_ids.get(name, uuid4().hex)
+            for name in self.household_reserve_categories
+        }
         self.historical_gifts_monthly = max(ZERO, D(self.historical_gifts_monthly))
         self.gift_guideline_min = D(self.gift_guideline_min)
         self.gift_guideline_max = D(self.gift_guideline_max)
@@ -859,6 +909,23 @@ class UserSettings:
         if name not in self.life_category_ids:
             self.life_category_ids[name] = uuid4().hex
         return self.life_category_ids[name]
+
+    def ensure_household_reserve_category_id(self, name: str) -> str:
+        if name not in self.household_reserve_category_ids:
+            self.household_reserve_category_ids[name] = uuid4().hex
+        return self.household_reserve_category_ids[name]
+
+    def ensure_income_type_id(self, name: str) -> str:
+        """Return the identity of an income type independently of its label."""
+        clean_name = str(name).strip()
+        # A previously empty legacy profile can still accept its first income
+        # type. Persist it as a normal zero-tax type together with the ID.
+        self.income_type_tax_rates.setdefault(clean_name, ZERO)
+        if clean_name not in self.income_type_ids:
+            self.income_type_ids[clean_name] = uuid4().hex
+        identifier = self.income_type_ids[clean_name]
+        self.income_type_labels[identifier] = clean_name
+        return identifier
 
     @property
     def household_life(self) -> Decimal:
@@ -1609,6 +1676,15 @@ class FinancialAllocator:
         if operation.get("type") != "income_distribution":
             raise ValueError("Можно удалить только поступление дохода.")
 
+        rollback_context = operation.get("rollback_context") or {}
+        if (
+            not restore_snapshot
+            and operation.get("state_before")
+            and rollback_context.get("state_after")
+        ):
+            self._rollback_protected_income_delta(operation, rollback_context)
+            return
+
         if restore_snapshot and operation.get("state_before"):
             snapshot = operation["state_before"]
             old_credit_state = operation.get("credits_before") or {}
@@ -1700,17 +1776,139 @@ class FinancialAllocator:
             subtract("cycle_income", income)
         self.state.reconcile_fund_salary_currencies()
 
+    def _rollback_protected_income_delta(
+        self,
+        operation: dict,
+        rollback_context: dict,
+    ) -> None:
+        """Reverse the exact contribution of one guarded income.
+
+        Before/after state is used only to obtain this operation's delta.  The
+        current state remains the base, so later incomes and manual balance
+        corrections are preserved.
+        """
+
+        before = operation["state_before"]
+        after = rollback_context["state_after"]
+        preserve_fields = set(rollback_context.get("preserve_state_fields") or [])
+        scalar_fields = (
+            "life_balance",
+            "accumulated_minimum_payments",
+            "pillow_minimum",
+            "intercontract_reserve",
+            "contract_obligations_reserve",
+            "pillow_force_majeure",
+            "pillow_stabilizer",
+            "investments",
+            "early_repayment",
+            "period_income",
+            "cycle_income",
+            "period_tax",
+        )
+        for field_name in scalar_fields:
+            if field_name in preserve_fields:
+                continue
+            delta = D(after.get(field_name, ZERO)) - D(before.get(field_name, ZERO))
+            current = D(getattr(self.state, field_name))
+            if delta < ZERO or delta > current:
+                raise ValueError(
+                    "Балансы уже изменились, поэтому удалить этот доход безопасно нельзя."
+                )
+            setattr(self.state, field_name, current - delta)
+
+        allocations = {
+            str(key): D(value)
+            for key, value in (operation.get("allocations") or {}).items()
+        }
+        preserve_goal_ids = set(rollback_context.get("preserve_goal_ids") or [])
+        goal_ids_by_name = {
+            goal.name: str(goal.uid)
+            for goal in self.settings.goals
+        }
+        for key, amount in allocations.items():
+            if key.startswith("Цели:"):
+                name = key[5:]
+                if goal_ids_by_name.get(name) in preserve_goal_ids:
+                    continue
+                current = D(self.state.goal_balances.get(name, ZERO))
+                if amount > current:
+                    raise ValueError(
+                        "Баланс цели уже изменился, поэтому удалить этот доход безопасно нельзя."
+                    )
+                self.state.goal_balances[name] = current - amount
+            if key.startswith("КЖ:"):
+                name = key[3:]
+                current = D(self.state.period_life_topups.get(name, ZERO))
+                if amount > current:
+                    raise ValueError(
+                        "Категории жизни уже изменились, поэтому удалить этот доход безопасно нельзя."
+                    )
+                updated = current - amount
+                if updated > ZERO:
+                    self.state.period_life_topups[name] = updated
+                else:
+                    self.state.period_life_topups.pop(name, None)
+            # ``period_allocations`` is reconstructed from the persistent
+            # ledger and is absent in some older state rows.  Adjust it when
+            # present; the deletion service rebuilds it after removing the
+            # operation from the ledger.
+            if key in self.state.period_allocations:
+                current_period = D(self.state.period_allocations[key])
+                if amount > current_period:
+                    raise ValueError(
+                        "Итоги периода уже изменились, поэтому удалить этот доход безопасно нельзя."
+                    )
+                updated_period = current_period - amount
+                if updated_period > ZERO:
+                    self.state.period_allocations[key] = updated_period
+                else:
+                    self.state.period_allocations.pop(key, None)
+
+        credits_before = operation.get("credits_before") or {}
+        credits_after = rollback_context.get("credits_after") or {}
+        preserve_credits = set(rollback_context.get("preserve_credits") or [])
+        if set(credits_before) != set(credits_after):
+            raise ValueError("Снимок долгов повреждён; удалить доход безопасно нельзя.")
+        credits = {credit.name: credit for credit in self.settings.credits}
+        if any(name not in credits for name in credits_before):
+            raise ValueError("Настройки долгов изменились; удалить доход безопасно нельзя.")
+        recorded_snapshot_early = ZERO
+        for name, old_value in credits_before.items():
+            new_value = credits_after[name]
+            repaid = (
+                D(old_value["principal_balance"])
+                - D(new_value["principal_balance"])
+            )
+            if repaid < ZERO:
+                raise ValueError("Снимок долгов повреждён; удалить доход безопасно нельзя.")
+            recorded_snapshot_early += repaid
+            if name in preserve_credits:
+                continue
+            if repaid == ZERO:
+                continue
+            credit = credits[name]
+            credit.principal_balance += repaid
+            if credit.principal_balance > ZERO and credit.status == "Погашен":
+                credit.status = str(old_value["status"])
+        recorded_early = D(allocations.get("Досрочное", ZERO))
+        if abs(recorded_snapshot_early - recorded_early) > CENT:
+            raise ValueError("Снимок досрочного погашения не сошёлся.")
+        self.state.reconcile_fund_salary_currencies()
+
     # ========================================================
     # ИНИЦИАЛИЗАЦИЯ
     # ========================================================
 
     def ensure_active_chest(self) -> Goal:
         """Keep one permanent chest that guarantees a destination for overflow."""
-        system_chest = next(
-            (goal for goal in self.settings.goals if goal.is_system_chest),
-            None,
-        )
+        marked = [goal for goal in self.settings.goals if goal.is_system_chest]
+        system_chest = marked[0] if marked else None
         if system_chest is not None:
+            # Some early builds could persist more than one protected chest.
+            # Keep the oldest marker and turn every duplicate into a regular
+            # chest without changing its name, balance or configured share.
+            for duplicate in marked[1:]:
+                duplicate.is_system_chest = False
             system_chest.position_type = "chest"
             system_chest.status = "active"
             return system_chest
@@ -1850,11 +2048,32 @@ class FinancialAllocator:
                 identifier = self.settings.life_category_ids.get(name)
                 if identifier:
                     result[key] = f"life:{identifier}"
+            elif key.startswith("БР:"):
+                name = key[3:]
+                identifier = self.settings.household_reserve_category_ids.get(name)
+                if identifier:
+                    result[key] = f"household:{identifier}"
             elif key.startswith("Цели:"):
                 name = key[5:]
                 identifier = goals.get(name)
                 if identifier:
                     result[key] = f"goal:{identifier}"
+        return result
+
+    def allocation_envelope_kinds(self, allocations: Dict[str, Decimal]) -> Dict[str, str]:
+        """Persist presentation kind so deleted entities keep the right icon/color."""
+        goals = {
+            goal.name: ("chest" if goal.is_chest else "goal")
+            for goal in self.settings.goals
+        }
+        result: Dict[str, str] = {}
+        for key in allocations:
+            if key.startswith("КЖ:"):
+                result[key] = "life"
+            elif key.startswith("БР:") or key == "Бытовой резерв":
+                result[key] = "household"
+            elif key.startswith("Цели:"):
+                result[key] = goals.get(key[5:], "goal")
         return result
 
     # ========================================================
@@ -3118,10 +3337,28 @@ class FinancialAllocator:
             + st.accumulated_minimum_payments
         )
 
-        if accumulated_kzh >= target:
-            return amount
+        normal_missing = max(ZERO, target - accumulated_kzh)
+        current_tax_quotas = s.tax_catchups
+        if current_tax_quotas:
+            tax_missing = max(
+                ZERO,
+                sum(current_tax_quotas.values(), ZERO)
+                - D(allocations.get("КЖ:Налоги", ZERO)),
+            )
+        else:
+            tax_missing = max(
+                ZERO,
+                sum(s.planned_taxes.values(), ZERO)
+                - D(st.period_life_topups.get("Налоги", ZERO)),
+            )
 
-        missing = target - accumulated_kzh
+        # A dated tax must still receive its current monthly quota when the
+        # aggregate life balance is already above Критический минимум.  Keep
+        # the ordinary bracket split: the quota only raises the missing life
+        # amount that Stage A has to process.
+        missing = max(normal_missing, tax_missing)
+        if missing <= ZERO:
+            return amount
         bracket = s.bracket_a
         required_base = (
             missing
@@ -3203,17 +3440,32 @@ class FinancialAllocator:
         # Налоговые обязательства должны быть собраны к дате, а не получать
         # случайную долю КМ. Сначала закрываем месячный взнос, затем
         # распределяем оставшуюся сумму по обычным категориям жизни.
+        current_tax_quotas = self.settings.tax_catchups
         planned_tax_monthly = sum(
             (
-                self.settings.tax_catchups
-                if self.settings.tax_catchups
+                current_tax_quotas
+                if current_tax_quotas
                 else self.settings.planned_taxes
             ).values(),
             ZERO,
         )
         if planned_tax_monthly > ZERO:
             already_saved = D(self.state.period_life_topups.get("Налоги", ZERO))
-            priority_tax = min(amount, max(ZERO, planned_tax_monthly - already_saved))
+            # Current-month catch-ups are persisted as their *remaining*
+            # quota and are reduced after each income.  Subtracting period
+            # top-ups again would underfund a newly added second tax.  The
+            # subtraction is retained only for legacy profiles that have no
+            # obligation quota ledger yet.
+            outstanding_tax = (
+                max(
+                    ZERO,
+                    planned_tax_monthly
+                    - D(allocations.get("КЖ:Налоги", ZERO)),
+                )
+                if current_tax_quotas
+                else max(ZERO, planned_tax_monthly - already_saved)
+            )
+            priority_tax = min(amount, outstanding_tax)
             if priority_tax > ZERO:
                 self.state.period_life_topups["Налоги"] = already_saved + priority_tax
                 allocations["КЖ:Налоги"] = (
@@ -3626,7 +3878,7 @@ class FinancialAllocator:
 
         income = D(income)
 
-        if income <= ZERO:
+        if not income.is_finite() or income <= ZERO:
             raise ValueError(
                 "Сумма поступления должна быть больше 0."
             )
@@ -3635,7 +3887,7 @@ class FinancialAllocator:
             self.state.reset_period()
 
             self.state.period_started_at = (
-                datetime.now().isoformat()
+                moscow_now().isoformat()
             )
 
         self._ensure_life_categories()
@@ -3666,6 +3918,11 @@ class FinancialAllocator:
             tax = D(
                 tax_override
             )
+
+            if not tax.is_finite():
+                raise ValueError(
+                    "Налог должен быть конечным числом."
+                )
 
             if tax < ZERO:
                 raise ValueError(
@@ -3939,14 +4196,16 @@ class FinancialAllocator:
             "date": (
                 income_date.isoformat()
                 if income_date
-                else date.today().isoformat()
+                else moscow_today().isoformat()
             ),
             "income_type": income_type,
+            "income_type_id": self.settings.ensure_income_type_id(income_type),
             "income": income,
             "tax": tax,
             "tax_overridden": (
                 tax_override is not None
             ),
+            "distribution_strategy": self.settings.protective_stage_c_strategy,
             "note": note,
             "state_before": state_before,
             "credits_before": credits_before,
@@ -3955,6 +4214,7 @@ class FinancialAllocator:
             "planned_tax_details": planned_tax_details,
             "allocations": dict(allocations),
             "envelope_ids": self.allocation_envelope_ids(allocations),
+            "envelope_kinds": self.allocation_envelope_kinds(allocations),
             "mode_before": mode_before,
             "mode_after": mode_after,
             "checks": checks,
