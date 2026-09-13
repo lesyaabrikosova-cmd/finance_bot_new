@@ -34,6 +34,10 @@ class IncomeHistoryStates(StatesGroup):
     note = State()
 
 
+class IncomeColorStates(StatesGroup):
+    choosing_color = State()
+
+
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 INCOME_ANALYSIS_IMAGE_PATH = ASSETS_DIR / "menu" / "income_analysis.png"
 async def send_text_with_image(
@@ -1471,9 +1475,9 @@ async def send_income_history(
     if last_page:
         navigation = []
         if page > 0:
-            navigation.append(("← Новее", f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
+            navigation.append(("← К последним", f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
         if page < last_page:
-            navigation.append(("Старше →", f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
+            navigation.append(("Предыдущие →", f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
         rows.append(navigation)
     rows.extend([
         [
@@ -1932,8 +1936,20 @@ async def income_history_distribution(callback: CallbackQuery, state: FSMContext
     )
 
 
-def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decimal]:
-    """Aggregate income by immutable type ID and expose readable chart labels.
+INCOME_COLOR_FAMILIES = (
+    ("Фиолетовый", "🟣", ("#9675E5", "#B59AEC", "#7152C8", "#D0C1F4")),
+    ("Синий", "🔵", ("#55B5DB", "#8DCEEA", "#3188B2", "#B6E3F2")),
+    ("Зелёный", "🟢", ("#69BE98", "#9AD7B7", "#3C9C73", "#C3E9D4")),
+    ("Красный", "🔴", ("#E68091", "#F0A6B2", "#C9566B", "#F6CDD4")),
+    ("Жёлтый", "🟡", ("#E5B65B", "#F0CF8B", "#C7922D", "#F6E2B4")),
+    ("Оранжевый", "🟠", ("#E89555", "#F1B887", "#C96B2A", "#F6D4B3")),
+    ("Розовый", "🩷", ("#CE91D1", "#E2B5E4", "#A65BAA", "#EFD5F0")),
+    ("Серый", "⚪", ("#8B92A1", "#B2B8C2", "#636B78", "#D0D4DA")),
+)
+
+
+def income_analysis_items(allocator, operations: list[dict]) -> list[dict]:
+    """Aggregate income by immutable type ID and expose chart-ready labels.
 
     Records created before income-type IDs use their (possibly migrated)
     normalized name as a compatibility identity.  Equal visible names that
@@ -1975,6 +1991,7 @@ def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decim
             "label": label,
             "amount": Decimal("0"),
             "active": bool(identifier and identifier in current_by_id),
+            "identifier": identifier,
         })
         item["amount"] += amount
 
@@ -1982,7 +1999,7 @@ def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decim
     for item in grouped.values():
         label_counts[item["label"]] = label_counts.get(item["label"], 0) + 1
 
-    totals: dict[str, Decimal] = {}
+    items = []
     duplicate_indexes: dict[str, int] = {}
     for item in grouped.values():
         label = item["label"]
@@ -1997,8 +2014,25 @@ def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decim
                     display_label = f"{display_label} {suffix}"
         else:
             display_label = label
-        totals[display_label] = item["amount"]
-    return totals
+        items.append({**item, "display_label": display_label})
+    return items
+
+
+def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decimal]:
+    return {
+        item["display_label"]: item["amount"]
+        for item in income_analysis_items(allocator, operations)
+    }
+
+
+def income_analysis_chart_colors(allocator, operations: list[dict]) -> dict[str, str]:
+    """Map visible chart labels to the user's persistent income-type colors."""
+    saved_colors = getattr(allocator.settings, "income_type_colors", {}) or {}
+    return {
+        item["display_label"]: saved_colors[item["identifier"]]
+        for item in income_analysis_items(allocator, operations)
+        if item["identifier"] and item["identifier"] in saved_colors
+    }
 
 
 def income_analysis_fallback_text(
@@ -2028,8 +2062,58 @@ def income_analysis_navigation() -> object:
     return keyboard([
         [("История доходов", "incomehistory:open")],
         [("Другой период", "incomeanalysis:periods")],
+        [("Настроить цвета диаграммы", "incomeanalysis:colors")],
         [("← Главное меню", "menu:back")],
     ])
+
+
+def income_color_name(color: str | None) -> str:
+    for name, icon, shades in INCOME_COLOR_FAMILIES:
+        if color in shades:
+            return f"{icon} {name}"
+    return "Автоматический"
+
+
+def income_color_types(allocator) -> list[tuple[str, str]]:
+    return [
+        (name, identifier)
+        for name, identifier in allocator.settings.income_type_ids.items()
+        if name in allocator.settings.income_type_tax_rates
+    ]
+
+
+async def send_income_color_types(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала создайте финансовый профиль через /start.")
+        return
+    types = income_color_types(allocator)
+    if not types:
+        await message.answer(
+            "Сначала добавьте хотя бы один тип дохода.",
+            reply_markup=keyboard([[("← К анализу доходов", "menu:income_analysis")]]),
+        )
+        return
+    colors = allocator.settings.income_type_colors
+    rows = [
+        [(f"{name} · {income_color_name(colors.get(identifier))}", f"incomeanalysis:color:type:{index}")]
+        for index, (name, identifier) in enumerate(types)
+    ]
+    rows.append([("← К анализу доходов", "menu:income_analysis")])
+    await message.answer(
+        "<b>ЦВЕТА ДИАГРАММЫ</b>\n\nВыберите тип дохода, для которого хотите изменить цвет.",
+        reply_markup=keyboard(rows),
+    )
+
+
+def next_income_color_shade(allocator, identifier: str, family_index: int) -> str:
+    """Choose an unused shade within the selected family before cycling."""
+    _, _, shades = INCOME_COLOR_FAMILIES[family_index]
+    used = {
+        color for saved_id, color in allocator.settings.income_type_colors.items()
+        if saved_id != identifier
+    }
+    return next((shade for shade in shades if shade not in used), shades[0])
 
 
 def income_months_keyboard(year: int) -> object:
@@ -2040,11 +2124,10 @@ def income_months_keyboard(year: int) -> object:
         ]
         for row_start in range(0, 12, 3)
     ]
-    rows.extend([
-        [(f"← {year - 1}", f"incomeanalysis:months:{year - 1}"),
-         (f"{year + 1} →", f"incomeanalysis:months:{year + 1}")],
-        [("← Назад", "incomeanalysis:periods")],
-    ])
+    year_navigation = [(f"← {year - 1}", f"incomeanalysis:months:{year - 1}")]
+    if year < moscow_today().year:
+        year_navigation.append((f"{year + 1} →", f"incomeanalysis:months:{year + 1}"))
+    rows.extend([year_navigation, [("← Назад", "incomeanalysis:periods")]])
     return keyboard(rows)
 
 
@@ -2074,6 +2157,7 @@ async def send_income_period_analysis(
         income_analysis_totals(allocator, operations).items(),
         key=lambda item: item[1], reverse=True,
     ))
+    colors = income_analysis_chart_colors(allocator, operations)
     total_income = sum(totals.values(), Decimal("0"))
     if period_type == "month":
         assert month is not None
@@ -2086,22 +2170,40 @@ async def send_income_period_analysis(
         ]
     else:
         period_label = str(year)
-        rows = [
-            [(f"← {year - 1}", f"incomeanalysis:year:{year - 1}"),
-             (f"{year + 1} →", f"incomeanalysis:year:{year + 1}")],
-            [("← Назад", "incomeanalysis:periods")],
-        ]
+        year_navigation = [(f"← {year - 1}", f"incomeanalysis:year:{year - 1}")]
+        if year < moscow_today().year:
+            year_navigation.append((f"{year + 1} →", f"incomeanalysis:year:{year + 1}"))
+        rows = [year_navigation, [("← Назад", "incomeanalysis:periods")]]
     navigation = keyboard(rows)
-    empty_message = "За этот период доходов пока нет."
+    if total_income <= 0:
+        if period_type == "month":
+            assert month is not None
+            selected_month = date(year, month, 1)
+            current_month = moscow_today().replace(day=1)
+            empty_message = (
+                "Этот месяц ещё не начался."
+                if selected_month > current_month
+                else "В этом месяце нет записанных доходов."
+            )
+            heading = period_label.upper()
+        else:
+            empty_message = "В этом году нет записанных доходов."
+            heading = str(year)
+        await message.answer(
+            f"<b>{heading}</b>\n\n{empty_message}",
+            reply_markup=navigation,
+        )
+        return
     await send_chart_report(
         message,
         totals,
         "АНАЛИЗ ДОХОДОВ",
-        empty_message if not totals else "",
+        "",
         subtitle=f"Источники дохода · {period_label}",
         center_amount=total_income if totals else None,
+        colors=colors,
         preserve_order=True,
-        fallback_text=income_analysis_fallback_text(totals, total_income, empty_message),
+        fallback_text=income_analysis_fallback_text(totals, total_income),
         reply_markup=navigation,
     )
 
@@ -2137,6 +2239,7 @@ async def send_income_analysis(
         key=lambda item: item[1],
         reverse=True,
     ))
+    colors = income_analysis_chart_colors(allocator, operations)
     total_income = sum(totals.values(), Decimal("0"))
 
     # ========================================================
@@ -2159,6 +2262,7 @@ async def send_income_analysis(
         message, totals, "АНАЛИЗ ДОХОДОВ", "",
         subtitle="Источники дохода · текущий расчётный период",
         center_amount=total_income,
+        colors=colors,
         preserve_order=True,
         fallback_text=income_analysis_fallback_text(totals, total_income),
         reply_markup=analysis_keyboard,
@@ -2183,6 +2287,92 @@ async def menu_income_analysis(
     )
 
 
+@router.callback_query(F.data == "incomeanalysis:colors")
+async def income_analysis_colors(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await send_income_color_types(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("incomeanalysis:color:type:"))
+async def income_analysis_color_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        index = int(callback.data.rsplit(":", 1)[1])
+    except (AttributeError, ValueError):
+        index = -1
+    allocator = db.load_allocator(callback.from_user.id)
+    types = income_color_types(allocator) if allocator is not None else []
+    if not 0 <= index < len(types):
+        await callback.message.answer("Этот тип дохода больше недоступен.")
+        await send_income_color_types(callback.message, callback.from_user.id)
+        return
+    name, identifier = types[index]
+    await state.set_state(IncomeColorStates.choosing_color)
+    await state.update_data(income_color_type_id=identifier, income_color_type_name=name)
+    rows = [
+        [
+            (f"{icon} {family}", f"incomeanalysis:color:choose:{family_index}")
+            for family_index, (family, icon, _) in enumerate(INCOME_COLOR_FAMILIES[row_start:row_start + 2], row_start)
+        ]
+        for row_start in range(0, len(INCOME_COLOR_FAMILIES), 2)
+    ]
+    rows.extend([
+        [("Автоматический цвет", "incomeanalysis:color:auto")],
+        [("← К типам дохода", "incomeanalysis:colors")],
+    ])
+    await callback.message.answer(
+        f"<b>{escape(name)}</b>\n\nВыберите основной цвет. При повторе цвета бот использует следующий свободный оттенок.",
+        reply_markup=keyboard(rows),
+    )
+
+
+async def save_income_color_choice(
+    callback: CallbackQuery,
+    state: FSMContext,
+    family_index: int | None,
+) -> None:
+    data = await state.get_data()
+    identifier = str(data.get("income_color_type_id") or "")
+    allocator = db.load_allocator(callback.from_user.id)
+    active_ids = {identifier for _, identifier in income_color_types(allocator)} if allocator else set()
+    if allocator is None or identifier not in active_ids:
+        await state.clear()
+        await callback.message.answer("Не удалось сохранить цвет: тип дохода больше недоступен.")
+        await send_income_color_types(callback.message, callback.from_user.id)
+        return
+    if family_index is None:
+        allocator.settings.income_type_colors.pop(identifier, None)
+        result = "Автоматический цвет включён."
+    else:
+        color = next_income_color_shade(allocator, identifier, family_index)
+        allocator.settings.income_type_colors[identifier] = color
+        result = f"Выбран цвет: {income_color_name(color)}."
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await callback.message.answer(result)
+    await send_income_color_types(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("incomeanalysis:color:choose:"))
+async def income_analysis_color_choose(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        family_index = int(callback.data.rsplit(":", 1)[1])
+        if not 0 <= family_index < len(INCOME_COLOR_FAMILIES):
+            raise ValueError
+    except (AttributeError, ValueError):
+        await callback.message.answer("Не удалось выбрать цвет.")
+        return
+    await save_income_color_choice(callback, state, family_index)
+
+
+@router.callback_query(F.data == "incomeanalysis:color:auto")
+async def income_analysis_color_auto(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await save_income_color_choice(callback, state, None)
+
+
 @router.callback_query(F.data == "incomeanalysis:periods")
 async def income_analysis_periods(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -2204,6 +2394,10 @@ async def income_analysis_months(callback: CallbackQuery, state: FSMContext):
         year = int(callback.data.rsplit(":", 1)[1])
     except (AttributeError, ValueError):
         await callback.message.answer("Не удалось открыть месяцы.")
+        return
+    if year > moscow_today().year:
+        await callback.message.answer("Будущие годы в истории доходов недоступны.")
+        await send_income_months(callback.message, moscow_today().year)
         return
     await state.clear()
     await send_income_months(callback.message, year)
@@ -2231,6 +2425,12 @@ async def income_analysis_year(callback: CallbackQuery, state: FSMContext):
         year = int(callback.data.rsplit(":", 1)[1])
     except (AttributeError, ValueError):
         await callback.message.answer("Не удалось открыть анализ года.")
+        return
+    if year > moscow_today().year:
+        await callback.message.answer("Будущие годы в истории доходов недоступны.")
+        await send_income_period_analysis(
+            callback.message, callback.from_user.id, "year", moscow_today().year,
+        )
         return
     await state.clear()
     await send_income_period_analysis(callback.message, callback.from_user.id, "year", year)

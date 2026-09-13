@@ -6,15 +6,19 @@ from unittest.mock import AsyncMock, patch
 
 from dashboard import (
     income_distribution_text,
+    income_analysis_chart_colors,
     income_history_operations,
     income_months_keyboard,
     income_operations_for_period,
     income_operation_card_text,
+    next_income_color_shade,
     rebuild_period_analytics_from_history,
     send_income_period_analysis,
     send_income_history,
 )
 from financial_engine import FinancialAllocator, UserSettings
+from storage import deserialize_income_rhythm, serialize_income_types
+from time_utils import moscow_today
 
 
 def operation(operation_id=17):
@@ -147,7 +151,7 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(income_operations_for_period(operations, "year", 2025), [march, april])
         self.assertEqual(income_operations_for_period(operations, "year", 2024), [])
 
-    async def test_period_analysis_uses_existing_chart_for_empty_month_and_year(self):
+    async def test_empty_past_month_and_year_show_explicit_messages_without_chart(self):
         message = SimpleNamespace(answer=AsyncMock(), answer_photo=AsyncMock())
         allocator = SimpleNamespace(settings=SimpleNamespace(
             income_type_ids={}, income_type_labels={},
@@ -157,10 +161,29 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             db.load_operations.return_value = []
             await send_income_period_analysis(message, 42, "month", 2025, 3)
             await send_income_period_analysis(message, 42, "year", 2025)
-        self.assertEqual(chart.await_count, 2)
-        self.assertEqual(chart.await_args_list[0].args[1], {})
-        self.assertEqual(chart.await_args_list[0].kwargs["subtitle"], "Источники дохода · Март 2025")
-        self.assertEqual(chart.await_args_list[1].kwargs["subtitle"], "Источники дохода · 2025")
+        chart.assert_not_awaited()
+        self.assertEqual(message.answer.await_count, 2)
+        self.assertIn("<b>МАРТ 2025</b>", message.answer.await_args_list[0].args[0])
+        self.assertIn("В этом месяце нет записанных доходов.", message.answer.await_args_list[0].args[0])
+        self.assertEqual(
+            message.answer.await_args_list[1].args[0],
+            "<b>2025</b>\n\nВ этом году нет записанных доходов.",
+        )
+
+    async def test_empty_future_month_explains_that_it_has_not_started(self):
+        message = SimpleNamespace(answer=AsyncMock(), answer_photo=AsyncMock())
+        allocator = SimpleNamespace(settings=SimpleNamespace(
+            income_type_ids={}, income_type_labels={}, income_type_colors={},
+        ))
+        today = moscow_today()
+        future_year = today.year + (1 if today.month == 12 else 0)
+        future_month = 1 if today.month == 12 else today.month + 1
+        with patch("dashboard.db") as db, patch("dashboard.send_chart_report", new_callable=AsyncMock) as chart:
+            db.load_allocator.return_value = allocator
+            db.load_operations.return_value = []
+            await send_income_period_analysis(message, 42, "month", future_year, future_month)
+        chart.assert_not_awaited()
+        self.assertIn("Этот месяц ещё не начался.", message.answer.await_args.args[0])
 
     async def test_period_analysis_groups_multiple_income_types_for_month_and_year(self):
         message = SimpleNamespace(answer=AsyncMock(), answer_photo=AsyncMock())
@@ -179,9 +202,68 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chart.await_args_list[0].args[1], {"Работа": Decimal("1000")})
         self.assertEqual(chart.await_args_list[1].args[1], {"Подарок": Decimal("2000"), "Работа": Decimal("1000")})
 
+    def test_income_type_color_is_matched_to_immutable_id_in_chart(self):
+        allocator = SimpleNamespace(settings=SimpleNamespace(
+            income_type_ids={"Работа": "income-work"},
+            income_type_labels={"income-work": "Работа"},
+            income_type_colors={"income-work": "#9675E5"},
+        ))
+        item = operation()
+        item["payload"].update(income_type="Работа", income_type_id="income-work")
+        self.assertEqual(
+            income_analysis_chart_colors(allocator, [item]),
+            {"Работа": "#9675E5"},
+        )
+
+    def test_repeated_base_color_uses_next_free_shade(self):
+        allocator = SimpleNamespace(settings=SimpleNamespace(
+            income_type_colors={"income-one": "#9675E5"},
+        ))
+        self.assertEqual(
+            next_income_color_shade(allocator, "income-two", 0),
+            "#B59AEC",
+        )
+
+    def test_income_type_color_survives_settings_serialization(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("100"),
+            household_reserve=Decimal("0"),
+            average_income=Decimal("1000"),
+            income_type_tax_rates={"Работа": Decimal("0")},
+            income_type_ids={"Работа": "income-work"},
+            income_type_colors={"income-work": "#9675E5"},
+        )
+        restored = deserialize_income_rhythm(serialize_income_types(settings))
+        self.assertEqual(restored["income_type_colors"], {"income-work": "#9675E5"})
+
     def test_month_navigation_keeps_selected_year_when_returning_from_march(self):
         markup = income_months_keyboard(2025)
         callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
         self.assertIn("incomeanalysis:month:2025:3", callbacks)
         self.assertIn("incomeanalysis:months:2024", callbacks)
         self.assertIn("incomeanalysis:months:2026", callbacks)
+
+    def test_current_year_month_navigation_does_not_offer_a_future_year(self):
+        current_year = moscow_today().year
+        markup = income_months_keyboard(current_year)
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertIn(f"incomeanalysis:months:{current_year - 1}", callbacks)
+        self.assertNotIn(f"incomeanalysis:months:{current_year + 1}", callbacks)
+
+    async def test_current_year_analysis_does_not_offer_a_future_year(self):
+        message = SimpleNamespace(answer=AsyncMock(), answer_photo=AsyncMock())
+        allocator = SimpleNamespace(settings=SimpleNamespace(
+            income_type_ids={}, income_type_labels={}, income_type_colors={},
+        ))
+        current_year = moscow_today().year
+        with patch("dashboard.db") as db, patch("dashboard.send_chart_report", new_callable=AsyncMock) as chart:
+            db.load_allocator.return_value = allocator
+            db.load_operations.return_value = []
+            await send_income_period_analysis(message, 42, "year", current_year)
+        chart.assert_not_awaited()
+        markup = message.answer.await_args.kwargs["reply_markup"]
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertIn(f"incomeanalysis:year:{current_year - 1}", callbacks)
+        self.assertNotIn(f"incomeanalysis:year:{current_year + 1}", callbacks)

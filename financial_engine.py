@@ -663,6 +663,9 @@ class UserSettings:
     # даже после удаления типа из активных настроек.
     income_type_ids: Dict[str, str] = field(default_factory=dict)
     income_type_labels: Dict[str, str] = field(default_factory=dict)
+    # Цвет диаграмм хранится по неизменяемому ID, поэтому переименование
+    # источника дохода не меняет его визуальную принадлежность.
+    income_type_colors: Dict[str, str] = field(default_factory=dict)
     # Плановые налоги, которые входят в Критический минимум.
     # Ключ — понятное пользователю обязательство/объект,
     # значение — его среднемесячная сумма.
