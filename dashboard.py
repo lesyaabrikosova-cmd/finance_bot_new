@@ -1483,9 +1483,9 @@ async def send_income_history(
     if last_page:
         navigation = []
         if page > 0:
-            navigation.append(("← К последним", f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
+            navigation.append(("< К последним", f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
         if page < last_page:
-            navigation.append(("Предыдущие →", f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
+            navigation.append(("Предыдущие >", f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
         rows.append(navigation)
     rows.extend([
         [
@@ -2148,9 +2148,9 @@ def income_months_keyboard(year: int) -> object:
         ]
         for row_start in range(0, 12, 3)
     ]
-    year_navigation = [(f"← {year - 1}", f"incomeanalysis:months:{year - 1}")]
+    year_navigation = [(f"< {year - 1}", f"incomeanalysis:months:{year - 1}")]
     if year < moscow_today().year:
-        year_navigation.append((f"{year + 1} →", f"incomeanalysis:months:{year + 1}"))
+        year_navigation.append((f"{year + 1} >", f"incomeanalysis:months:{year + 1}"))
     rows.extend([year_navigation, [("← Назад", "incomeanalysis:periods")]])
     return keyboard(rows)
 
@@ -2194,9 +2194,9 @@ async def send_income_period_analysis(
         ]
     else:
         period_label = str(year)
-        year_navigation = [(f"← {year - 1}", f"incomeanalysis:year:{year - 1}")]
+        year_navigation = [(f"< {year - 1}", f"incomeanalysis:year:{year - 1}")]
         if year < moscow_today().year:
-            year_navigation.append((f"{year + 1} →", f"incomeanalysis:year:{year + 1}"))
+            year_navigation.append((f"{year + 1} >", f"incomeanalysis:year:{year + 1}"))
         rows = [year_navigation, [("← Назад", "incomeanalysis:periods")]]
     navigation = keyboard(rows)
     if total_income <= 0:
@@ -2404,8 +2404,10 @@ async def income_analysis_periods(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "<b>ДРУГОЙ ПЕРИОД</b>",
         reply_markup=keyboard([
-            [("По месяцам", f"incomeanalysis:months:{moscow_today().year}")],
-            [("По годам", f"incomeanalysis:year:{moscow_today().year}")],
+            [
+                ("По годам", f"incomeanalysis:year:{moscow_today().year}"),
+                ("По месяцам", f"incomeanalysis:months:{moscow_today().year}"),
+            ],
             [("← Назад", "menu:income_analysis")],
         ]),
     )

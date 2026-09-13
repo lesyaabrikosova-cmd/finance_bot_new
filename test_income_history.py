@@ -12,6 +12,7 @@ from dashboard import (
     MONTH_EMOJIS,
     income_distribution_text,
     income_analysis_chart_colors,
+    income_analysis_periods,
     income_history_operations,
     income_color_types,
     income_months_keyboard,
@@ -355,6 +356,32 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("incomeanalysis:month:2025:3", callbacks)
         self.assertIn("incomeanalysis:months:2024", callbacks)
         self.assertIn("incomeanalysis:months:2026", callbacks)
+        self.assertIn("< 2024", [button.text for button in markup.inline_keyboard[-2]])
+        self.assertIn("2026 >", [button.text for button in markup.inline_keyboard[-2]])
+
+    async def test_other_period_places_years_before_months(self):
+        callback = SimpleNamespace(
+            answer=AsyncMock(),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        state = SimpleNamespace(clear=AsyncMock())
+        await income_analysis_periods(callback, state)
+        markup = callback.message.answer.await_args.kwargs["reply_markup"]
+        self.assertEqual([button.text for button in markup.inline_keyboard[0]], ["По годам", "По месяцам"])
+
+    async def test_history_page_uses_period_navigation_symbols(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        operations = [operation(index) for index in range(1, 10)]
+        for index, item in enumerate(operations):
+            item["payload"]["date"] = f"2026-09-{index + 1:02d}"
+        with patch("dashboard.db") as db:
+            db.load_operations.return_value = operations
+            await send_income_history(message, 42)
+            await send_income_history(message, 42, page=1)
+        first_markup = message.answer.await_args_list[0].kwargs["reply_markup"]
+        second_markup = message.answer.await_args_list[1].kwargs["reply_markup"]
+        self.assertIn("Предыдущие >", [button.text for button in first_markup.inline_keyboard[-2]])
+        self.assertIn("< К последним", [button.text for button in second_markup.inline_keyboard[-2]])
 
     def test_current_year_month_navigation_does_not_offer_a_future_year(self):
         current_year = moscow_today().year
