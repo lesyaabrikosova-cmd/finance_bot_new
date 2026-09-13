@@ -1131,12 +1131,10 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         allocator.settings,
     )
     text += f"\n\n————————————\n{overview}"
-    rows = [[("+ Добавить налог", "taxes:add")]]
-    rows.append([("Типы доходов и ставки", "taxes:income_types")])
-    rows.append([("Плановые налоги", "taxes:edit")])
+    rows = [[("Мои плановые налоги", "taxes:edit")]]
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
     rows.append([("Налог оплачен", "taxes:payment")])
-    rows.append([("ℹ️ Как это работает", "taxes:help")])
+    rows.append([("ℹ️ Помощь", "taxes:help")])
     rows.append([("← Главное меню", "taxes:back")])
 
     tax_values, chart_colors = tax_chart_values_and_colors(groups)
