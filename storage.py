@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 import json
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
@@ -317,6 +318,57 @@ def deserialize_income_rhythm(value) -> dict:
             },
         }
     return {"income_rhythm": "monthly", "income_gap_months": Decimal("1")}
+
+
+def remove_legacy_income_tax_pseudo_types(settings: UserSettings) -> set[str]:
+    """Remove retired tax-rule labels from the active income-type catalog.
+
+    Profile metadata and operation history remain intact.  Only active source
+    mappings that can leak into current UI and calculations are removed.
+    """
+    replacements = (
+        ("Самозанятость · Физики", "НПД · ФЛ"),
+        ("Самозанятость · Юрики", "НПД · ЮЛ"),
+        ("ИП · УСН «Доходы»", "ИП · УСН"),
+    )
+
+    def compact(name: str) -> str:
+        value = str(name).strip()
+        for old, new in replacements:
+            if value.startswith(old):
+                return new + value[len(old):]
+        return value
+
+    known_profiles = {
+        compact(name) for name in getattr(settings, "income_tax_profiles", {})
+    }
+    legacy_names = {
+        name for name in settings.income_type_tax_rates
+        if (
+            compact(name) in known_profiles
+            or re.fullmatch(
+                r"(?:НПД · (?:ФЛ|ЮЛ)|ИП · УСН) · [0-9]+(?:[.,][0-9]+)?%",
+                compact(name),
+                flags=re.IGNORECASE,
+            )
+        )
+    }
+    removed_ids = {
+        settings.income_type_ids.get(name)
+        for name in legacy_names
+        if settings.income_type_ids.get(name)
+    }
+    for name in legacy_names:
+        settings.income_type_tax_rates.pop(name, None)
+        settings.income_type_tax_profiles.pop(name, None)
+        settings.income_type_ids.pop(name, None)
+    settings.taxable_income_types = [
+        name for name, rate in settings.income_type_tax_rates.items()
+        if rate > Decimal("0")
+    ]
+    for identifier in removed_ids:
+        settings.income_type_colors.pop(identifier, None)
+    return legacy_names
 
 
 # ============================================================
@@ -2725,6 +2777,16 @@ class Database:
 
         if settings is None:
             return None
+
+        removed_pseudo_types = remove_legacy_income_tax_pseudo_types(settings)
+        if removed_pseudo_types:
+            # Persist only the combined income-settings JSON. Financial state,
+            # operation history and tax ledgers are deliberately untouched.
+            self.connection.execute(
+                "UPDATE settings SET taxable_income_types = ? WHERE telegram_id = ?",
+                (serialize_income_types(settings), telegram_id),
+            )
+            self._commit()
 
         existing_automatic_keys = set(settings.automatic_life_obligations)
         planned_taxes, track_payments = self.load_tax_configuration(telegram_id)

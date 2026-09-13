@@ -1,13 +1,17 @@
 import unittest
 from copy import deepcopy
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from dashboard import (
+    INCOME_COLOR_FAMILIES,
     income_distribution_text,
     income_analysis_chart_colors,
     income_history_operations,
+    income_color_types,
     income_months_keyboard,
     income_operations_for_period,
     income_operation_card_text,
@@ -17,7 +21,12 @@ from dashboard import (
     send_income_history,
 )
 from financial_engine import FinancialAllocator, UserSettings
-from storage import deserialize_income_rhythm, serialize_income_types
+from storage import (
+    Database,
+    deserialize_income_rhythm,
+    remove_legacy_income_tax_pseudo_types,
+    serialize_income_types,
+)
 from time_utils import moscow_today
 
 
@@ -42,6 +51,12 @@ def operation(operation_id=17):
 
 
 class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
+    def test_income_color_palette_contains_nine_requested_heart_colors(self):
+        self.assertEqual(
+            [icon for _, icon, _ in INCOME_COLOR_FAMILIES],
+            ["❤️", "🧡", "💛", "💚", "💙", "💜", "🩷", "🤎", "🩶"],
+        )
+
     def test_history_is_ordered_by_income_date_not_the_later_ledger_id(self):
         newer = operation(7)
         newer["payload"]["date"] = "2026-09-10"
@@ -220,9 +235,103 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             income_type_colors={"income-one": "#9675E5"},
         ))
         self.assertEqual(
-            next_income_color_shade(allocator, "income-two", 0),
+            next_income_color_shade(allocator, "income-two", 5),
             "#B59AEC",
         )
+
+    def test_color_settings_exclude_legacy_tax_rules(self):
+        allocator = SimpleNamespace(settings=SimpleNamespace(
+            income_type_ids={
+                "Зарплата": "income-salary",
+                "Самозанятость · Физики · 3%": "legacy-npd",
+                "ИП · УСН · 6%": "legacy-usn",
+            },
+            income_type_tax_rates={
+                "Зарплата": Decimal("0"),
+                "Самозанятость · Физики · 3%": Decimal("3"),
+                "ИП · УСН · 6%": Decimal("6"),
+            },
+            income_tax_profiles={
+                "НПД · ФЛ · 3%": {"rate": "3"},
+                "ИП · УСН · 6%": {"rate": "6"},
+            },
+        ))
+        self.assertEqual(income_color_types(allocator), [("Зарплата", "income-salary")])
+
+    def test_legacy_tax_pseudo_type_cleanup_preserves_history_and_balances(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("1000"),
+            household_reserve=Decimal("100"),
+            average_income=Decimal("2000"),
+            income_type_tax_rates={
+                "Зарплата": Decimal("0"),
+                "Самозанятость · Физики · 3%": Decimal("3"),
+                "ИП · УСН «Доходы» · 6%": Decimal("6"),
+            },
+            income_type_ids={
+                "Зарплата": "income-salary",
+                "Самозанятость · Физики · 3%": "legacy-npd",
+                "ИП · УСН «Доходы» · 6%": "legacy-usn",
+            },
+            income_type_colors={
+                "income-salary": "#55B5DB",
+                "legacy-npd": "#9675E5",
+                "legacy-usn": "#B59AEC",
+            },
+            income_tax_profiles={
+                "НПД · ФЛ · 3%": {"rate": "3"},
+                "ИП · УСН · 6%": {"rate": "6"},
+            },
+        )
+        allocator = FinancialAllocator(settings)
+        allocator.state.period_income = Decimal("5000")
+        allocator.state.life_balance = Decimal("3000")
+
+        with TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "cleanup.db")
+            try:
+                database.save_allocator(42, allocator)
+                database.save_operation(42, "income_distribution", {
+                    "type": "income_distribution",
+                    "date": "2025-01-10",
+                    "income": "1000",
+                    "income_type": "Самозанятость · Физики · 3%",
+                })
+
+                loaded = database.load_allocator(42)
+                self.assertEqual(loaded.settings.income_type_tax_rates, {"Зарплата": Decimal("0")})
+                self.assertEqual(loaded.settings.income_type_ids, {"Зарплата": "income-salary"})
+                self.assertEqual(loaded.settings.income_type_colors, {"income-salary": "#55B5DB"})
+                self.assertEqual(len(loaded.settings.income_tax_profiles), 2)
+                self.assertEqual(loaded.state.period_income, Decimal("5000"))
+                self.assertEqual(loaded.state.life_balance, Decimal("3000"))
+                self.assertEqual(database.operation_count(42), 1)
+                self.assertEqual(
+                    database.load_operations(42)[0]["payload"]["income_type"],
+                    "Самозанятость · Физики · 3%",
+                )
+
+                persisted = database.load_settings(42)
+                self.assertEqual(persisted.income_type_tax_rates, {"Зарплата": Decimal("0")})
+            finally:
+                database.close()
+
+    def test_cleanup_helper_does_not_remove_real_income_types(self):
+        settings = UserSettings(
+            has_debts=False,
+            employment_type="Фрилансер",
+            critical_life=Decimal("1000"),
+            household_reserve=Decimal("100"),
+            average_income=Decimal("2000"),
+            income_type_tax_rates={"Частник": Decimal("6")},
+            income_type_ids={"Частник": "income-client"},
+            income_type_colors={"income-client": "#69BE98"},
+        )
+        self.assertEqual(remove_legacy_income_tax_pseudo_types(settings), set())
+        self.assertEqual(settings.income_type_tax_rates, {"Частник": Decimal("6")})
+        self.assertEqual(settings.income_type_colors, {"income-client": "#69BE98"})
 
     def test_income_type_color_survives_settings_serialization(self):
         settings = UserSettings(

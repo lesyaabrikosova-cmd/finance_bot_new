@@ -22,7 +22,11 @@ from storage import db
 from ui import keyboard, main_menu_keyboard
 from mode_presentation import mode_image_path
 from charts import send_chart_report
-from taxes import reconcile_tax_obligation_balances
+from taxes import (
+    compact_income_tax_profile,
+    is_income_tax_profile_label,
+    reconcile_tax_obligation_balances,
+)
 from income_deletion import IncomeDeletionError, delete_income_safely
 from time_utils import moscow_today
 
@@ -1937,14 +1941,15 @@ async def income_history_distribution(callback: CallbackQuery, state: FSMContext
 
 
 INCOME_COLOR_FAMILIES = (
-    ("Фиолетовый", "🟣", ("#9675E5", "#B59AEC", "#7152C8", "#D0C1F4")),
-    ("Синий", "🔵", ("#55B5DB", "#8DCEEA", "#3188B2", "#B6E3F2")),
-    ("Зелёный", "🟢", ("#69BE98", "#9AD7B7", "#3C9C73", "#C3E9D4")),
-    ("Красный", "🔴", ("#E68091", "#F0A6B2", "#C9566B", "#F6CDD4")),
-    ("Жёлтый", "🟡", ("#E5B65B", "#F0CF8B", "#C7922D", "#F6E2B4")),
-    ("Оранжевый", "🟠", ("#E89555", "#F1B887", "#C96B2A", "#F6D4B3")),
+    ("Красный", "❤️", ("#E68091", "#F0A6B2", "#C9566B", "#F6CDD4")),
+    ("Оранжевый", "🧡", ("#E89555", "#F1B887", "#C96B2A", "#F6D4B3")),
+    ("Жёлтый", "💛", ("#E5B65B", "#F0CF8B", "#C7922D", "#F6E2B4")),
+    ("Зелёный", "💚", ("#69BE98", "#9AD7B7", "#3C9C73", "#C3E9D4")),
+    ("Синий", "💙", ("#5584DB", "#88A9E9", "#315EAF", "#B7C9F2")),
+    ("Фиолетовый", "💜", ("#9675E5", "#B59AEC", "#7152C8", "#D0C1F4")),
     ("Розовый", "🩷", ("#CE91D1", "#E2B5E4", "#A65BAA", "#EFD5F0")),
-    ("Серый", "⚪", ("#8B92A1", "#B2B8C2", "#636B78", "#D0D4DA")),
+    ("Коричневый", "🤎", ("#9A6B4A", "#BC9274", "#70482F", "#D8BBA7")),
+    ("Серый", "🩶", ("#8B92A1", "#B2B8C2", "#636B78", "#D0D4DA")),
 )
 
 
@@ -2070,15 +2075,22 @@ def income_analysis_navigation() -> object:
 def income_color_name(color: str | None) -> str:
     for name, icon, shades in INCOME_COLOR_FAMILIES:
         if color in shades:
-            return f"{icon} {name}"
+            return icon
     return "Автоматический"
 
 
 def income_color_types(allocator) -> list[tuple[str, str]]:
+    known_profiles = {
+        compact_income_tax_profile(name)
+        for name in getattr(allocator.settings, "income_tax_profiles", {})
+    }
     return [
         (name, identifier)
         for name, identifier in allocator.settings.income_type_ids.items()
-        if name in allocator.settings.income_type_tax_rates
+        if (
+            name in allocator.settings.income_type_tax_rates
+            and not is_income_tax_profile_label(name, known_profiles)
+        )
     ]
 
 
@@ -2312,10 +2324,10 @@ async def income_analysis_color_type(callback: CallbackQuery, state: FSMContext)
     await state.update_data(income_color_type_id=identifier, income_color_type_name=name)
     rows = [
         [
-            (f"{icon} {family}", f"incomeanalysis:color:choose:{family_index}")
-            for family_index, (family, icon, _) in enumerate(INCOME_COLOR_FAMILIES[row_start:row_start + 2], row_start)
+            (icon, f"incomeanalysis:color:choose:{family_index}")
+            for family_index, (_, icon, _) in enumerate(INCOME_COLOR_FAMILIES[row_start:row_start + 3], row_start)
         ]
-        for row_start in range(0, len(INCOME_COLOR_FAMILIES), 2)
+        for row_start in range(0, len(INCOME_COLOR_FAMILIES), 3)
     ]
     rows.extend([
         [("Автоматический цвет", "incomeanalysis:color:auto")],
