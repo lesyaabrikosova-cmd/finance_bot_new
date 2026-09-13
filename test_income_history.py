@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 from dashboard import (
     INCOME_COLOR_FAMILIES,
+    MONTH_BUTTON_NAMES,
+    MONTH_EMOJIS,
     income_distribution_text,
     income_analysis_chart_colors,
     income_history_operations,
@@ -360,6 +362,20 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
         self.assertIn(f"incomeanalysis:months:{current_year - 1}", callbacks)
         self.assertNotIn(f"incomeanalysis:months:{current_year + 1}", callbacks)
+
+    def test_only_current_month_has_its_seasonal_emoji(self):
+        today = moscow_today()
+        current_markup = income_months_keyboard(today.year)
+        current_buttons = [button.text for row in current_markup.inline_keyboard for button in row]
+        self.assertIn(f"{MONTH_EMOJIS[today.month - 1]} {MONTH_BUTTON_NAMES[today.month - 1]}", current_buttons)
+        self.assertEqual(
+            sum(any(icon in button for icon in MONTH_EMOJIS) for button in current_buttons),
+            1,
+        )
+
+        past_markup = income_months_keyboard(today.year - 1)
+        past_buttons = [button.text for row in past_markup.inline_keyboard for button in row]
+        self.assertFalse(any(icon in button for icon in MONTH_EMOJIS for button in past_buttons))
 
     async def test_current_year_analysis_does_not_offer_a_future_year(self):
         message = SimpleNamespace(answer=AsyncMock(), answer_photo=AsyncMock())

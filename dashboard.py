@@ -1258,6 +1258,10 @@ MONTH_BUTTON_NAMES = (
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 )
+MONTH_EMOJIS = (
+    "🎄", "☃️", "🌷", "🌱", "🌸", "🌻",
+    "☀️", "🌼", "🍁", "☔️", "⛈️", "❄️",
+)
 
 
 def income_history_operations(telegram_id: int) -> list[dict]:
@@ -2129,9 +2133,17 @@ def next_income_color_shade(allocator, identifier: str, family_index: int) -> st
 
 
 def income_months_keyboard(year: int) -> object:
+    today = moscow_today()
     rows = [
         [
-            (MONTH_BUTTON_NAMES[index], f"incomeanalysis:month:{year}:{index + 1}")
+            (
+                (
+                    f"{MONTH_EMOJIS[index]} {MONTH_BUTTON_NAMES[index]}"
+                    if year == today.year and index + 1 == today.month
+                    else MONTH_BUTTON_NAMES[index]
+                ),
+                f"incomeanalysis:month:{year}:{index + 1}",
+            )
             for index in range(row_start, row_start + 3)
         ]
         for row_start in range(0, 12, 3)
