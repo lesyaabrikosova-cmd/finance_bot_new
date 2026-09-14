@@ -43,8 +43,8 @@ class ReserveCardTests(unittest.TestCase):
         light_blue = tuple(bytes.fromhex("4E77F9"))
         # The top-left corner of the inner rounded vessel is outside its mask;
         # a rectangular second level must never leak into that point.
-        self.assertNotEqual(image.getpixel((667, 257)), light_blue)
-        self.assertEqual(image.getpixel((740, 350)), light_blue)
+        self.assertNotEqual(image.getpixel((592, 257)), light_blue)
+        self.assertEqual(image.getpixel((725, 350)), light_blue)
 
 
 if __name__ == "__main__":

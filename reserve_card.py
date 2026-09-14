@@ -30,6 +30,21 @@ def _clamp(value: Decimal, maximum: Decimal) -> Decimal:
     return min(max(Decimal("0"), Decimal(value)), maximum)
 
 
+def _cubic(start, control_a, control_b, end, steps: int = 20):
+    """Sample a cubic Bézier curve for smooth Pillow masks."""
+    points = []
+    for index in range(1, steps + 1):
+        t = index / steps
+        reverse = 1 - t
+        points.append((
+            round(reverse ** 3 * start[0] + 3 * reverse ** 2 * t * control_a[0]
+                  + 3 * reverse * t ** 2 * control_b[0] + t ** 3 * end[0]),
+            round(reverse ** 3 * start[1] + 3 * reverse ** 2 * t * control_a[1]
+                  + 3 * reverse * t ** 2 * control_b[1] + t ** 3 * end[1]),
+        ))
+    return points
+
+
 def _shape_masks(shape: str, *, x: int, top: int, bottom: int, width: int, image_size):
     """Return outer and inner masks for a reserve's distinct vessel silhouette."""
     from PIL import Image, ImageDraw
@@ -39,26 +54,52 @@ def _shape_masks(shape: str, *, x: int, top: int, bottom: int, width: int, image
     outer_draw, inner_draw = ImageDraw.Draw(outer), ImageDraw.Draw(inner)
     left, right = x - width // 2, x + width // 2
     if shape == "shield":
-        outer_draw.polygon(
-            [(x, top), (right, top + 42), (right, top + 255), (x, bottom), (left, top + 255), (left, top + 42)],
-            fill=255,
-        )
-        inner_draw.polygon(
-            [(x, top + 15), (right - 13, top + 50), (right - 13, top + 248),
-             (x, bottom - 18), (left + 13, top + 248), (left + 13, top + 50)], fill=255,
-        )
+        crest = (x, top + 28)
+        outer_points = [crest]
+        outer_points += _cubic(crest, (x + 58, top + 74), (right - 45, top + 92), (right, top + 103))
+        outer_points += _cubic((right, top + 103), (right, top + 300), (right - 48, bottom - 74), (x, bottom))
+        outer_points += _cubic((x, bottom), (left + 48, bottom - 74), (left, top + 300), (left, top + 103))
+        outer_points += _cubic((left, top + 103), (left + 45, top + 92), (x - 58, top + 74), crest)
+        outer_draw.polygon(outer_points, fill=255)
+        inner_left, inner_right = left + 17, right - 17
+        inner_crest = (x, top + 50)
+        inner_points = [inner_crest]
+        inner_points += _cubic(inner_crest, (x + 55, top + 88), (inner_right - 40, top + 105), (inner_right, top + 117))
+        inner_points += _cubic((inner_right, top + 117), (inner_right, top + 293),
+                               (inner_right - 42, bottom - 82), (x, bottom - 24))
+        inner_points += _cubic((x, bottom - 24), (inner_left + 42, bottom - 82),
+                               (inner_left, top + 293), (inner_left, top + 117))
+        inner_points += _cubic((inner_left, top + 117), (inner_left + 40, top + 105),
+                               (x - 55, top + 88), inner_crest)
+        inner_draw.polygon(inner_points, fill=255)
     elif shape == "flask":
-        # Long narrow neck, shoulders and a round body.
-        neck = width // 4
-        outer_draw.rectangle((x - neck, top, x + neck, top + 170), fill=255)
-        outer_draw.polygon([(x - neck, top + 140), (left, top + 275), (left, bottom - 112),
-                            (right, bottom - 112), (right, top + 275), (x + neck, top + 140)], fill=255)
-        outer_draw.ellipse((left, bottom - 245, right, bottom), fill=255)
-        inner_neck = neck - 12
-        inner_draw.rectangle((x - inner_neck, top + 12, x + inner_neck, top + 174), fill=255)
-        inner_draw.polygon([(x - inner_neck, top + 158), (left + 13, top + 283), (left + 13, bottom - 112),
-                            (right - 13, bottom - 112), (right - 13, top + 283), (x + inner_neck, top + 158)], fill=255)
-        inner_draw.ellipse((left + 13, bottom - 232, right - 13, bottom - 13), fill=255)
+        # Laboratory flask: a long narrow neck and a genuinely round bulb.
+        neck = max(34, width // 7)
+        lip = neck + 11
+        outer_draw.rounded_rectangle((x - lip, top, x + lip, top + 28), radius=9, fill=255)
+        flask_points = [(x - neck, top + 18), (x - neck, top + 168)]
+        flask_points += _cubic((x - neck, top + 168), (x - neck - 3, top + 214),
+                               (left + 8, top + 230), (left + 3, top + 315))
+        flask_points += _cubic((left + 3, top + 315), (left - 5, bottom - 74),
+                               (x - 77, bottom), (x, bottom))
+        flask_points += _cubic((x, bottom), (x + 77, bottom), (right + 5, bottom - 74),
+                               (right - 3, top + 315))
+        flask_points += _cubic((right - 3, top + 315), (right - 8, top + 230),
+                               (x + neck + 3, top + 214), (x + neck, top + 168))
+        flask_points += [(x + neck, top + 18)]
+        outer_draw.polygon(flask_points, fill=255)
+        inner_neck = neck - 11
+        inner_points = [(x - inner_neck, top + 31), (x - inner_neck, top + 169)]
+        inner_points += _cubic((x - inner_neck, top + 169), (x - inner_neck, top + 210),
+                               (left + 22, top + 244), (left + 18, top + 319))
+        inner_points += _cubic((left + 18, top + 319), (left + 13, bottom - 78),
+                               (x - 69, bottom - 14), (x, bottom - 14))
+        inner_points += _cubic((x, bottom - 14), (x + 69, bottom - 14),
+                               (right - 13, bottom - 78), (right - 18, top + 319))
+        inner_points += _cubic((right - 18, top + 319), (right - 22, top + 244),
+                               (x + inner_neck, top + 210), (x + inner_neck, top + 169))
+        inner_points += [(x + inner_neck, top + 31)]
+        inner_draw.polygon(inner_points, fill=255)
     elif shape == "jar":
         # A wide mouth and straight storage-jar body.
         neck = width // 2 - 8
@@ -86,7 +127,8 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
     left, right = x - width // 2, x + width // 2
     outer_mask, vessel_mask = _shape_masks(shape, x=x, top=top, bottom=bottom, width=width, image_size=image.size)
     _tint(image, outer_mask.filter(ImageFilter.GaussianBlur(24)), colors[-1], 0.18)
-    image.paste("#765D81", mask=outer_mask.filter(ImageFilter.MaxFilter(11)))
+    outline_color = {"shield": "#F3CA76", "flask": "#9B78BE", "jar": "#C8C7D7"}[shape]
+    image.paste(outline_color, mask=outer_mask.filter(ImageFilter.MaxFilter(11)))
     image.paste("#2C2039", mask=outer_mask)
     inner_left, inner_right = left + 12, right - 12
     inner_top, inner_bottom = top + 12, bottom - 12
@@ -121,6 +163,9 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
             liquid_top = second_fill_top
     liquid_mask = ImageChops.multiply(vessel_mask, fill_mask)
     image.paste(liquid, mask=liquid_mask)
+    if shape == "shield":
+        inner_edge = ImageChops.subtract(vessel_mask.filter(ImageFilter.MaxFilter(9)), vessel_mask)
+        _tint(image, inner_edge, "#55B6B9", 0.75)
     if liquid_top < inner_bottom:
         # A translucent surface and a narrow gloss make the fill read as liquid,
         # rather than as a flat geometric block.
@@ -136,9 +181,26 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
             )
             _tint(image, ImageChops.multiply(gloss, liquid_mask), "#FFFFFF", 0.50)
     if critical_top is not None:
-        draw.line((left - 20, critical_top, right + 20, critical_top), fill="#E7DCEB", width=3)
-        draw.text((right + 28, critical_top - 19), "КМ", font=font(26, True), fill=MUTED)
-        draw.text((right + 28, inner_top - 14), "УЖ", font=font(26, True), fill=MUTED)
+        marker_right = right + 13
+        for marker_y in (critical_top, inner_top + 65):
+            for dash_start in range(left - 12, marker_right, 15):
+                draw.line((dash_start, marker_y, min(dash_start + 8, marker_right), marker_y), fill="#DDD8E5", width=2)
+        draw.text((right + 21, critical_top - 31), "КМ", font=font(24, True), fill=WHITE)
+        marker_amount_size = 21 if shape == "jar" else 23
+        draw.text((right + 21, critical_top + 1), _money(critical_target), font=font(marker_amount_size), fill=MUTED)
+        draw.text((right + 21, inner_top + 28), "УЖ", font=font(24, True), fill=WHITE)
+        draw.text((right + 21, inner_top + 60), _money(full_target), font=font(marker_amount_size), fill=MUTED)
+
+    percentage = Decimal("0") if full_target <= 0 else balance / full_target * Decimal("100")
+    percent_text = f"{int(percentage.quantize(Decimal('1')))}%"
+    percent_y = max(top + 195, min(inner_bottom - 65, (liquid_top + inner_bottom) // 2))
+    draw.text((x, percent_y), percent_text, anchor="mm", font=font(50, True), fill=WHITE)
+
+    if shape == "jar":
+        # The gold lid is deliberately rendered last so it sits in front of the glass.
+        draw.rounded_rectangle((left - 9, top - 4, right + 9, top + 35), radius=13,
+                               fill="#B77A2E", outline="#F4C36A", width=4)
+        draw.line((left + 3, top + 24, right - 3, top + 24), fill="#E7AD53", width=4)
 
     draw.text((x, bottom + 34), name, anchor="ma", font=font(38, True), fill=WHITE)
     draw.text((x, bottom + 88), _money(balance), anchor="ma", font=font(34, True), fill=GOLD)
@@ -190,9 +252,13 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
     draw.text((194, 48), "ЗАЩИТНЫЕ РЕЗЕРВЫ", font=font(54, True), fill=GOLD)
     draw.text((194, 123), "Заполнение резервов на текущий момент", font=font(30), fill=MUTED)
     draw.line((54, 185, 1026, 185), fill="#51495F", width=3)
-    centers = {1: (540,), 2: (340, 740), 3: (220, 540, 860)}[len(vessels)]
-    for x, (name, balance, critical, target, colors, shape) in zip(centers, vessels):
-        _vessel(draw, x=x, top=245, bottom=745, width=190, balance=balance,
+    layouts = {
+        1: ((540, 330),),
+        2: ((315, 300), (725, 290)),
+        3: ((200, 270), (500, 240), (855, 220)),
+    }[len(vessels)]
+    for (x, width), (name, balance, critical, target, colors, shape) in zip(layouts, vessels):
+        _vessel(draw, x=x, top=245, bottom=735, width=width, balance=balance,
                 critical_target=critical, full_target=max(Decimal("0"), Decimal(target)),
                 colors=colors, font=font, name=name, shape=shape)
 
