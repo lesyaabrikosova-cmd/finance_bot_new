@@ -306,7 +306,7 @@ class TaxFeatureTests(unittest.TestCase):
         labels = [button.text for row in markup.inline_keyboard for button in row]
         self.assertEqual(
             labels,
-            ["Назад", "Сохранить", "Отмена", "Готово"],
+            ["Назад", "Сохранить", "✕ Отмена", "Готово"],
         )
 
     def test_category_summary_collects_all_items_and_sums_duplicates(self):

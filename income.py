@@ -883,10 +883,12 @@ async def commit_custom_income_type(callback: CallbackQuery, state: FSMContext):
         assign_missing_income_type_colors(allocator, excluded_identifier=identifier)
         if family_index is None:
             allocator.settings.income_type_colors[identifier] = next_automatic_income_color(allocator, identifier)
+            allocator.settings.income_type_manual_color_families.pop(identifier, None)
         else:
             allocator.settings.income_type_colors[identifier] = next_income_color_shade(
                 allocator, identifier, int(family_index),
             )
+            allocator.settings.income_type_manual_color_families[identifier] = int(family_index)
         allocator.settings.taxable_income_types = [
             item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
         ]

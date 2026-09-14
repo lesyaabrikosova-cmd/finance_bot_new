@@ -5,7 +5,8 @@ from storage import db
 
 def button_text(text: str) -> str:
     """Keep button symbols compact and visually consistent across the bot."""
-    return text.replace("✔️", "✓").replace("✖️", "✕")
+    text = text.replace("✔️", "✓").replace("✖️", "✕")
+    return "✕ Отмена" if text == "Отмена" else text
 
 
 def reserve_fraction(current: str, limit: str) -> str:

@@ -2560,11 +2560,13 @@ async def save_income_color_choice(
     if family_index is None:
         assign_missing_income_type_colors(allocator, excluded_identifier=identifier)
         allocator.settings.income_type_colors[identifier] = next_automatic_income_color(allocator, identifier)
+        allocator.settings.income_type_manual_color_families.pop(identifier, None)
         result = f"Выбран автоматический цвет: {income_color_name(allocator.settings.income_type_colors[identifier])}."
     else:
         assign_missing_income_type_colors(allocator, excluded_identifier=identifier)
         color = next_income_color_shade(allocator, identifier, family_index)
         allocator.settings.income_type_colors[identifier] = color
+        allocator.settings.income_type_manual_color_families[identifier] = family_index
         result = f"Выбран цвет: {income_color_name(color)}."
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()

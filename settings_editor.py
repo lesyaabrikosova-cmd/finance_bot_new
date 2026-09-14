@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 from archetypes import ARCHETYPES, ARCHETYPE_ROWS
 from financial_engine import goal_display_name, is_system_envelope_name
+from income_colors import INCOME_COLOR_FAMILIES, next_automatic_income_color, next_income_color_shade
 from storage import db
 from time_utils import moscow_now
 from ui import keyboard, main_menu_keyboard, reserve_fraction
@@ -1716,50 +1717,99 @@ async def income_type_view(callback: CallbackQuery, state: FSMContext):
         await show_income_types_settings(callback.message, callback.from_user.id, state)
         return
     name = names[index]
-    rate = allocator.settings.income_type_tax_rates[name]
-    bound_profile = allocator.settings.income_type_tax_profiles.get(name)
     await state.update_data(income_type_edit_original=name)
-    rule = bound_profile or (f"{rate}%" if rate > 0 else "Без налога")
-    if is_psn_plan_rule(bound_profile):
-        patent_name = psn_plan_name(bound_profile)
-        payments = [
-            item for item in db.load_tax_obligations(callback.from_user.id)
-            if item["tax_type"] == "Патент" and (
-                not patent_name
-                or str(item["object_name"]) == patent_name
-                or str(item["object_name"]).startswith(f"{patent_name} — ")
-            )
-        ]
-        explanation = (
-            "\n\nС каждого поступления процент не удерживается. Патент копится "
-            "отдельно в плановых налогах."
-        )
-        if payments:
-            explanation += "\n\n" + "\n".join(
-                f"• {escape(str(item['object_name']))} · {rub(item['target_amount'])} · "
-                f"до {date.fromisoformat(str(item['due_date'])).strftime('%d.%m.%Y')}"
-                for item in payments if item.get("due_date")
-            )
-    else:
-        explanation = (
-            "\n\nЭто правило будет подставляться автоматически. Для отдельного "
-            "поступления его можно изменить."
-        )
-    action_rows = []
-    if is_psn_plan_rule(bound_profile):
-        action_rows.append([("Открыть плановые налоги", "taxes:edit")])
-    await callback.message.answer(
-        f"<b>{escape(name.upper())}</b>\n\n"
-        f"Налог по умолчанию — <b>{escape(rule)}</b>"
-        + explanation,
+    await show_income_type_card(callback.message, callback.from_user.id, name)
+
+
+async def show_income_type_card(message: Message, telegram_id: int, name: str) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None or name not in allocator.settings.income_type_tax_rates:
+        await message.answer("Этот тип дохода больше недоступен.")
+        return
+    settings = allocator.settings
+    identifier = settings.ensure_income_type_id(name)
+    family = getattr(settings, "income_type_manual_color_families", {}).get(identifier)
+    heart = (
+        INCOME_COLOR_FAMILIES[family][1] + " "
+        if isinstance(family, int) and 0 <= family < len(INCOME_COLOR_FAMILIES)
+        else ""
+    )
+    rate = settings.income_type_tax_rates[name]
+    rule = settings.income_type_tax_profiles.get(name) or (f"{rate}%" if rate > 0 else "Без налога")
+    await message.answer(
+        f"<b>{heart}{escape(name.upper())}</b>\n\n"
+        f"Налог по умолчанию — <b>{escape(rule)}</b>\n\n"
+        "Если для конкретного поступления налог всё-таки нужен, его можно разово "
+        "изменить при добавлении через кнопку <b>«Новый доход»</b>.",
         reply_markup=keyboard([
-            *action_rows,
-            [("Изменить название", "incomesettings:rename")],
-            [("Изменить налог", "incomesettings:rerate")],
-            [("🗑️ Удалить тип дохода", "incomesettings:delete")],
+            [("✎ Название", "incomesettings:rename"), ("✎ Налог", "incomesettings:rerate")],
+            [("✎ Цвет", "incomesettings:color"), ("🗑️ Удалить", "incomesettings:delete")],
             [("← Главное меню", "menu:back"), ("← Назад", "incomesettings:list")],
         ]),
     )
+
+
+@router.callback_query(F.data == "incomesettings:color")
+async def income_type_color_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    rows = [
+        [(icon, f"incomesettings:color:choose:{index}")
+         for index, (_, icon, _) in enumerate(INCOME_COLOR_FAMILIES[start:start + 3], start)]
+        for start in range(0, len(INCOME_COLOR_FAMILIES), 3)
+    ]
+    rows.extend([
+        [("Автоматический цвет", "incomesettings:color:auto")],
+        [("← Назад", "incomesettings:color:back")],
+    ])
+    await callback.message.answer(
+        "Выберите основной цвет для диаграммы.", reply_markup=keyboard(rows)
+    )
+
+
+async def save_income_type_card_color(
+    callback: CallbackQuery, state: FSMContext, family: int | None,
+) -> None:
+    data = await state.get_data()
+    name = str(data.get("income_type_edit_original") or "")
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or name not in allocator.settings.income_type_tax_rates:
+        await callback.message.answer("Этот тип дохода больше недоступен.")
+        return
+    identifier = allocator.settings.ensure_income_type_id(name)
+    if family is None:
+        allocator.settings.income_type_colors[identifier] = next_automatic_income_color(allocator, identifier)
+        allocator.settings.income_type_manual_color_families.pop(identifier, None)
+    else:
+        allocator.settings.income_type_colors[identifier] = next_income_color_shade(allocator, identifier, family)
+        allocator.settings.income_type_manual_color_families[identifier] = family
+    db.save_allocator(callback.from_user.id, allocator)
+    await show_income_type_card(callback.message, callback.from_user.id, name)
+
+
+@router.callback_query(F.data.startswith("incomesettings:color:choose:"))
+async def income_type_color_save(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        family = int(callback.data.rsplit(":", 1)[1])
+        if not 0 <= family < len(INCOME_COLOR_FAMILIES):
+            raise ValueError
+    except ValueError:
+        await callback.message.answer("Не удалось выбрать цвет.")
+        return
+    await save_income_type_card_color(callback, state, family)
+
+
+@router.callback_query(F.data == "incomesettings:color:auto")
+async def income_type_color_auto(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await save_income_type_card_color(callback, state, None)
+
+
+@router.callback_query(F.data == "incomesettings:color:back")
+async def income_type_color_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    name = str((await state.get_data()).get("income_type_edit_original") or "")
+    await show_income_type_card(callback.message, callback.from_user.id, name)
 
 
 @router.callback_query(F.data == "incomesettings:list")
@@ -1903,7 +1953,10 @@ async def income_type_delete_confirm(callback: CallbackQuery, state: FSMContext)
     allocator = db.load_allocator(callback.from_user.id)
     original = data["income_type_edit_original"]
     allocator.settings.income_type_tax_rates.pop(original, None)
-    allocator.settings.income_type_ids.pop(original, None)
+    identifier = allocator.settings.income_type_ids.pop(original, None)
+    if identifier:
+        allocator.settings.income_type_colors.pop(identifier, None)
+        allocator.settings.income_type_manual_color_families.pop(identifier, None)
     allocator.settings.income_type_tax_profiles.pop(original, None)
     allocator.settings.income_tax_profiles.pop(original, None)
     allocator.settings.taxable_income_types = [name for name, rate in allocator.settings.income_type_tax_rates.items() if rate > 0]

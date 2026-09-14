@@ -498,9 +498,11 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             income_type_tax_rates={"Работа": Decimal("0")},
             income_type_ids={"Работа": "income-work"},
             income_type_colors={"income-work": "#9675E5"},
+            income_type_manual_color_families={"income-work": 5},
         )
         restored = deserialize_income_rhythm(serialize_income_types(settings))
         self.assertEqual(restored["income_type_colors"], {"income-work": "#9675E5"})
+        self.assertEqual(restored["income_type_manual_color_families"], {"income-work": 5})
 
     def test_month_navigation_keeps_selected_year_when_returning_from_march(self):
         markup = income_months_keyboard(2025)
