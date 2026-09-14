@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 from financial_engine import FinancialAllocator, UserSettings
 from income import fmt_money, send_distribution_report
 from onboarding import start_first_allocation, first_allocation_preview_text, financial_opportunities_text
-from settings_editor import show_settings_menu
+from settings_editor import show_settings_actions, show_settings_menu
 from period import show_new_period_confirmation
 
 
@@ -32,6 +32,28 @@ def button_texts(markup):
 
 
 class ProfileTextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settings_overview_has_one_settings_button(self):
+        msg = message()
+        with patch("settings_editor.db") as db:
+            db.load_allocator.return_value = make_allocator("stable")
+            await show_settings_menu(msg, 42)
+
+        markup = msg.answer.await_args.kwargs["reply_markup"]
+        self.assertEqual(
+            [button.text for row in markup.inline_keyboard for button in row],
+            ["⚙️ Настройки", "← Главное меню"],
+        )
+
+    async def test_settings_actions_stay_behind_overview_button(self):
+        msg = message()
+        with patch("settings_editor.db") as db:
+            db.load_allocator.return_value = make_allocator("stable")
+            await show_settings_actions(msg, 42)
+
+        buttons = button_texts(msg.answer.await_args.kwargs["reply_markup"])
+        self.assertIn("Средний доход", buttons)
+        self.assertIn("← Назад", buttons)
+
     async def test_first_allocation_entry_text_and_buttons_follow_profile(self):
         for profile in ("stable", "piecework", "cyclic"):
             a, msg = make_allocator(profile), message()

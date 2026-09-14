@@ -1130,8 +1130,10 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
     rows = [[("Мои налоги", "taxes:edit")]]
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
     rows.append([("Налог оплачен", "taxes:payment")])
-    rows.append([("ℹ️ Помощь", "taxes:help")])
-    rows.append([("← Главное меню", "taxes:back")])
+    rows.append([
+        ("← Главное меню", "taxes:back"),
+        ("ℹ️ Помощь", "taxes:help"),
+    ])
 
     tax_values, chart_colors = tax_chart_values_and_colors(groups)
     await send_chart_report(

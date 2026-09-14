@@ -282,6 +282,28 @@ async def show_settings_menu(message: Message, telegram_id: int):
     await message.answer(
         "\n".join(lines),
         reply_markup=keyboard([
+            [("⚙️ Настройки", "settings:details")],
+            [("← Главное меню", "menu:back")],
+        ]),
+    )
+
+
+async def show_settings_actions(message: Message, telegram_id: int):
+    """Show editable settings separately from the user-settings overview."""
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+
+    s = allocator.settings
+    dev_button = (
+        "🛠 Выключить уровень разработчика"
+        if s.developer_mode
+        else "🛠 Включить уровень разработчика"
+    )
+    await message.answer(
+        "<b>НАСТРОЙКИ</b>\n\nВыберите, что хотите изменить.",
+        reply_markup=keyboard([
             [(f"Профиль: { {'stable': 'Стабильный', 'piecework': 'Сдельный', 'cyclic': 'Циклический'}.get(allocator.profile_id, allocator.profile_id)}", "settings:rhythm")],
             [("Выбрать финансовый архетип", "settings:archetype")],
             [("Средний доход", "settings:income"), ("Типы доходов", "settings:income_types")],
@@ -305,9 +327,16 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("🗑 Полный сброс учёта", "settings:full_reset")],
             *([[("🗑️ Удалить профиль и всю историю", "settings:erase_all")]] if s.developer_mode else []),
             [("🔄 Пройти настройку заново", "setup:restart")],
-            [("⬅️ Главное меню", "menu:back")],
+            [("← Назад", "settings:open")],
         ]),
     )
+
+
+@router.callback_query(F.data == "settings:details")
+async def open_settings_actions(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await show_settings_actions(callback.message, callback.from_user.id)
 
 
 @router.callback_query(F.data == "settings:archetype")
