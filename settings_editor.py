@@ -184,7 +184,7 @@ async def show_archetype_card(message: Message, slug: str, *, replace: bool) -> 
 async def return_to_settings(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.delete()
-    await show_settings_menu(callback.message, callback.from_user.id)
+    await show_settings_actions(callback.message, callback.from_user.id)
 
 async def show_settings_menu(message: Message, telegram_id: int):
     allocator = db.load_allocator(telegram_id)
@@ -339,6 +339,14 @@ async def open_settings_actions(callback: CallbackQuery, state: FSMContext):
     await show_settings_actions(callback.message, callback.from_user.id)
 
 
+@router.callback_query(F.data == "settings:overview")
+async def open_settings_overview(callback: CallbackQuery, state: FSMContext):
+    """Open the profile summary from the /start configured-profile screen."""
+    await callback.answer()
+    await state.clear()
+    await show_settings_menu(callback.message, callback.from_user.id)
+
+
 @router.callback_query(F.data == "settings:archetype")
 async def open_archetype_picker(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -418,7 +426,7 @@ async def save_force_months_setting(message: Message, state: FSMContext):
     allocator.settings.force_majeure_months = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_menu(message, message.from_user.id)
+    await show_settings_actions(message, message.from_user.id)
 
 
 @router.callback_query(F.data == "settings:stabilizer_months")
@@ -442,7 +450,7 @@ async def save_stabilizer_months_setting(message: Message, state: FSMContext):
     allocator.settings.stabilizer_target_months = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_menu(message, message.from_user.id)
+    await show_settings_actions(message, message.from_user.id)
 
 
 @router.callback_query(F.data == "settings:stabilizer_balance")
@@ -475,7 +483,7 @@ async def save_stabilizer_balance(message: Message, state: FSMContext):
     allocator.state.pillow_stabilizer = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_menu(message, message.from_user.id)
+    await show_settings_actions(message, message.from_user.id)
 
 
 @router.callback_query(F.data == "settings:intercontract_balance")
@@ -511,7 +519,7 @@ async def save_intercontract_balance(message: Message, state: FSMContext):
     allocator.state.intercontract_reserve = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_menu(message, message.from_user.id)
+    await show_settings_actions(message, message.from_user.id)
 
 
 async def show_planned_payments(message: Message, telegram_id: int):
@@ -705,7 +713,7 @@ async def save_income_rhythm_setting(callback: CallbackQuery, state: FSMContext)
     allocator.settings.reliable_gap_income = Decimal("0")
     allocator.settings.stabilizer_target_months = Decimal("1")
     db.save_allocator(callback.from_user.id, allocator)
-    await show_settings_menu(callback.message, callback.from_user.id)
+    await show_settings_actions(callback.message, callback.from_user.id)
 
 
 @router.message(EditSettingsStates.income_gap_months)
@@ -737,7 +745,7 @@ async def save_income_work_setting(message: Message, state: FSMContext):
     allocator.settings.stabilizer_target_months = max(Decimal("2"), allocator.settings.stabilizer_target_months)
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_menu(message, message.from_user.id)
+    await show_settings_actions(message, message.from_user.id)
 
 @router.callback_query(
     F.data.in_(
@@ -756,7 +764,7 @@ async def open_settings(
 
     await state.clear()
 
-    await show_settings_menu(
+    await show_settings_actions(
         callback.message,
         callback.from_user.id,
     )
@@ -799,7 +807,7 @@ async def toggle_developer(
         f"✅ Уровень разработчика {status}."
     )
 
-    await show_settings_menu(
+    await show_settings_actions(
         callback.message,
         callback.from_user.id,
     )
@@ -849,7 +857,7 @@ async def cancel_full_reset(
     await callback.answer("Сброс отменён")
     await state.clear()
 
-    await show_settings_menu(
+    await show_settings_actions(
         callback.message,
         callback.from_user.id,
     )

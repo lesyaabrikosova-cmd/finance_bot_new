@@ -390,7 +390,7 @@ async def start(
             [
                 (
                     "Настройки",
-                    "settings:open",
+                    "settings:overview",
                 ),
                 (
                     "Настроить заново",
