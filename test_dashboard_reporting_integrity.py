@@ -308,16 +308,24 @@ class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("🧳 <b>Сундук Хотелок · прежняя позиция</b> — 50", text)
         self.assertNotIn("abc123", text)
 
-    def test_history_button_keeps_the_year_and_fits(self):
+    def test_history_button_hides_current_year_and_fits(self):
         item = income_operation(
             income_type="Очень длинное название частного занятия с учеником",
         )
 
         label = dashboard.income_history_button_label(item)
 
-        self.assertTrue(label.startswith("10.09.2026 · "))
+        self.assertTrue(label.startswith("10.09 · "))
         self.assertLessEqual(len(label), 64)
         self.assertTrue(label.endswith(" · 100"))
+
+    def test_history_button_keeps_year_for_previous_year(self):
+        item = income_operation()
+        item["payload"]["date"] = "2025-08-13"
+
+        label = dashboard.income_history_button_label(item)
+
+        self.assertTrue(label.startswith("13.08.2025 · "))
 
     def test_note_editor_has_delete_main_menu_and_back(self):
         markup = dashboard.income_note_edit_keyboard(17, has_note=True)

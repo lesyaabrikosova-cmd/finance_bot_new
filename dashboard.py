@@ -1349,7 +1349,12 @@ def income_history_date(operation: dict) -> str:
 def income_history_button_label(operation: dict) -> str:
     payload = operation.get("payload") or {}
     income_type = " ".join(str(payload.get("income_type", "Без типа")).split())
-    operation_date = income_history_date(operation)
+    recorded_on = income_operation_date(operation)
+    operation_date = (
+        recorded_on.strftime("%d.%m")
+        if recorded_on and recorded_on.year == moscow_today().year
+        else income_history_date(operation)
+    )
     amount = rub_plain(payload.get('income', 0))
     # Keep the year visible while leaving room for the amount in Telegram's
     # compact inline button. The full type remains on the detail card.
