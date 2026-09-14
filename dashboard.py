@@ -1017,6 +1017,16 @@ def period_balance_chart(allocator, allocations):
     return values, colors
 
 
+def period_balance_legend_labels(values) -> dict[str, str]:
+    """Shorten only the rendered legend; keep internal chart keys unique."""
+    prefix = 'Цели и Сундуки · '
+    return {
+        str(label): str(label).removeprefix(prefix)
+        for label in values
+        if str(label).startswith(prefix)
+    }
+
+
 def period_balance_fallback_text(
     allocator,
     balances: dict[str, Decimal],
@@ -1198,6 +1208,7 @@ async def send_balances(
         message, balances, "БАЛАНСЫ", "\n".join(summary_lines),
         subtitle=f"Пополнения конвертов · {period_label}",
         colors=colors, preserve_order=True, center_amount=income,
+        legend_labels=period_balance_legend_labels(balances),
         fallback_text=period_balance_fallback_text(
             allocator,
             balances,

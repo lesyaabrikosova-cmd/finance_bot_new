@@ -71,6 +71,7 @@ def make_chart(
     center_amount=None,
     center_label='Доход за период',
     center_suffix='₽ до налогов',
+    legend_labels=None,
 ):
     from PIL import Image, ImageDraw, ImageFont
     items = chart_items(values, preserve_order)
@@ -88,7 +89,7 @@ def make_chart(
     measure_draw = ImageDraw.Draw(measure_image)
     legend_lines = [
         wrap_legend_label(
-            label, 940 if legend_columns == 1 else 440,
+            (legend_labels or {}).get(label, label), 940 if legend_columns == 1 else 440,
             lambda value: measure_draw.textlength(value, font=label_font),
         )
         for label, _ in items

@@ -5,7 +5,7 @@ from decimal import Decimal as D
 from types import SimpleNamespace
 _DATA = tempfile.TemporaryDirectory()
 os.environ['ALLOCATOR_DATA_DIR'] = _DATA.name
-from dashboard import period_balance_chart
+from dashboard import period_balance_chart, period_balance_legend_labels
 from charts import chart_items
 
 class PeriodChartTests(unittest.TestCase):
@@ -243,3 +243,14 @@ class PeriodChartTests(unittest.TestCase):
             [colors[label] for label in expected],
             ['#5B3A29', '#431804', '#FFB02E', '#8B4513', '#342018'],
         )
+
+    def test_balance_legend_hides_only_goals_and_chests_group_prefix(self):
+        labels = period_balance_legend_labels({
+            'Налог': D(1),
+            'Цели и Сундуки · Сундук Хотелок': D(2),
+            'Цели и Сундуки · Отпуск': D(3),
+        })
+        self.assertEqual(labels, {
+            'Цели и Сундуки · Сундук Хотелок': 'Сундук Хотелок',
+            'Цели и Сундуки · Отпуск': 'Отпуск',
+        })
