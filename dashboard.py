@@ -21,7 +21,7 @@ from financial_engine import (
 )
 from storage import db
 from ui import keyboard, main_menu_keyboard, reserve_fraction
-from mode_presentation import mode_image_path
+from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 from charts import send_chart_report
 from taxes import (
     compact_income_tax_profile,
@@ -59,11 +59,18 @@ async def send_text_with_image(
     text: str,
     image_path: Path | None,
     reply_markup=None,
+    message_effect_id: str | None = None,
 ) -> None:
+    effect_kwargs = (
+        {"message_effect_id": message_effect_id}
+        if message_effect_id is not None
+        else {}
+    )
     if image_path is None or not image_path.exists():
         await message.answer(
             text,
             reply_markup=reply_markup,
+            **effect_kwargs,
         )
         return
 
@@ -86,6 +93,7 @@ async def send_text_with_image(
             if not remaining_lines
             else None
         ),
+        **effect_kwargs,
     )
 
     if remaining_lines:
@@ -506,6 +514,32 @@ async def menu_back(
 # УРОВЕНЬ
 # ============================================================
 
+def mode_priority_text(allocator, priority) -> str:
+    """Keep technical reserve stages out of the user-facing mode screen."""
+    if priority is None:
+        return "<b>ТЕКУЩИЙ ПРИОРИТЕТ</b>\n\nИнвестиции — чем больше, тем лучше"
+
+    name = str(priority["name"])
+    settings = allocator.settings
+    state = allocator.state
+    if name.startswith("Фонд Зарплаты"):
+        display_name = "🏦 Фонд Зарплаты"
+        deficit = max(Decimal("0"), allocator.intercontract_current_limit - state.intercontract_reserve)
+    elif name.startswith("Стабилизатор"):
+        display_name = "🛟 Стабилизатор"
+        deficit = max(Decimal("0"), settings.stabilizer_full_limit - state.pillow_stabilizer)
+    elif name == "Подушка":
+        display_name = "🛡️ Подушка"
+        deficit = max(Decimal("0"), settings.force_majeure_limit - allocator.pillow_total_balance)
+    else:
+        display_name = name
+        deficit = priority["deficit"]
+    return (
+        "<b>ТЕКУЩИЙ ПРИОРИТЕТ</b>\n"
+        f"{display_name} — ещё <b>{rub(deficit)}</b>"
+    )
+
+
 async def send_mode(
     message: Message,
     telegram_id: int,
@@ -548,42 +582,52 @@ async def send_mode(
     target = allocator.protective_capital_target
     remaining = allocator.remaining_to_profile_transition()
     priority = allocator.current_protection_priority()
-    plan = allocator.reserve_rebalancing_plan()
-    if priority:
-        priority_text = (
-            "<b><u>ТЕКУЩИЙ ПРИОРИТЕТ</u></b>\n\n"
-            f"{escape(str(priority['name']))} — не хватает <b>{rub(priority['deficit'])}</b>."
-        )
-    else:
-        priority_text = "<b><u>ТЕКУЩИЙ ПРИОРИТЕТ</u></b>\n\nВсе защитные нормативы сформированы."
+    priority_text = mode_priority_text(allocator, priority)
+
+    reserve_text = (
+        "<b>В резервах</b> — <b>"
+        f"{reserve_fraction(rub_plain(capital), rub_plain(target))}"
+        "</b>"
+    )
 
     if remaining is None:
-        next_text = "\n\n<b>Максимальный уровень устойчивости достигнут.</b>"
+        body = (
+            f"{reserve_text}\n\n"
+            f"<b>{reward}</b>\n\n"
+            "<b>Максимальный уровень устойчивости достигнут.</b>\n\n"
+            "————————————\n"
+            f"{priority_text}"
+        )
     else:
-        next_text = f"\n\nДо следующего кубка осталось: <b>{rub(remaining)}</b>"
+        body = (
+            f"{reserve_text}\n\n"
+            f"<b>{reward}</b>\n"
+            f"До следующего кубка: <b>{rub(remaining)}</b>\n"
+            "————————————\n"
+            f"{priority_text}"
+        )
 
     text = (
         "<b>УРОВЕНЬ ФИНАНСОВОЙ УСТОЙЧИВОСТИ</b>\n\n"
-        f"Профиль — <b>{profile_label}, {debt_profile}</b>\n\n"
-        f"<b>{reward}</b>\n\n"
-        f"В защитных резервах — <b>{rub(capital)}</b> из <b>{rub(target)}</b>."
-        f"{next_text}\n\n"
-        f"{priority_text}"
+        f"<b>Профиль</b> — {profile_label}, {debt_profile}\n"
+        f"{body}"
     )
 
-    rows = [[(f"Почему у меня {mode} кубков?", "mode:why")]]
-    if plan["transfers"]:
-        rows.append([("Сбалансировать резервы", "mode:rebalance")])
-    rows.extend([
-        [("Изменить размеры резервов", "menu:reserves")],
+    rows = [
+        [("✎ Балансы резервов", "menu:reserves")],
         [("← Главное меню", "menu:back")],
-    ])
+    ]
 
     await send_text_with_image(
         message,
         text,
         mode_image_path(allocator.profile_id, mode),
         reply_markup=keyboard(rows),
+        message_effect_id=(
+            FIRE_EFFECT_ID
+            if getattr(getattr(message, "chat", None), "type", None) == "private"
+            else None
+        ),
     )
 
 
