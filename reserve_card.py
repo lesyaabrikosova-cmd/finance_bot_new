@@ -13,6 +13,12 @@ WHITE = "#F9F4ED"
 MUTED = "#D0C2D8"
 
 
+def _tint(image, mask, color: str, opacity: float) -> None:
+    """Blend a colour through a mask without flattening the card underneath."""
+    from PIL import Image
+    image.paste(Image.blend(image, Image.new("RGB", image.size, color), opacity), mask=mask)
+
+
 def _money(value: Decimal) -> str:
     amount = f"{Decimal(value):,.0f}".replace(",", " ")
     return f"{amount} ₽"
@@ -79,6 +85,7 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
     image = draw._image
     left, right = x - width // 2, x + width // 2
     outer_mask, vessel_mask = _shape_masks(shape, x=x, top=top, bottom=bottom, width=width, image_size=image.size)
+    _tint(image, outer_mask.filter(ImageFilter.GaussianBlur(24)), colors[-1], 0.18)
     image.paste("#765D81", mask=outer_mask.filter(ImageFilter.MaxFilter(11)))
     image.paste("#2C2039", mask=outer_mask)
     inner_left, inner_right = left + 12, right - 12
@@ -90,12 +97,14 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
     fill_mask = Image.new("L", image.size)
     fill_draw = ImageDraw.Draw(fill_mask)
     critical_top = None
+    liquid_top = inner_bottom
 
     if critical_target is None or critical_target <= 0 or critical_target >= full_target:
         fill_top = inner_bottom - int(usable_height * balance / full_target) if full_target > 0 else inner_bottom
         if fill_top < inner_bottom:
             liquid_draw.rectangle((inner_left, fill_top, inner_right, inner_bottom), fill=colors[0])
             fill_draw.rectangle((inner_left, fill_top, inner_right, inner_bottom), fill=255)
+            liquid_top = fill_top
     else:
         critical_target = _clamp(critical_target, full_target)
         critical_height = int(usable_height * critical_target / full_target)
@@ -104,11 +113,28 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
         if first_fill_top < inner_bottom:
             liquid_draw.rectangle((inner_left, first_fill_top, inner_right, inner_bottom), fill=colors[0])
             fill_draw.rectangle((inner_left, first_fill_top, inner_right, inner_bottom), fill=255)
+            liquid_top = first_fill_top
         if balance > critical_target:
             second_fill_top = inner_bottom - int(usable_height * balance / full_target)
             liquid_draw.rectangle((inner_left, second_fill_top, inner_right, critical_top), fill=colors[1])
             fill_draw.rectangle((inner_left, second_fill_top, inner_right, critical_top), fill=255)
-    image.paste(liquid, mask=ImageChops.multiply(vessel_mask, fill_mask))
+            liquid_top = second_fill_top
+    liquid_mask = ImageChops.multiply(vessel_mask, fill_mask)
+    image.paste(liquid, mask=liquid_mask)
+    if liquid_top < inner_bottom:
+        # A translucent surface and a narrow gloss make the fill read as liquid,
+        # rather than as a flat geometric block.
+        surface = Image.new("L", image.size)
+        ImageDraw.Draw(surface).ellipse(
+            (left + 16, liquid_top - 13, right - 16, liquid_top + 18), fill=130,
+        )
+        _tint(image, ImageChops.multiply(surface, vessel_mask), "#EAF9FF", 0.45)
+        if liquid_top + 22 < inner_bottom - 38:
+            gloss = Image.new("L", image.size)
+            ImageDraw.Draw(gloss).rounded_rectangle(
+                (left + 27, liquid_top + 22, left + 40, inner_bottom - 38), radius=7, fill=45,
+            )
+            _tint(image, ImageChops.multiply(gloss, liquid_mask), "#FFFFFF", 0.50)
     if critical_top is not None:
         draw.line((left - 20, critical_top, right + 20, critical_top), fill="#E7DCEB", width=3)
         draw.text((right + 28, critical_top - 19), "КМ", font=font(26, True), fill=MUTED)
@@ -149,16 +175,29 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
             fonts[key] = ImageFont.truetype(str(FONT_DIR / filename), size)
         return fonts[key]
 
-    draw.text((54, 45), "ЗАЩИТНЫЕ РЕЗЕРВЫ", font=font(54, True), fill=GOLD)
-    draw.text((54, 120), "Заполнение резервов на текущий момент", font=font(30), fill=MUTED)
-    draw.line((54, 178, 1026, 178), fill="#604A69", width=2)
+    # Layered background and frame: the card has a deliberate visual boundary
+    # when Telegram places it on a chat background.
+    for y in range(1120):
+        blend = y / 1119
+        red = int(20 * (1 - blend) + 13 * blend)
+        green = int(18 * (1 - blend) + 15 * blend)
+        blue = int(33 * (1 - blend) + 27 * blend)
+        draw.line((0, y, 1080, y), fill=(red, green, blue))
+    draw.rounded_rectangle((18, 18, 1062, 1102), radius=38, outline="#3F384E", width=3)
+    draw.ellipse((58, 48, 164, 154), fill="#272337")
+    draw.polygon([(111, 67), (141, 83), (136, 126), (111, 143), (86, 126), (81, 83)], outline=GOLD, width=5)
+    draw.line((97, 105, 107, 116, 128, 91), fill=GOLD, width=6)
+    draw.text((194, 48), "ЗАЩИТНЫЕ РЕЗЕРВЫ", font=font(54, True), fill=GOLD)
+    draw.text((194, 123), "Заполнение резервов на текущий момент", font=font(30), fill=MUTED)
+    draw.line((54, 185, 1026, 185), fill="#51495F", width=3)
     centers = {1: (540,), 2: (340, 740), 3: (220, 540, 860)}[len(vessels)]
     for x, (name, balance, critical, target, colors, shape) in zip(centers, vessels):
-        _vessel(draw, x=x, top=245, bottom=745, width=170, balance=balance,
+        _vessel(draw, x=x, top=245, bottom=745, width=190, balance=balance,
                 critical_target=critical, full_target=max(Decimal("0"), Decimal(target)),
                 colors=colors, font=font, name=name, shape=shape)
 
-    draw.text((540, 1045), "КМ — критический минимум · УЖ — устойчивая жизнь", anchor="ma", font=font(27), fill=MUTED)
+    draw.rounded_rectangle((105, 1006, 975, 1070), radius=30, outline="#3F384E", width=2)
+    draw.text((540, 1025), "КМ — критический минимум  ·  УЖ — устойчивая жизнь", anchor="ma", font=font(27), fill=MUTED)
     output = BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
