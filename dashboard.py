@@ -31,7 +31,6 @@ from taxes import (
 from income_colors import (
     INCOME_COLOR_FAMILIES,
     assign_missing_income_type_colors,
-    income_color_distance,
     income_color_name,
     next_automatic_income_color,
     next_income_color_shade,
@@ -787,36 +786,45 @@ def period_balance_chart(allocator, allocations):
     """
     values, colors = {}, {}
 
-    # Semantic colour families for the balance chart.  The selector below
-    # compares candidates in OKLab, so these are not merely different HEXes.
-    tax_colors = oklch_family_palette(
-        ('#4D2A91', '#9675E5', '#D0C1F4'), range(280, 326, 5),
-    )
-    salary_fund_colors = oklch_family_palette(
-        ('#4B515C', '#8B92A1', '#D0D4DA'), (250,), chromas=(.01, .025),
-    )
-    bracket_reserve_colors = oklch_family_palette(
-        ('#315EAF', '#5584DB', '#88A9E9', '#B7C9F2'), range(205, 271, 5),
-    )
+    # Approved balance-chart palette.  Colours at the beginning of each tuple
+    # are deliberately fixed and applied in this order; a generated tail only
+    # protects legacy profiles with more categories than the UI normally allows.
+    tax_colors = ('#4B0082',)
+    # The period chart contains one actual Fund Salary flow.  It uses the KМ
+    # colour; #A9A9A9 is reserved for a future separate УЖ flow.
+    salary_fund_colors = ('#393939', '#A9A9A9')
+    bracket_reserve_colors = ('#008080', '#000080', '#006400')
     debt_colors = oklch_family_palette(
         ('#573410', '#BC3F06', '#F6802C', '#E1C5A8'), range(30, 71, 5),
     )
-    life_colors = oklch_family_palette(
-        ('#C94242',), range(20, 33, 3),
-        lightnesses=(.36, .42, .48, .54, .60, .66, .72),
-        chromas=(.08, .11, .14, .17),
+    life_colors = (
+        '#DC143C', '#CD5C5C', '#FF0000', '#F4AFAF', '#B22222', '#FA757F',
+        '#750A2D', '#FA8072',
+        *oklch_family_palette(
+            (), range(15, 28, 3),
+            lightnesses=(.42, .48, .54, .60, .66, .72, .78),
+            chromas=(.11, .14, .17, .20),
+        ),
     )
-    household_reserve_colors = oklch_family_palette(
-        ('#2E5839', '#429723', '#47A498', '#C3D1AD'), range(120, 181, 5),
+    household_reserve_colors = ('#9ACD32',)
+    goal_colors = (
+        '#FFB02E', '#FFF44F', '#D6AE01', '#FFFF99', '#E6CE2D', '#E28B00',
+        '#FFEBB7', '#BAAA36', '#FFF5A5',
+        *oklch_family_palette(
+            (), range(82, 103, 4),
+            lightnesses=(.50, .56, .62, .68, .74, .80, .86),
+            chromas=(.09, .12, .15, .18),
+        ),
     )
-    goal_colors = oklch_family_palette(
-        ('#E5B65B', '#3C3C24', '#A7611B', '#999B7F', '#5F5F06', '#E3E437', '#DCDEC0'),
-        range(65, 111, 5),
-    )
-    chest_colors = oklch_family_palette(
-        ('#70482F',), range(52, 65, 3),
-        lightnesses=(.34, .40, .46, .52, .58, .64),
-        chromas=(.04, .06, .08, .10),
+    system_chest_color = '#3F2003'
+    chest_colors = (
+        '#5B3A29', '#431804', '#8B4513', '#342018', '#85592E', '#342822',
+        '#685440', '#321414',
+        *oklch_family_palette(
+            (), range(52, 65, 3),
+            lightnesses=(.34, .40, .46, .52, .58, .64, .70),
+            chromas=(.04, .06, .08, .10),
+        ),
     )
     archived_suffix = re.compile(r"^(?P<name>.+?) · прежний (?P<id>[^ ]+)$")
     archived_counts: dict[tuple[str, str], int] = {}
@@ -858,18 +866,9 @@ def period_balance_chart(allocator, allocations):
             # The generated family contains hundreds of shades, so this is a
             # defensive fallback for an unrealistically large single chart.
             return palette[0]
-        if not family_used:
-            color = remaining[0]
-        else:
-            # Farthest-point sampling maximises the weakest OKLab distance for
-            # the actual number of categories instead of exhausting a short
-            # fixed list and jumping to a foreign hue.
-            color = max(
-                remaining,
-                key=lambda candidate: min(
-                    income_color_distance(candidate, used) for used in family_used
-                ),
-            )
+        # The order in the approved palettes is intentional and must remain
+        # stable as values change between reporting periods.
+        color = remaining[0]
         family_used.append(color)
         return color
 
@@ -937,7 +936,7 @@ def period_balance_chart(allocator, allocations):
             shade(category_ids.get(raw_name, identity), life_colors),
         )
     if salary is not None:
-        add('КМ · Зарплата', salary, shade(category_ids.get('Зарплата', 'Зарплата'), life_colors))
+        add('КМ · Зарплата', salary, '#800000')
 
     reserve_items = [
         (str(key)[3:], value)
@@ -972,8 +971,21 @@ def period_balance_chart(allocator, allocations):
         str(key) for key in allocations
         if str(key).startswith('Цели:')
     )
+
+    def goal_sort_key(item):
+        """Keep all Goals and Chests together, ordered by their saved share."""
+        raw_name, value, _ = item
+        match = archived_suffix.match(str(raw_name))
+        base_name = match.group('name') if match else str(raw_name)
+        goal = goal_map.get(base_name)
+        percentage = D(getattr(goal, 'percentage', 0)) if goal is not None else D(0)
+        # Equal shares keep the configured position; an archived/legacy item
+        # without settings follows active positions and is still visible.
+        order = int(getattr(goal, 'order_index', 10 ** 6)) if goal is not None else 10 ** 6
+        return -percentage, order, -D(value), base_name.casefold()
+
     for raw_name, value, recorded_kind in sorted(
-        goal_items, key=lambda item: D(item[1]), reverse=True,
+        goal_items, key=goal_sort_key,
     ):
         clean_name, identity, archived = readable_name(raw_name, 'goal')
         base_name = clean_name.split(' · прежняя позиция', 1)[0]
@@ -988,7 +1000,12 @@ def period_balance_chart(allocator, allocations):
             display += clean_name[len(base_name):]
         palette = chest_colors if is_chest else goal_colors
         identity = getattr(goal, 'uid', '') or identity
-        add(f'Цели и Сундуки · {display}', value, shade(identity, palette))
+        color = (
+            system_chest_color
+            if is_chest and goal is not None and goal.is_system_chest
+            else shade(identity, palette)
+        )
+        add(f'Цели и Сундуки · {display}', value, color)
 
     # Keep future/legacy one-off destinations visible until the presentation
     # layer receives an explicit family for them. Silently omitting a positive

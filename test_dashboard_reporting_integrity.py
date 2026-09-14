@@ -224,11 +224,7 @@ class BalanceChartCompletenessTests(unittest.TestCase):
             sum(values.values(), D("0")),
             D("10") + sum(allocations.values(), D("0")),
         )
-        from income_colors import oklch_family_palette
-        self.assertIn(colors["Бытовой резерв"], set(oklch_family_palette(
-            ("#2E5839", "#429723", "#47A498", "#C3D1AD"),
-            range(120, 181, 5),
-        )))
+        self.assertEqual(colors["Бытовой резерв"], "#9ACD32")
 
 
 class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):
