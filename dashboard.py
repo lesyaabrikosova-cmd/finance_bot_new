@@ -31,7 +31,6 @@ from income_colors import (
     INCOME_COLOR_FAMILIES,
     assign_missing_income_type_colors,
     income_color_name,
-    is_distinct_income_color,
     next_automatic_income_color,
     next_income_color_shade,
     select_income_color,
@@ -2170,15 +2169,20 @@ def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decim
 
 
 def income_analysis_chart_colors(allocator, operations: list[dict]) -> dict[str, str]:
-    """Map labels to colours and validate every visible pair for the chart."""
+    """Map labels to their stable saved colours for the income chart.
+
+    Distinctness is enforced when a colour is assigned.  Revalidating saved
+    colours here used to replace whichever sector happened to come second in
+    ledger order, making a configured colour appear to change between charts.
+    """
     saved_colors = getattr(allocator.settings, "income_type_colors", {}) or {}
     result: dict[str, str] = {}
     used: list[str] = []
     for item in income_analysis_items(allocator, operations):
         saved = saved_colors.get(item["identifier"]) if item["identifier"] else None
-        # Persisted colours are normally already valid.  This final guard also
-        # protects historic records created before colour persistence existed.
-        color = saved if saved and is_distinct_income_color(saved, used) else select_income_color(used)
+        # Historic operations without a persistent type colour still receive a
+        # safe display-only colour.  A saved colour is never substituted here.
+        color = saved or select_income_color(used)
         result[item["display_label"]] = color
         used.append(color)
     return result

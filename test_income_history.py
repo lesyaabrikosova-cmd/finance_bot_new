@@ -343,6 +343,22 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             {"Работа": "#9675E5"},
         )
 
+    def test_chart_never_substitutes_a_saved_income_type_colour(self):
+        allocator = SimpleNamespace(settings=SimpleNamespace(
+            income_type_ids={"Зарплата": "salary", "Avito": "avito"},
+            income_type_labels={"salary": "Зарплата", "avito": "Avito"},
+            # These are deliberately close: a chart must reflect the user's
+            # saved choices instead of replacing the second sector on render.
+            income_type_colors={"salary": "#9675E5", "avito": "#B59AEC"},
+        ))
+        salary, avito = operation(1), operation(2)
+        salary["payload"].update(income_type="Зарплата", income_type_id="salary")
+        avito["payload"].update(income_type="Avito", income_type_id="avito")
+        self.assertEqual(
+            income_analysis_chart_colors(allocator, [avito, salary]),
+            {"Avito": "#B59AEC", "Зарплата": "#9675E5"},
+        )
+
     def test_repeated_base_color_uses_next_free_shade(self):
         allocator = SimpleNamespace(settings=SimpleNamespace(
             income_type_colors={"income-one": "#9675E5"},
