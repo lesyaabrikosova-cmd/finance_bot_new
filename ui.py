@@ -4,7 +4,8 @@ from storage import db
 
 
 def button_text(text: str) -> str:
-    return text
+    """Keep button symbols compact and visually consistent across the bot."""
+    return text.replace("✔️", "✓").replace("✖️", "✕")
 
 
 def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:

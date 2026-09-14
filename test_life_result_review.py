@@ -83,7 +83,7 @@ class LifeResultReviewTests(unittest.IsolatedAsyncioTestCase):
         labels = [button.text for row in markup.inline_keyboard for button in row]
         self.assertIn("<b>АВТОМОБИЛЬ</b>", text)
         self.assertIn("<b>Бензин</b> — 5 000 ₽ / мес.", text)
-        self.assertIn("✔️ Готово", labels)
+        self.assertIn("✓ Готово", labels)
         self.assertNotIn("Общественный транспорт", labels)
         self.assertIn("kmtransport:back", callbacks(markup))
 

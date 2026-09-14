@@ -291,7 +291,7 @@ class TaxFeatureTests(unittest.TestCase):
     def test_onboarding_keyboard_removes_duplicate_callbacks(self):
         markup = keyboard([
             [("Аксессуары", "kmquick:pets:accessories"), ("+ Другое", "kmquick:pets:other")],
-            [("+ Другое", "kmquick:pets:other"), ("✔️ Готово", "km:cancel")],
+            [("+ Другое", "kmquick:pets:other"), ("✓ Готово", "km:cancel")],
         ])
         buttons = [button for row in markup.inline_keyboard for button in row]
         callbacks = [button.callback_data for button in buttons]
