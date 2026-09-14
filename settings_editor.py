@@ -59,6 +59,76 @@ class FinancialArchetypeStates(StatesGroup):
     preview = State()
 
 
+async def show_reserve_balances(message: Message, telegram_id: int) -> None:
+    """Return to the compact reserve-balance menu, not full settings."""
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала создайте профиль через /start.")
+        return
+    rows = [[("Баланс Подушки", "reserves:edit:pillow")]]
+    if allocator.settings.needs_stabilizer:
+        rows.append([("Баланс Стабилизатора", "reserves:edit:stabilizer")])
+    if allocator.profile_id == "cyclic":
+        rows.append([("Баланс Фонда Зарплаты", "reserves:edit:salary_fund")])
+    rows.append([("← Главное меню", "menu:back")])
+    await message.answer(
+        "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
+        "Выберите резерв и укажите, сколько денег в нём сейчас. "
+        "Аллокатор учтёт новую сумму при определении вашего уровня.",
+        reply_markup=keyboard(rows),
+    )
+
+
+async def reserve_balance_exit(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    if data.get("reserve_balance_context") == "reserves":
+        await show_reserve_balances(callback.message, callback.from_user.id)
+    else:
+        await show_settings_actions(callback.message, callback.from_user.id)
+
+
+async def show_reserve_balance_confirmation(
+    message: Message, state: FSMContext, title: str, balance: Decimal, target: Decimal,
+) -> None:
+    data = await state.get_data()
+    context = data.get("reserve_balance_context", "settings")
+    await state.clear()
+    await state.update_data(reserve_balance_context=context)
+    await message.answer(
+        f"<b>{title} ОБНОВЛЁН</b>\n\n"
+        f"Сейчас: <b>{rub(balance)}</b>\n"
+        f"Плановый размер: <b>{rub(target)}</b>",
+        reply_markup=keyboard([
+            [("← Главное меню", "menu:back"), ("✓ Готово", "reserves:done")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.in_({"reserves:cancel", "reserves:done"}))
+async def reserve_balance_finish(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await reserve_balance_exit(callback, state)
+
+
+@router.callback_query(F.data == "reserves:edit:pillow")
+async def reserve_balance_edit_pillow(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(reserve_balance_context="reserves")
+    await edit_pillow(callback, state)
+
+
+@router.callback_query(F.data == "reserves:edit:stabilizer")
+async def reserve_balance_edit_stabilizer(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(reserve_balance_context="reserves")
+    await edit_stabilizer_balance(callback, state)
+
+
+@router.callback_query(F.data == "reserves:edit:salary_fund")
+async def reserve_balance_edit_salary_fund(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(reserve_balance_context="reserves")
+    await edit_intercontract_balance(callback, state)
+
+
 TAX_PROFILE_SUBJECTS = {
     "ip": "ИП",
     "self_employed": "Самозанятость",
@@ -457,6 +527,8 @@ async def save_stabilizer_months_setting(message: Message, state: FSMContext):
 @router.callback_query(F.data == "settings:stabilizer_balance")
 async def edit_stabilizer_balance(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    data = await state.get_data()
+    await state.update_data(reserve_balance_context=data.get("reserve_balance_context", "settings"))
     allocator = db.load_allocator(callback.from_user.id)
     if not allocator.settings.needs_stabilizer:
         await callback.message.answer("Для Стабильного профиля Стабилизатор не используется.")
@@ -470,7 +542,8 @@ async def edit_stabilizer_balance(callback: CallbackQuery, state: FSMContext):
         "<b>Сколько денег сейчас фактически отложено на Стабилизатор в вашем банке?</b>\n"
         "——————\n"
         "<b>→ Введите сумму.</b>\n"
-        "Например: <b>175000</b>"
+        "Например: <b>175000</b>",
+        reply_markup=keyboard([[("← Главное меню", "menu:back"), ("✕ Отмена", "reserves:cancel")]]),
     )
 
 
@@ -483,13 +556,17 @@ async def save_stabilizer_balance(message: Message, state: FSMContext):
     allocator = db.load_allocator(message.from_user.id)
     allocator.state.pillow_stabilizer = value
     db.save_allocator(message.from_user.id, allocator)
-    await state.clear()
-    await show_settings_actions(message, message.from_user.id)
+    await show_reserve_balance_confirmation(
+        message, state, "🛟 БАЛАНС СТАБИЛИЗАТОРА", value,
+        allocator.settings.stabilizer_full_limit,
+    )
 
 
 @router.callback_query(F.data == "settings:intercontract_balance")
 async def edit_intercontract_balance(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    data = await state.get_data()
+    await state.update_data(reserve_balance_context=data.get("reserve_balance_context", "settings"))
     allocator = db.load_allocator(callback.from_user.id)
     if allocator.settings.income_rhythm != "cyclic":
         await callback.message.answer("Фонд Зарплаты используется только в Цикличном (контрактном) профиле.")
@@ -503,7 +580,8 @@ async def edit_intercontract_balance(callback: CallbackQuery, state: FSMContext)
         "<b>Сколько денег сейчас фактически отложено на Фонд Зарплаты в вашем банке?</b>\n"
         "——————\n"
         "<b>→ Введите сумму.</b>\n"
-        "Например: <b>175000</b>"
+        "Например: <b>175000</b>",
+        reply_markup=keyboard([[("← Главное меню", "menu:back"), ("✕ Отмена", "reserves:cancel")]]),
     )
 
 
@@ -519,8 +597,10 @@ async def save_intercontract_balance(message: Message, state: FSMContext):
         return
     allocator.state.intercontract_reserve = value
     db.save_allocator(message.from_user.id, allocator)
-    await state.clear()
-    await show_settings_actions(message, message.from_user.id)
+    await show_reserve_balance_confirmation(
+        message, state, "🏦 БАЛАНС ФОНДА ЗАРПЛАТЫ", value,
+        allocator.settings.intercontract_full_limit,
+    )
 
 
 async def show_planned_payments(message: Message, telegram_id: int):
@@ -1053,6 +1133,8 @@ async def save_full_reset_period_start(
 @router.callback_query(F.data == "settings:pillow")
 async def edit_pillow(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    data = await state.get_data()
+    await state.update_data(reserve_balance_context=data.get("reserve_balance_context", "settings"))
     allocator = db.load_allocator(callback.from_user.id)
     has_active_debt = any(credit.active for credit in allocator.settings.credits)
     target = (
@@ -1070,7 +1152,8 @@ async def edit_pillow(callback: CallbackQuery, state: FSMContext):
         "<b>Сколько денег сейчас фактически отложено на Подушку в вашем банке?</b>\n"
         "——————\n"
         "<b>→ Введите сумму.</b>\n"
-        "Например: <b>175000</b>"
+        "Например: <b>175000</b>",
+        reply_markup=keyboard([[("← Главное меню", "menu:back"), ("✕ Отмена", "reserves:cancel")]]),
     )
 
 @router.message(EditSettingsStates.pillow)
@@ -1082,8 +1165,14 @@ async def save_pillow(message: Message, state: FSMContext):
     allocator = db.load_allocator(message.from_user.id)
     distribute_existing_pillow(allocator, value)
     db.save_allocator(message.from_user.id, allocator)
-    await state.clear()
-    await message.answer(f"✅ Подушка обновлена: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
+    target = (
+        allocator.settings.minimum_reserve_limit
+        if any(credit.active for credit in allocator.settings.credits)
+        else allocator.settings.force_majeure_limit
+    )
+    await show_reserve_balance_confirmation(
+        message, state, "🛡️ БАЛАНС ПОДУШКИ", value, target,
+    )
 
 @router.callback_query(F.data == "settings:critical")
 async def edit_critical(callback: CallbackQuery, state: FSMContext):

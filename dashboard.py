@@ -2711,11 +2711,11 @@ async def menu_reserves(callback: CallbackQuery):
     if allocator is None:
         await callback.message.answer("Сначала создайте профиль через /start.")
         return
-    rows = [[("Баланс Подушки", "settings:pillow")]]
+    rows = [[("Баланс Подушки", "reserves:edit:pillow")]]
     if allocator.settings.needs_stabilizer:
-        rows.append([("Баланс Стабилизатора", "settings:stabilizer_balance")])
+        rows.append([("Баланс Стабилизатора", "reserves:edit:stabilizer")])
     if allocator.profile_id == "cyclic":
-        rows.append([("Баланс Фонда Зарплаты", "settings:intercontract_balance")])
+        rows.append([("Баланс Фонда Зарплаты", "reserves:edit:salary_fund")])
     rows.append([("← Главное меню", "menu:back")])
     await callback.message.answer(
         "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
