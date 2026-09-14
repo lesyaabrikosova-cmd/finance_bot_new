@@ -33,6 +33,19 @@ class ReserveCardTests(unittest.TestCase):
             rgb = tuple(bytes.fromhex(color[1:]))
             self.assertIn(rgb, colors)
 
+    def test_upper_stabilizer_level_is_clipped_to_the_vessel_shape(self):
+        from PIL import Image
+        data = render_reserve_card(
+            "piecework", pillow_balance=D("0"), pillow_target=D("100"),
+            stabilizer_balance=D("100"), stabilizer_critical_target=D("40"), stabilizer_full_target=D("100"),
+        )
+        image = Image.open(BytesIO(data))
+        light_blue = tuple(bytes.fromhex("4E77F9"))
+        # The top-left corner of the inner rounded vessel is outside its mask;
+        # a rectangular second level must never leak into that point.
+        self.assertNotEqual(image.getpixel((667, 257)), light_blue)
+        self.assertEqual(image.getpixel((740, 270)), light_blue)
+
 
 if __name__ == "__main__":
     unittest.main()
