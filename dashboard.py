@@ -793,7 +793,7 @@ def period_balance_chart(allocator, allocations):
     # The period chart contains one actual Fund Salary flow.  It uses the KМ
     # colour; #A9A9A9 is reserved for a future separate УЖ flow.
     salary_fund_colors = ('#393939', '#A9A9A9')
-    bracket_reserve_colors = ('#008080', '#000080', '#006400')
+    bracket_reserve_colors = ('#008080', '#4E77F9', '#87CEEB')
     debt_colors = oklch_family_palette(
         ('#573410', '#BC3F06', '#F6802C', '#E1C5A8'), range(30, 71, 5),
     )
@@ -806,7 +806,7 @@ def period_balance_chart(allocator, allocations):
             chromas=(.11, .14, .17, .20),
         ),
     )
-    household_reserve_colors = ('#9ACD32',)
+    household_reserve_colors = ('#006400',)
     goal_colors = (
         '#FFB02E', '#FFF44F', '#D6AE01', '#FFFF99', '#E6CE2D', '#E28B00',
         '#FFEBB7', '#BAAA36', '#FFF5A5',
