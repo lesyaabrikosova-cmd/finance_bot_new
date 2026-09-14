@@ -66,6 +66,7 @@ from settings_editor import (
 )
 
 from dashboard import (
+    main_menu_title,
     router as dashboard_router,
 )
 
@@ -175,8 +176,7 @@ async def command_menu(
         return
 
     await message.answer(
-        "🧪 <b>ФИНАНСОВЫЙ АЛЛОКАТОР</b>\n\n"
-        "Что хотите сделать?",
+        main_menu_title(message.from_user.id),
         reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
@@ -667,8 +667,7 @@ async def menu_back(
     await state.clear()
 
     await callback.message.answer(
-        "🧪 <b>ФИНАНСОВЫЙ АЛЛОКАТОР</b>\n\n"
-        "Выберите действие.",
+        main_menu_title(callback.from_user.id),
         reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 

@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, FSInputFile
 
+from archetypes import ARCHETYPES
 from financial_engine import (
     MODE_NAMES,
     MODE_TITLES,
@@ -438,6 +439,11 @@ def get_period_allocations(
 # ГЛАВНОЕ МЕНЮ
 # ============================================================
 
+def main_menu_title(telegram_id: int) -> str:
+    archetype = ARCHETYPES.get(db.get_financial_archetype(telegram_id) or "")
+    prefix = f"{archetype.emoji} " if archetype else ""
+    return f"<b>{prefix}ГЛАВНОЕ МЕНЮ</b>"
+
 async def show_menu(
     message: Message,
     state: FSMContext,
@@ -459,7 +465,7 @@ async def show_menu(
         return
 
     await message.answer(
-        "<b>ГЛАВНОЕ МЕНЮ</b>",
+        main_menu_title(message.from_user.id),
         reply_markup=main_menu_keyboard(message.from_user.id),
     )
 
@@ -491,7 +497,7 @@ async def menu_back(
     await state.clear()
 
     await callback.message.answer(
-        "<b>ГЛАВНОЕ МЕНЮ</b>",
+        main_menu_title(callback.from_user.id),
         reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 

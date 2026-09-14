@@ -7,8 +7,9 @@ from html import escape
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
+from archetypes import ARCHETYPES, ARCHETYPE_ROWS
 from financial_engine import goal_display_name, is_system_envelope_name
 from storage import db
 from time_utils import moscow_now
@@ -51,6 +52,10 @@ class EditSettingsStates(StatesGroup):
     goal_percentages = State()
     c_split = State()
     full_reset_period_start = State()
+
+
+class FinancialArchetypeStates(StatesGroup):
+    preview = State()
 
 
 TAX_PROFILE_SUBJECTS = {
@@ -139,6 +144,48 @@ def distribute_existing_pillow(allocator, total: Decimal) -> None:
 
     st.pillow_force_majeure = remaining
 
+
+ARCHETYPE_INTRO = (
+    "<b>ФИНАНСОВЫЙ АРХЕТИП</b>\n\n"
+    "Выберите животное, которое сейчас лучше всего описывает ваш финансовый характер.\n\n"
+    "Это лёгкая самооценка для настроения — она не влияет на расчёты и финансовые рекомендации."
+)
+
+
+def archetype_keyboard():
+    rows = [
+        [(ARCHETYPES[slug].emoji, f"archetype:select:{slug}") for slug in row]
+        for row in ARCHETYPE_ROWS
+    ]
+    rows.extend([
+        [("Без архетипа", "archetype:none")],
+        [("← Настройки", "archetype:back"), ("✓ Готово", "archetype:done")],
+    ])
+    return keyboard(rows)
+
+
+async def show_archetype_card(message: Message, slug: str, *, replace: bool) -> None:
+    """Show a locally bundled preview; the slug has already been whitelisted."""
+    archetype = ARCHETYPES[slug]
+    media = InputMediaPhoto(
+        media=FSInputFile(archetype.image_path),
+        caption=archetype.caption(),
+    )
+    if replace:
+        await message.edit_media(media=media, reply_markup=archetype_keyboard())
+    else:
+        await message.answer_photo(
+            photo=FSInputFile(archetype.image_path),
+            caption=archetype.caption(),
+            reply_markup=archetype_keyboard(),
+        )
+
+
+async def return_to_settings(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.message.delete()
+    await show_settings_menu(callback.message, callback.from_user.id)
+
 async def show_settings_menu(message: Message, telegram_id: int):
     allocator = db.load_allocator(telegram_id)
     if allocator is None:
@@ -163,8 +210,12 @@ async def show_settings_menu(message: Message, telegram_id: int):
     rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Циклический"}
     active_debts = [credit for credit in s.credits if credit.active]
     reward = "🏆" * allocator.active_mode() + "➖" * (allocator.profile_mode_total - allocator.active_mode())
+    archetype_slug = db.get_financial_archetype(telegram_id)
+    archetype = ARCHETYPES.get(archetype_slug or "")
+    archetype_label = archetype.display_name if archetype else "не выбран"
     lines = ["<b>НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ</b>", "",
              f"Профиль: {rhythm_labels.get(s.income_rhythm, s.income_rhythm)}",
+             f"Архетип: {archetype_label}",
              f"Уровень: {reward}", ""]
     if not active_debts:
         lines.extend(["Долгов нет.", ""])
@@ -232,6 +283,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         "\n".join(lines),
         reply_markup=keyboard([
             [(f"Профиль: { {'stable': 'Стабильный', 'piecework': 'Сдельный', 'cyclic': 'Циклический'}.get(allocator.profile_id, allocator.profile_id)}", "settings:rhythm")],
+            [("Выбрать финансовый архетип", "settings:archetype")],
             [("Средний доход", "settings:income"), ("Типы доходов", "settings:income_types")],
             [("Настройки Подушки", "settings:force_months")],
             [("Баланс Подушки", "settings:pillow")],
@@ -256,6 +308,58 @@ async def show_settings_menu(message: Message, telegram_id: int):
             [("⬅️ Главное меню", "menu:back")],
         ]),
     )
+
+
+@router.callback_query(F.data == "settings:archetype")
+async def open_archetype_picker(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(FinancialArchetypeStates.preview)
+    await state.update_data(archetype_preview=None)
+    await callback.message.edit_text(ARCHETYPE_INTRO, reply_markup=archetype_keyboard())
+
+
+@router.callback_query(F.data.startswith("archetype:select:"))
+async def preview_archetype(callback: CallbackQuery, state: FSMContext):
+    slug = callback.data.rsplit(":", 1)[-1]
+    if slug not in ARCHETYPES:
+        await callback.answer("Такого архетипа нет.", show_alert=True)
+        return
+    await callback.answer()
+
+    await state.set_state(FinancialArchetypeStates.preview)
+    await state.update_data(archetype_preview=slug)
+    if callback.message.photo:
+        await show_archetype_card(callback.message, slug, replace=True)
+        return
+
+    await callback.message.delete()
+    await show_archetype_card(callback.message, slug, replace=False)
+
+
+@router.callback_query(F.data == "archetype:done")
+async def save_archetype(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    slug = data.get("archetype_preview")
+    if slug not in ARCHETYPES:
+        await callback.answer("Сначала выберите архетип.", show_alert=True)
+        return
+
+    await callback.answer()
+    db.set_financial_archetype(callback.from_user.id, slug)
+    await return_to_settings(callback, state)
+
+
+@router.callback_query(F.data == "archetype:none")
+async def clear_archetype(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    db.set_financial_archetype(callback.from_user.id, None)
+    await return_to_settings(callback, state)
+
+
+@router.callback_query(F.data == "archetype:back")
+async def archetype_back(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await return_to_settings(callback, state)
 
 
 @router.callback_query(F.data == "settings:force_months")

@@ -546,6 +546,28 @@ class Database:
             """
         )
 
+        # Необязательные предпочтения, которые не участвуют в финансовом
+        # алгоритме. Отделяем их от settings, чтобы смена архетипа не
+        # перезаписывала цели, кредиты и остальные настройки аллокатора.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                telegram_id INTEGER PRIMARY KEY,
+                financial_archetype TEXT,
+                updated_at TEXT NOT NULL,
+                CHECK (
+                    financial_archetype IS NULL OR financial_archetype IN (
+                        'bull', 'bear', 'whale', 'shark', 'wolf', 'sheep',
+                        'pig', 'rabbit', 'turtle', 'hamster', 'ostrich', 'moose'
+                    )
+                ),
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
         # ----------------------------------------------------
         # Цели
         # ----------------------------------------------------
@@ -1135,6 +1157,33 @@ class Database:
         ).fetchone()
 
         return row is not None
+
+    def get_financial_archetype(self, telegram_id: int) -> str | None:
+        """Return the saved archetype slug, if the user has chosen one."""
+        row = self.connection.execute(
+            "SELECT financial_archetype FROM user_preferences WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+        return None if row is None else row["financial_archetype"]
+
+    def set_financial_archetype(
+        self,
+        telegram_id: int,
+        archetype: str | None,
+    ) -> None:
+        """Persist a validated archetype choice without touching finances."""
+        self.ensure_user(telegram_id)
+        self.connection.execute(
+            """
+            INSERT INTO user_preferences (telegram_id, financial_archetype, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                financial_archetype = excluded.financial_archetype,
+                updated_at = excluded.updated_at
+            """,
+            (telegram_id, archetype, datetime.utcnow().isoformat()),
+        )
+        self._commit()
 
     def due_period_reminders(self, today: str) -> list[tuple[int, str]]:
         rows = self.connection.execute(
