@@ -20,7 +20,7 @@ from financial_engine import (
     goal_display_name,
 )
 from storage import db
-from ui import keyboard, main_menu_keyboard
+from ui import keyboard, main_menu_keyboard, reserve_fraction
 from mode_presentation import mode_image_path
 from charts import send_chart_report
 from taxes import (
@@ -1100,13 +1100,10 @@ def period_balance_fallback_text(
     if allocator.settings.developer_mode:
         lines.extend([
             '',
-            '<b>ЗАЩИТНЫЕ РЕЗЕРВЫ — УРОВЕНЬ РАЗРАБОТЧИКА</b>',
-            f"МП: {rub(allocator.state.pillow_minimum)} / "
-            f"{rub(allocator.settings.minimum_reserve_limit)}",
-            f"ФМ: {rub(allocator.state.pillow_force_majeure)} / "
-            f"{rub(allocator.settings.force_majeure_limit)}",
-            f"Стабилизатор дохода: {rub(allocator.state.pillow_stabilizer)} / "
-            f"{rub(allocator.settings.stabilizer_full_limit)}",
+            '<b>ЗАЩИТНЫЕ РЕЗЕРВЫ — РЕЖИМ РАЗРАБОТЧИКА</b>',
+            f"МП: {reserve_fraction(rub(allocator.state.pillow_minimum), rub(allocator.settings.minimum_reserve_limit))}",
+            f"ФМ: {reserve_fraction(rub(allocator.state.pillow_force_majeure), rub(allocator.settings.force_majeure_limit))}",
+            f"Стабилизатор дохода: {reserve_fraction(rub(allocator.state.pillow_stabilizer), rub(allocator.settings.stabilizer_full_limit))}",
         ])
     return '\n'.join(lines)
 

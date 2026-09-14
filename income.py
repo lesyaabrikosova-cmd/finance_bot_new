@@ -32,7 +32,7 @@ from financial_engine import (
 
 from storage import db
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
-from ui import main_menu_keyboard, button_text
+from ui import main_menu_keyboard, button_text, reserve_fraction
 from taxes import (
     apply_planned_tax_allocation,
     compact_income_tax_profile,
@@ -2297,11 +2297,11 @@ async def send_distribution_report(
         f"➤ До <b>Устойчив. жизни</b> — {money_plain(sustainable_remaining)}",
         "",
         *([f"🏦 <b>Фонд Зарплаты</b> — {money_plain(state.intercontract_reserve)}"] if settings.income_rhythm == "cyclic" else []),
-        f"🛡️ <b>Подушка</b> — {money_plain(state.pillow_balance)} / {pillow_limit}",
+        f"🛡️ <b>Подушка</b> — {reserve_fraction(money_plain(state.pillow_balance), pillow_limit)}",
         *(
             [
                 "🛟 <b>Стабилизатор</b> — "
-                f"{money_plain(state.stabilizer_balance)} / {stabilizer_limit}"
+                + reserve_fraction(money_plain(state.stabilizer_balance), stabilizer_limit)
             ]
             if settings.needs_stabilizer else []
         ),
@@ -2315,7 +2315,7 @@ async def send_distribution_report(
     ]
 
     # ========================================================
-    # УРОВЕНЬ РАЗРАБОТЧИКА
+    # РЕЖИМ РАЗРАБОТЧИКА
     # ========================================================
 
     if developer_mode:
@@ -2323,7 +2323,7 @@ async def send_distribution_report(
         check = result.checks
 
         developer_lines = [
-            "<b>РАСЧЁТ — УРОВЕНЬ РАЗРАБОТЧИКА</b>",
+            "<b>РАСЧЁТ — РЕЖИМ РАЗРАБОТЧИКА</b>",
             "",
             f"Контрольная сумма: "
             f"{rub(check['total'])}",

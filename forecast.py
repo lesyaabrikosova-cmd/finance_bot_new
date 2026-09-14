@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, Message
 
 from financial_engine import FinancialAllocator, MODE_NAMES, fmt_money, goal_display_name
 from storage import db
-from ui import keyboard, main_menu_keyboard
+from ui import keyboard, main_menu_keyboard, reserve_fraction
 
 
 router = Router()
@@ -178,19 +178,16 @@ async def render_forecast(message: Message, state: FSMContext, months: Decimal |
                   f"➤ До <b>Критич. минимума</b> — {rub_plain(critical)}",
                   f"➤ До <b>Устойч. жизни</b> — {rub_plain(sustainable)}", "",
                   "🛡️ Подушка — "
-                  f"<b>{rub_plain(simulated.state.pillow_balance)} / "
-                  f"{rub_plain(simulated.settings.force_majeure_limit)}</b>"])
+                  f"<b>{reserve_fraction(rub_plain(simulated.state.pillow_balance), rub_plain(simulated.settings.force_majeure_limit))}</b>"])
     if simulated.settings.needs_stabilizer:
         lines.append(
             "🛟 Стабилизатор — "
-            f"<b>{rub_plain(simulated.state.stabilizer_balance)} / "
-            f"{rub_plain(simulated.settings.stabilizer_full_limit)}</b>"
+            f"<b>{reserve_fraction(rub_plain(simulated.state.stabilizer_balance), rub_plain(simulated.settings.stabilizer_full_limit))}</b>"
         )
     if simulated.profile_id == "cyclic":
         lines.append(
             "🏦 Фонд Зарплаты — "
-            f"<b>{rub_plain(simulated.state.intercontract_reserve)} / "
-            f"{rub_plain(simulated.intercontract_current_limit)}</b>"
+            f"<b>{reserve_fraction(rub_plain(simulated.state.intercontract_reserve), rub_plain(simulated.intercontract_current_limit))}</b>"
         )
     await state.clear()
     await message.answer(

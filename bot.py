@@ -83,6 +83,7 @@ from health_server import start_health_server
 from ui import (
     keyboard,
     main_menu_keyboard,
+    reserve_fraction,
 )
 
 from storage import db
@@ -343,24 +344,13 @@ async def send_state(
         text += (
             "\n\n🛠 <b>ЗАЩИТНЫЕ РЕЗЕРВЫ</b>\n\n"
 
-            f"Минимальная: "
-            f"{fmt_money(state.pillow_minimum)} ₽ "
-            f"/ "
-            f"{fmt_money(settings.minimum_reserve_limit)} ₽\n"
+            f"Минимальная: {reserve_fraction(f'{fmt_money(state.pillow_minimum)} ₽', f'{fmt_money(settings.minimum_reserve_limit)} ₽')}\n"
 
-            f"Фонд Зарплаты: "
-            f"{fmt_money(state.intercontract_reserve)} ₽ / "
-            f"{fmt_money(settings.intercontract_full_limit)} ₽\n"
+            f"Фонд Зарплаты: {reserve_fraction(f'{fmt_money(state.intercontract_reserve)} ₽', f'{fmt_money(settings.intercontract_full_limit)} ₽')}\n"
 
-            f"Форс-мажорная: "
-            f"{fmt_money(state.pillow_force_majeure)} ₽ "
-            f"/ "
-            f"{fmt_money(settings.force_majeure_limit)} ₽\n"
+            f"Форс-мажорная: {reserve_fraction(f'{fmt_money(state.pillow_force_majeure)} ₽', f'{fmt_money(settings.force_majeure_limit)} ₽')}\n"
 
-            f"Стабилизатор дохода: "
-            f"{fmt_money(state.pillow_stabilizer)} ₽ "
-            f"/ "
-            f"{fmt_money(settings.stabilizer_full_limit)} ₽"
+            f"Стабилизатор дохода: {reserve_fraction(f'{fmt_money(state.pillow_stabilizer)} ₽', f'{fmt_money(settings.stabilizer_full_limit)} ₽')}"
         )
 
     await message.answer(

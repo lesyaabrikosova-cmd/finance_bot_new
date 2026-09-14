@@ -37,7 +37,7 @@ from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currenc
 
 from storage import db
 from time_utils import moscow_today
-from ui import main_menu_keyboard, button_text
+from ui import main_menu_keyboard, button_text, reserve_fraction
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 
 
@@ -7166,7 +7166,7 @@ async def save_interest_savings(
 
 
 # ============================================================
-# УРОВЕНЬ РАЗРАБОТЧИКА
+# РЕЖИМ РАЗРАБОТЧИКА
 # ============================================================
 
 
@@ -7180,7 +7180,7 @@ async def ask_developer_mode(
     )
 
     await message.answer(
-        "🛠 <b>Уровень разработчика</b>\n\n"
+        "🛠 <b>Режим разработчика</b>\n\n"
 
         "Обычному пользователю он не нужен.\n\n"
 
@@ -7203,7 +7203,7 @@ async def ask_developer_mode(
             ],
             [
                 (
-                    "🛠 Уровень разработчика",
+                    "🛠 Режим разработчика",
                     "developer:yes",
                 )
             ],
@@ -9149,8 +9149,7 @@ async def show_confirmation(
             f"➖ <b>Текущая фаза</b> — {phase_name}\n"
             f"{phase_remaining}\n\n"
             f"➖ <b>Обязательства на время контракта</b> — {rub(settings.contract_obligations_total)}\n\n"
-            f"➖ <b>Фонд Зарплаты сейчас</b> — {rub(state_object.intercontract_reserve)} / "
-            f"{rub(allocator.intercontract_current_limit)}\n\n"
+            f"➖ <b>Фонд Зарплаты сейчас</b> — {reserve_fraction(rub(state_object.intercontract_reserve), rub(allocator.intercontract_current_limit))}\n\n"
             f"➖ <b>Стабилизатор</b> — {settings.stabilizer_target_months} мес.\n\n"
         )
 

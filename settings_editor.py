@@ -13,7 +13,7 @@ from archetypes import ARCHETYPES, ARCHETYPE_ROWS
 from financial_engine import goal_display_name, is_system_envelope_name
 from storage import db
 from time_utils import moscow_now
-from ui import keyboard, main_menu_keyboard
+from ui import keyboard, main_menu_keyboard, reserve_fraction
 from taxes import (
     PSN_PLAN_RULE,
     compact_income_tax_profile,
@@ -202,9 +202,9 @@ async def show_settings_menu(message: Message, telegram_id: int):
     )
 
     dev_button = (
-        "🛠 Выключить уровень разработчика"
+        "🛠 Выключить режим разработчика"
         if s.developer_mode
-        else "🛠 Включить уровень разработчика"
+        else "🛠 Включить режим разработчика"
     )
 
     rhythm_labels = {"monthly": "Стабильный", "irregular": "Сдельный", "cyclic": "Циклический"}
@@ -243,14 +243,14 @@ async def show_settings_menu(message: Message, telegram_id: int):
     lines.append("————————————")
     if s.income_rhythm == "cyclic":
         lines.extend([f"🏦 <b>Фонд Зарплаты</b> • {s.income_gap_months} мес •",
-                      f"{fmt_money(st.intercontract_reserve)} / {fmt_money(allocator.intercontract_current_limit)}", ""])
+                      reserve_fraction(fmt_money(st.intercontract_reserve), fmt_money(allocator.intercontract_current_limit)), ""])
     lines.extend([f"🛡️ <b>Подушка</b> • {s.force_majeure_months} мес •",
-                  f"{fmt_money(st.pillow_balance)} / {fmt_money(s.force_majeure_limit)}"])
+                  reserve_fraction(fmt_money(st.pillow_balance), fmt_money(s.force_majeure_limit))])
     if s.needs_stabilizer:
         lines.extend([
             "",
             f"🛟 <b>Стабилизатор</b> • {s.stabilizer_target_months} мес •",
-            f"{fmt_money(st.stabilizer_balance)} / {fmt_money(s.stabilizer_full_limit)}",
+            reserve_fraction(fmt_money(st.stabilizer_balance), fmt_money(s.stabilizer_full_limit)),
         ])
     lines.extend(["————————————", "<b>КАТЕГОРИИ ЖИЗНИ</b>"])
     for name, amount in s.life_categories.items():
@@ -276,7 +276,7 @@ async def show_settings_menu(message: Message, telegram_id: int):
         "————————————",
         f"<b>Бракеты</b>: {s.bracket_a}% / {s.bracket_b}% / {s.bracket_c}% / {s.bracket_d}%",
         "",
-        f"<b>🛠 Уровень разработчика:</b> {dev_status}",
+        f"<b>🛠 Режим разработчика:</b> {dev_status}",
     ])
 
     await message.answer(
@@ -297,9 +297,9 @@ async def show_settings_actions(message: Message, telegram_id: int):
 
     s = allocator.settings
     dev_button = (
-        "🛠 Выключить уровень разработчика"
+        "🛠 Выключить режим разработчика"
         if s.developer_mode
-        else "🛠 Включить уровень разработчика"
+        else "🛠 Включить режим разработчика"
     )
     await message.answer(
         "<b>НАСТРОЙКИ</b>\n\nВыберите, что хотите изменить.",
@@ -804,7 +804,7 @@ async def toggle_developer(
     )
 
     await callback.message.answer(
-        f"✅ Уровень разработчика {status}."
+        f"✅ Режим разработчика {status}."
     )
 
     await show_settings_actions(

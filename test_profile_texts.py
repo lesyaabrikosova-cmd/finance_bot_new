@@ -9,6 +9,7 @@ from income import fmt_money, send_distribution_report
 from onboarding import start_first_allocation, first_allocation_preview_text, financial_opportunities_text
 from settings_editor import show_settings_actions, show_settings_menu
 from period import show_new_period_confirmation
+from ui import reserve_fraction
 
 
 def make_allocator(profile, developer=False):
@@ -98,16 +99,14 @@ class ProfileTextTests(unittest.IsolatedAsyncioTestCase):
                 text = "\n".join(photo.await_args.args[2])
                 self.assertEqual("Фонд Зарплаты" in text, profile == "cyclic")
                 self.assertIn(
-                    f"🛡️ <b>Подушка</b> — {fmt_money(a.state.pillow_balance)} / "
-                    f"{fmt_money(a.settings.force_majeure_limit)}",
+                    f"🛡️ <b>Подушка</b> — {reserve_fraction(fmt_money(a.state.pillow_balance), fmt_money(a.settings.force_majeure_limit))}",
                     text,
                 )
                 if profile == "stable":
                     self.assertNotIn("Стабилизатор", text)
                 else:
                     self.assertIn(
-                        f"🛟 <b>Стабилизатор</b> — {fmt_money(a.state.stabilizer_balance)} / "
-                        f"{fmt_money(a.settings.stabilizer_full_limit)}",
+                        f"🛟 <b>Стабилизатор</b> — {reserve_fraction(fmt_money(a.state.stabilizer_balance), fmt_money(a.settings.stabilizer_full_limit))}",
                         text,
                     )
 

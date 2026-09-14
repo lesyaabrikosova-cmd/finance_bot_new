@@ -8,6 +8,13 @@ def button_text(text: str) -> str:
     return text.replace("✔️", "✓").replace("✖️", "✕")
 
 
+def reserve_fraction(current: str, limit: str) -> str:
+    """Render reserve progress without Telegram detecting the amounts as a phone link."""
+    safe_current = current.replace(" ", "\u200b ")
+    safe_limit = limit.replace(" ", "\u200b ")
+    return f"{safe_current} / {safe_limit}"
+
+
 def keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
