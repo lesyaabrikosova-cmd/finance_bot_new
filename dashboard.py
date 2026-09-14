@@ -2720,18 +2720,26 @@ async def menu_reserves(callback: CallbackQuery):
         rows.append([("Баланс Фонда Зарплаты", "reserves:edit:salary_fund")])
     rows.append([("← Главное меню", "menu:back")])
     settings, state = allocator.settings, allocator.state
+    debt_level_one = (
+        any(credit.active for credit in settings.credits)
+        and allocator.active_mode() == 1
+    )
+    card_profile_id = "debt_level_one" if debt_level_one else allocator.profile_id
     try:
         image = await asyncio.to_thread(
             render_reserve_card,
-            allocator.profile_id,
+            card_profile_id,
             pillow_balance=allocator.pillow_total_balance,
-            pillow_target=settings.force_majeure_limit,
+            pillow_target=(settings.minimum_reserve_limit if debt_level_one else settings.force_majeure_limit),
             stabilizer_balance=state.pillow_stabilizer,
             stabilizer_critical_target=settings.stabilizer_life_limit,
             stabilizer_full_target=settings.stabilizer_full_limit,
             salary_fund_balance=state.intercontract_reserve,
             salary_fund_critical_target=allocator.intercontract_current_life_limit,
             salary_fund_full_target=allocator.intercontract_current_limit,
+            stabilizer_months=settings.stabilizer_months,
+            salary_fund_months=settings.income_gap_months,
+            pillow_months=(settings.minimum_reserve_months if debt_level_one else settings.force_majeure_months),
         )
         await callback.message.answer_photo(
             BufferedInputFile(image, filename="reserves.png"),

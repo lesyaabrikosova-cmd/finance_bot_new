@@ -24,6 +24,46 @@ def _money(value: Decimal) -> str:
     return f"{amount} ₽"
 
 
+def _covered_months(balance: Decimal, reserve_target: Decimal, target_months: Decimal) -> int:
+    """Return whole months the current balance covers at this reserve level."""
+    reserve_target = Decimal(reserve_target)
+    target_months = Decimal(target_months)
+    if reserve_target <= 0 or target_months <= 0:
+        return 0
+    monthly_amount = reserve_target / target_months
+    return max(0, int(Decimal(balance) // monthly_amount))
+
+
+def reserve_legend_items(*, stabilizer_balance: Decimal, stabilizer_critical_target: Decimal,
+                         stabilizer_full_target: Decimal, stabilizer_months: Decimal,
+                         salary_fund_balance: Decimal, salary_fund_critical_target: Decimal,
+                         salary_fund_full_target: Decimal, salary_fund_months: Decimal,
+                         pillow_balance: Decimal = Decimal("0"), pillow_target: Decimal = Decimal("0"),
+                         pillow_months: Decimal = Decimal("0"),
+                         pillow_legend_label: str = "Форс-мажор"):
+    """Return current coverage for every reserve level the user has configured."""
+    # The order is also the visual hierarchy in the two-column legend:
+    # light (УЖ) levels on top, dark (КМ) levels underneath; salary fund on
+    # the left, stabilizer on the right. Items are permanent, not milestones.
+    items = []
+    if pillow_target > 0:
+        months = _covered_months(pillow_balance, pillow_target, pillow_months)
+        items.append(("#008080", f"{pillow_legend_label} — хватит на {months} мес"))
+    if salary_fund_full_target > 0:
+        months = _covered_months(salary_fund_balance, salary_fund_full_target, salary_fund_months)
+        items.append(("#A9A9A9", f"Бытовой резерв — хватит на {months} мес"))
+    if stabilizer_full_target > 0:
+        months = _covered_months(stabilizer_balance, stabilizer_full_target, stabilizer_months)
+        items.append(("#4E77F9", f"Бытовой резерв — хватит на {months} мес"))
+    if salary_fund_critical_target > 0:
+        months = _covered_months(salary_fund_balance, salary_fund_critical_target, salary_fund_months)
+        items.append(("#393939", f"Критический Минимум — хватит на {months} мес"))
+    if stabilizer_critical_target > 0:
+        months = _covered_months(stabilizer_balance, stabilizer_critical_target, stabilizer_months)
+        items.append(("#000080", f"Критический Минимум — хватит на {months} мес"))
+    return items
+
+
 def _clamp(value: Decimal, maximum: Decimal) -> Decimal:
     if maximum <= 0:
         return Decimal("0")
@@ -73,33 +113,26 @@ def _shape_masks(shape: str, *, x: int, top: int, bottom: int, width: int, image
                                (x - 55, top + 88), inner_crest)
         inner_draw.polygon(inner_points, fill=255)
     elif shape == "flask":
-        # Laboratory flask: a long narrow neck and a genuinely round bulb.
+        # Florence flask: a long narrow neck joined to a geometrically round
+        # bulb. The bulb diameter is capped by the available vertical space so
+        # widening the two-vessel layout cannot stretch it into an oval.
         neck = max(34, width // 7)
         lip = neck + 11
+        bulb_radius = min(width // 2, (bottom - top - 170) // 2)
+        bulb_top = bottom - bulb_radius * 2
+        bulb_center_y = bottom - bulb_radius
         outer_draw.rounded_rectangle((x - lip, top, x + lip, top + 28), radius=9, fill=255)
-        flask_points = [(x - neck, top + 18), (x - neck, top + 168)]
-        flask_points += _cubic((x - neck, top + 168), (x - neck - 3, top + 214),
-                               (left + 8, top + 230), (left + 3, top + 315))
-        flask_points += _cubic((left + 3, top + 315), (left - 5, bottom - 74),
-                               (x - 77, bottom), (x, bottom))
-        flask_points += _cubic((x, bottom), (x + 77, bottom), (right + 5, bottom - 74),
-                               (right - 3, top + 315))
-        flask_points += _cubic((right - 3, top + 315), (right - 8, top + 230),
-                               (x + neck + 3, top + 214), (x + neck, top + 168))
-        flask_points += [(x + neck, top + 18)]
-        outer_draw.polygon(flask_points, fill=255)
+        outer_draw.rectangle((x - neck, top + 18, x + neck, bulb_center_y), fill=255)
+        outer_draw.ellipse((x - bulb_radius, bulb_top, x + bulb_radius, bottom), fill=255)
         inner_neck = neck - 11
-        inner_points = [(x - inner_neck, top + 31), (x - inner_neck, top + 169)]
-        inner_points += _cubic((x - inner_neck, top + 169), (x - inner_neck, top + 210),
-                               (left + 22, top + 244), (left + 18, top + 319))
-        inner_points += _cubic((left + 18, top + 319), (left + 13, bottom - 78),
-                               (x - 69, bottom - 14), (x, bottom - 14))
-        inner_points += _cubic((x, bottom - 14), (x + 69, bottom - 14),
-                               (right - 13, bottom - 78), (right - 18, top + 319))
-        inner_points += _cubic((right - 18, top + 319), (right - 22, top + 244),
-                               (x + inner_neck, top + 210), (x + inner_neck, top + 169))
-        inner_points += [(x + inner_neck, top + 31)]
-        inner_draw.polygon(inner_points, fill=255)
+        inner_radius = bulb_radius - 14
+        inner_bulb_top = bottom - 14 - inner_radius * 2
+        inner_center_y = bottom - 14 - inner_radius
+        inner_draw.rectangle((x - inner_neck, top + 31, x + inner_neck, inner_center_y), fill=255)
+        inner_draw.ellipse(
+            (x - inner_radius, inner_bulb_top, x + inner_radius, bottom - 14),
+            fill=255,
+        )
     elif shape == "jar":
         # A wide mouth and straight storage-jar body.
         neck = width // 2 - 8
@@ -117,6 +150,37 @@ def _shape_masks(shape: str, *, x: int, top: int, bottom: int, width: int, image
     return outer, inner
 
 
+def _fill_top_for_fraction(mask, fraction: Decimal) -> int:
+    """Find the liquid surface whose filled mask area matches ``fraction``.
+
+    A vessel is not a rectangle: the same vertical step can represent very
+    different amounts in a wide bulb and in a narrow neck. Counting the
+    silhouette pixels makes the displayed percentage proportional to the
+    vessel's visible capacity instead of its height.
+    """
+    bounds = mask.getbbox()
+    if bounds is None:
+        return 0
+    left, top, right, bottom = bounds
+    fraction = min(max(Decimal("0"), Decimal(fraction)), Decimal("1"))
+    if fraction <= 0:
+        return bottom
+    if fraction >= 1:
+        return top
+
+    row_areas = []
+    for y in range(top, bottom):
+        histogram = mask.crop((left, y, right, y + 1)).histogram()
+        row_areas.append(sum(histogram[1:]))
+    target_area = Decimal(sum(row_areas)) * fraction
+    filled_area = 0
+    for offset in range(len(row_areas) - 1, -1, -1):
+        filled_area += row_areas[offset]
+        if Decimal(filled_area) >= target_area:
+            return top + offset
+    return top
+
+
 def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal,
             critical_target: Decimal | None, full_target: Decimal, colors: tuple[str, ...],
             font, name: str, shape: str) -> None:
@@ -132,7 +196,6 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
     image.paste("#2C2039", mask=outer_mask)
     inner_left, inner_right = left + 12, right - 12
     inner_top, inner_bottom = top + 12, bottom - 12
-    usable_height = inner_bottom - inner_top
     balance = _clamp(balance, full_target)
     liquid = Image.new("RGB", image.size)
     liquid_draw = ImageDraw.Draw(liquid)
@@ -142,22 +205,22 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
     liquid_top = inner_bottom
 
     if critical_target is None or critical_target <= 0 or critical_target >= full_target:
-        fill_top = inner_bottom - int(usable_height * balance / full_target) if full_target > 0 else inner_bottom
+        fill_fraction = balance / full_target if full_target > 0 else Decimal("0")
+        fill_top = _fill_top_for_fraction(vessel_mask, fill_fraction)
         if fill_top < inner_bottom:
             liquid_draw.rectangle((inner_left, fill_top, inner_right, inner_bottom), fill=colors[0])
             fill_draw.rectangle((inner_left, fill_top, inner_right, inner_bottom), fill=255)
             liquid_top = fill_top
     else:
         critical_target = _clamp(critical_target, full_target)
-        critical_height = int(usable_height * critical_target / full_target)
-        critical_top = inner_bottom - critical_height
-        first_fill_top = inner_bottom - int(usable_height * min(balance, critical_target) / full_target)
+        critical_top = _fill_top_for_fraction(vessel_mask, critical_target / full_target)
+        first_fill_top = _fill_top_for_fraction(vessel_mask, min(balance, critical_target) / full_target)
         if first_fill_top < inner_bottom:
             liquid_draw.rectangle((inner_left, first_fill_top, inner_right, inner_bottom), fill=colors[0])
             fill_draw.rectangle((inner_left, first_fill_top, inner_right, inner_bottom), fill=255)
             liquid_top = first_fill_top
         if balance > critical_target:
-            second_fill_top = inner_bottom - int(usable_height * balance / full_target)
+            second_fill_top = _fill_top_for_fraction(vessel_mask, balance / full_target)
             liquid_draw.rectangle((inner_left, second_fill_top, inner_right, critical_top), fill=colors[1])
             fill_draw.rectangle((inner_left, second_fill_top, inner_right, critical_top), fill=255)
             liquid_top = second_fill_top
@@ -180,20 +243,13 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
                 (left + 27, liquid_top + 22, left + 40, inner_bottom - 38), radius=7, fill=45,
             )
             _tint(image, ImageChops.multiply(gloss, liquid_mask), "#FFFFFF", 0.50)
-    if critical_top is not None:
-        marker_right = right + 13
-        for marker_y in (critical_top, inner_top + 65):
-            for dash_start in range(left - 12, marker_right, 15):
-                draw.line((dash_start, marker_y, min(dash_start + 8, marker_right), marker_y), fill="#DDD8E5", width=2)
-        draw.text((right + 21, critical_top - 31), "КМ", font=font(24, True), fill=WHITE)
-        marker_amount_size = 21 if shape == "jar" else 23
-        draw.text((right + 21, critical_top + 1), _money(critical_target), font=font(marker_amount_size), fill=MUTED)
-        draw.text((right + 21, inner_top + 28), "УЖ", font=font(24, True), fill=WHITE)
-        draw.text((right + 21, inner_top + 60), _money(full_target), font=font(marker_amount_size), fill=MUTED)
-
     percentage = Decimal("0") if full_target <= 0 else balance / full_target * Decimal("100")
     percent_text = f"{int(percentage.quantize(Decimal('1')))}%"
-    percent_y = max(top + 195, min(inner_bottom - 65, (liquid_top + inner_bottom) // 2))
+    percent_y = (
+        bottom - 145
+        if shape == "flask"
+        else max(top + 195, min(inner_bottom - 65, (liquid_top + inner_bottom) // 2))
+    )
     draw.text((x, percent_y), percent_text, anchor="mm", font=font(50, True), fill=WHITE)
 
     if shape == "jar":
@@ -210,7 +266,9 @@ def _vessel(draw, *, x: int, top: int, bottom: int, width: int, balance: Decimal
 def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_target: Decimal,
                         stabilizer_balance: Decimal = Decimal("0"), stabilizer_critical_target: Decimal = Decimal("0"),
                         stabilizer_full_target: Decimal = Decimal("0"), salary_fund_balance: Decimal = Decimal("0"),
-                        salary_fund_critical_target: Decimal = Decimal("0"), salary_fund_full_target: Decimal = Decimal("0")) -> bytes:
+                        salary_fund_critical_target: Decimal = Decimal("0"), salary_fund_full_target: Decimal = Decimal("0"),
+                        stabilizer_months: Decimal = Decimal("0"), salary_fund_months: Decimal = Decimal("0"),
+                        pillow_months: Decimal = Decimal("0")) -> bytes:
     """Render the reserves required by the user's financial profile.
 
     The filled zones are based on actual money thresholds, rather than fixed
@@ -219,14 +277,19 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
     from PIL import Image, ImageDraw, ImageFont
 
     vessels = [("Подушка", pillow_balance, None, pillow_target, ("#008080",), "shield")]
-    if profile_id in {"piecework", "cyclic"}:
+    if profile_id == "piecework":
         vessels.append(("Стабилизатор", stabilizer_balance, stabilizer_critical_target,
                         stabilizer_full_target, ("#000080", "#4E77F9"), "flask"))
     if profile_id == "cyclic":
-        vessels.append(("Фонд зарплаты", salary_fund_balance, salary_fund_critical_target,
-                        salary_fund_full_target, ("#393939", "#A9A9A9"), "jar"))
+        vessels = [
+            ("Фонд Зарплаты", salary_fund_balance, salary_fund_critical_target,
+             salary_fund_full_target, ("#393939", "#A9A9A9"), "jar"),
+            ("Подушка", pillow_balance, None, pillow_target, ("#008080",), "shield"),
+            ("Стабилизатор", stabilizer_balance, stabilizer_critical_target,
+             stabilizer_full_target, ("#000080", "#4E77F9"), "flask"),
+        ]
 
-    image = Image.new("RGB", (1080, 1120), BACKGROUND)
+    image = Image.new("RGB", (1080, 1200), BACKGROUND)
     draw = ImageDraw.Draw(image)
     fonts: dict[tuple[int, bool], object] = {}
 
@@ -239,13 +302,13 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
 
     # Layered background and frame: the card has a deliberate visual boundary
     # when Telegram places it on a chat background.
-    for y in range(1120):
-        blend = y / 1119
+    for y in range(1200):
+        blend = y / 1199
         red = int(20 * (1 - blend) + 13 * blend)
         green = int(18 * (1 - blend) + 15 * blend)
         blue = int(33 * (1 - blend) + 27 * blend)
         draw.line((0, y, 1080, y), fill=(red, green, blue))
-    draw.rounded_rectangle((18, 18, 1062, 1102), radius=38, outline="#3F384E", width=3)
+    draw.rounded_rectangle((18, 18, 1062, 1182), radius=38, outline="#3F384E", width=3)
     draw.ellipse((58, 48, 164, 154), fill="#272337")
     draw.polygon([(111, 67), (141, 83), (136, 126), (111, 143), (86, 126), (81, 83)], outline=GOLD, width=5)
     draw.line((97, 105, 107, 116, 128, 91), fill=GOLD, width=6)
@@ -253,17 +316,58 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
     draw.text((194, 123), "Заполнение резервов на текущий момент", font=font(30), fill=MUTED)
     draw.line((54, 185, 1026, 185), fill="#51495F", width=3)
     layouts = {
-        1: ((540, 330),),
-        2: ((315, 300), (725, 290)),
-        3: ((200, 270), (500, 240), (855, 220)),
+        1: ((540, 380),),
+        2: ((300, 360), (770, 360)),
+        3: ((200, 245), (540, 300), (875, 300)),
     }[len(vessels)]
     for (x, width), (name, balance, critical, target, colors, shape) in zip(layouts, vessels):
         _vessel(draw, x=x, top=245, bottom=735, width=width, balance=balance,
                 critical_target=critical, full_target=max(Decimal("0"), Decimal(target)),
                 colors=colors, font=font, name=name, shape=shape)
 
-    draw.rounded_rectangle((105, 1006, 975, 1070), radius=30, outline="#3F384E", width=2)
-    draw.text((540, 1025), "КМ — критический минимум  ·  УЖ — устойчивая жизнь", anchor="ma", font=font(27), fill=MUTED)
+    legend_items = reserve_legend_items(
+        stabilizer_balance=stabilizer_balance,
+        stabilizer_critical_target=(
+            stabilizer_critical_target if profile_id in {"piecework", "cyclic"} else Decimal("0")
+        ),
+        stabilizer_full_target=(
+            stabilizer_full_target if profile_id in {"piecework", "cyclic"} else Decimal("0")
+        ),
+        stabilizer_months=stabilizer_months,
+        salary_fund_balance=salary_fund_balance,
+        salary_fund_critical_target=(salary_fund_critical_target if profile_id == "cyclic" else Decimal("0")),
+        salary_fund_full_target=(salary_fund_full_target if profile_id == "cyclic" else Decimal("0")),
+        salary_fund_months=salary_fund_months,
+        pillow_balance=pillow_balance,
+        pillow_target=(
+            pillow_target if profile_id in {"stable", "piecework", "debt_level_one"} else Decimal("0")
+        ),
+        pillow_months=pillow_months,
+        pillow_legend_label=("Минимальная подушка" if profile_id == "debt_level_one" else "Форс-мажор"),
+    )
+
+    if legend_items:
+        legend_frame = (54, 1018, 1026, 1148)
+        draw.rounded_rectangle(legend_frame, radius=30, outline="#3F384E", width=2)
+        legend_slots = {
+            "#008080": (0, 0),
+            "#A9A9A9": (0, 0), "#4E77F9": (1, 0),
+            "#393939": (0, 1), "#000080": (1, 1),
+        }
+        for color, text in legend_items:
+            column, row = legend_slots[color]
+            center_x = 540 if len(vessels) == 1 else 297 + column * 486
+            y = 1067 if len(vessels) == 1 else 1042 + row * 50
+            legend_size = 22
+            legend_font = font(legend_size)
+            while draw.textlength(text, font=legend_font) > 390 and legend_size > 14:
+                legend_size -= 1
+                legend_font = font(legend_size)
+            text_width = draw.textlength(text, font=legend_font)
+            item_width = 24 + 18 + text_width
+            x = round(center_x - item_width / 2)
+            draw.rounded_rectangle((x, y + 3, x + 24, y + 27), radius=5, fill=color)
+            draw.text((x + 40, y), text, font=legend_font, fill=WHITE)
     output = BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
