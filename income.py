@@ -45,6 +45,13 @@ from income_deletion import (
     attach_income_rollback_context,
     capture_income_rollback_context,
 )
+from income_colors import (
+    INCOME_COLOR_FAMILIES,
+    assign_missing_income_type_colors,
+    income_color_name,
+    next_automatic_income_color,
+    next_income_color_shade,
+)
 from time_utils import moscow_today
 
 
@@ -102,6 +109,7 @@ class IncomeStates(StatesGroup):
     custom_income_type = State()
     custom_income_tax_choice = State()
     custom_income_tax_rate = State()
+    custom_income_color = State()
     custom_income_confirm = State()
     income_date = State()
     confirmation = State()
@@ -746,10 +754,70 @@ async def save_custom_income_type(
     message: Message, state: FSMContext, telegram_id: int, rate: Decimal,
     profile: str | None = None,
 ):
-    data = await state.get_data()
-    name = data["income_type"]
     await state.update_data(
         custom_income_type_rate=str(rate), custom_income_type_profile=profile,
+    )
+    await show_custom_income_color_choice(message, state)
+
+
+async def show_custom_income_color_choice(message: Message, state: FSMContext):
+    """Choose a draft chart color before a new income type is saved."""
+    data = await state.get_data()
+    name = str(data["income_type"])
+    await state.set_state(IncomeStates.custom_income_color)
+    flow_id = await current_flow_id(state)
+    rows = [
+        [
+            (icon, flow_callback(f"newincome:color:{family_index}", flow_id))
+            for family_index, (_, icon, _) in enumerate(
+                INCOME_COLOR_FAMILIES[row_start:row_start + 3], row_start,
+            )
+        ]
+        for row_start in range(0, len(INCOME_COLOR_FAMILIES), 3)
+    ]
+    rows.extend([
+        [("Автоматический цвет", flow_callback("newincome:color:auto", flow_id))],
+        [
+            ("← Главное меню", "menu:back"),
+            ("← Назад", flow_callback("income:back_tax_choice", flow_id)),
+        ],
+    ])
+    await message.answer(
+        f"<b>{escape(name.upper())}</b>\n\n"
+        "Выберите основной цвет для диаграммы. При повторе цвета бот использует следующий свободный оттенок.",
+        reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(IncomeStates.custom_income_color, F.data.startswith("newincome:color:"))
+async def custom_income_color_choice(callback: CallbackQuery, state: FSMContext):
+    if not await require_current_flow(callback, state):
+        return
+    await callback.answer()
+    choice = callback_base(callback.data).rsplit(":", 1)[1]
+    if choice == "auto":
+        family_index = None
+    else:
+        try:
+            family_index = int(choice)
+            if not 0 <= family_index < len(INCOME_COLOR_FAMILIES):
+                raise ValueError
+        except ValueError:
+            await callback.message.answer("Не удалось выбрать цвет.")
+            return
+    await state.update_data(custom_income_type_color_family=family_index)
+    await show_custom_income_type_confirmation(callback.message, state)
+
+
+async def show_custom_income_type_confirmation(message: Message, state: FSMContext):
+    data = await state.get_data()
+    name = data["income_type"]
+    rate = Decimal(str(data["custom_income_type_rate"]))
+    profile = data.get("custom_income_type_profile")
+    family_index = data.get("custom_income_type_color_family")
+    color = (
+        income_color_name(INCOME_COLOR_FAMILIES[family_index][2][0])
+        if family_index is not None else "Автоматический"
     )
     await state.set_state(IncomeStates.custom_income_confirm)
     flow_id = await current_flow_id(state)
@@ -757,9 +825,10 @@ async def save_custom_income_type(
         "<b>ПРОВЕРЬТЕ ТИП ДОХОДА</b>\n\n"
         f"Название — <b>{escape(name)}</b>\n"
         + (
-            f"Налог — <b>{escape(profile or f'{rate}%')}</b>"
+            f"Налог — <b>{escape(profile or f'{rate}%')}</b>\n"
             if rate > 0 else "Налог — <b>не резервируется</b>"
-        ),
+        )
+        + f"\nЦвет — <b>{color}</b>",
         reply_markup=keyboard([
             [
                 ("✎ Исправить", flow_callback("newincome:fix", flow_id)),
@@ -806,7 +875,18 @@ async def commit_custom_income_type(callback: CallbackQuery, state: FSMContext):
             allocator.settings.income_type_tax_profiles[name] = profile
         else:
             allocator.settings.income_type_tax_profiles.pop(name, None)
-        allocator.settings.ensure_income_type_id(name)
+        identifier = allocator.settings.ensure_income_type_id(name)
+        family_index = data.get("custom_income_type_color_family")
+        # Older types without a saved colour receive stable assignments first,
+        # so a new type is compared to every active sector, not just to types
+        # whose colours happened to be configured manually.
+        assign_missing_income_type_colors(allocator, excluded_identifier=identifier)
+        if family_index is None:
+            allocator.settings.income_type_colors[identifier] = next_automatic_income_color(allocator, identifier)
+        else:
+            allocator.settings.income_type_colors[identifier] = next_income_color_shade(
+                allocator, identifier, int(family_index),
+            )
         allocator.settings.taxable_income_types = [
             item for item, item_rate in allocator.settings.income_type_tax_rates.items() if item_rate > 0
         ]
@@ -1973,6 +2053,7 @@ async def income_strategy_back(callback: CallbackQuery, state: FSMContext):
     StateFilter(
         IncomeStates.income_type,
         IncomeStates.custom_income_tax_choice,
+        IncomeStates.custom_income_color,
         IncomeStates.custom_income_confirm,
         IncomeStates.confirmation,
         IncomeStates.tax_edit,
@@ -1989,6 +2070,7 @@ async def income_waits_for_button(message: Message, state: FSMContext):
     back_by_state = {
         IncomeStates.income_type.state: "income:back_amount",
         IncomeStates.custom_income_tax_choice.state: "income:back_custom_type",
+        IncomeStates.custom_income_color.state: "income:back_tax_choice",
         IncomeStates.custom_income_confirm.state: "income:back_custom_type",
         IncomeStates.tax_edit.state: "taxedit:back",
         IncomeStates.strategy_choice.state: "income:strategy:back",

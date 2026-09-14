@@ -63,6 +63,23 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             ["❤️", "🧡", "💛", "💚", "💙", "💜", "🩷", "🤎", "🩶"],
         )
 
+    def test_ten_automatic_income_colours_are_perceptually_distinct(self):
+        from income_colors import (
+            MIN_INCOME_COLOR_DISTANCE,
+            income_color_distance,
+            select_income_color,
+        )
+        colors = []
+        for _ in range(10):
+            colors.append(select_income_color(colors))
+        self.assertEqual(len(colors), len(set(colors)))
+        for index, color in enumerate(colors):
+            for other in colors[index + 1:]:
+                self.assertGreaterEqual(
+                    income_color_distance(color, other),
+                    MIN_INCOME_COLOR_DISTANCE,
+                )
+
     def test_history_is_ordered_by_income_date_not_the_later_ledger_id(self):
         newer = operation(7)
         newer["payload"]["date"] = "2026-09-10"
@@ -90,7 +107,7 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         markup = message.answer.await_args.kwargs["reply_markup"]
         buttons = [button.text for row in markup.inline_keyboard for button in row]
-        self.assertIn("09.09.2026 · Частник · 3 700", buttons)
+        self.assertIn("09.09 · Частник · 3 700", buttons)
         self.assertIn("← Назад", buttons)
         self.assertIn("← Главное меню", buttons)
 
@@ -110,7 +127,7 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             for row in message.answer.await_args.kwargs["reply_markup"].inline_keyboard
             for button in row
         ]
-        self.assertIn("10.09.2026 · Частник · 3 700", buttons)
+        self.assertIn("10.09 · Частник · 3 700", buttons)
         self.assertNotIn("10.08.2026 · Частник · 3 700", buttons)
 
     async def test_month_history_filters_operations_and_returns_to_same_month(self):
@@ -330,9 +347,12 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         allocator = SimpleNamespace(settings=SimpleNamespace(
             income_type_colors={"income-one": "#9675E5"},
         ))
-        self.assertEqual(
-            next_income_color_shade(allocator, "income-two", 5),
-            "#B59AEC",
+        next_color = next_income_color_shade(allocator, "income-two", 5)
+        self.assertNotEqual(next_color, "#9675E5")
+        from income_colors import MIN_INCOME_COLOR_DISTANCE, income_color_distance
+        self.assertGreaterEqual(
+            income_color_distance(next_color, "#9675E5"),
+            MIN_INCOME_COLOR_DISTANCE,
         )
 
     def test_color_settings_exclude_legacy_tax_rules(self):
@@ -479,8 +499,8 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             await send_income_history(message, 42, page=1)
         first_markup = message.answer.await_args_list[0].kwargs["reply_markup"]
         second_markup = message.answer.await_args_list[1].kwargs["reply_markup"]
-        self.assertIn("Предыдущие >", [button.text for button in first_markup.inline_keyboard[-2]])
-        self.assertIn("< К последним", [button.text for button in second_markup.inline_keyboard[-2]])
+        self.assertIn("< Предыдущие", [button.text for button in first_markup.inline_keyboard[-2]])
+        self.assertIn("К последним >", [button.text for button in second_markup.inline_keyboard[-2]])
 
     def test_current_year_month_navigation_does_not_offer_a_future_year(self):
         current_year = moscow_today().year

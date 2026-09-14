@@ -96,6 +96,34 @@ class IncomeFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("ИП · УСН · 6%", sum(rows, []))
         self.assertEqual(state.data["available_income_types"], ["Зарплата", "Халтура"])
 
+    async def test_new_income_type_chooses_chart_color_before_confirmation(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        state = MutableFakeState(data={
+            "income_flow_id": "flow",
+            "income_type": "Халтура",
+            "custom_income_type_rate": "0",
+            "custom_income_type_profile": None,
+        })
+
+        await income.show_custom_income_color_choice(message, state)
+
+        self.assertEqual(state.value, income.IncomeStates.custom_income_color.state)
+        self.assertEqual(self.button_rows(message)[:3], [
+            ["❤️", "🧡", "💛"],
+            ["💚", "💙", "💜"],
+            ["🩷", "🤎", "🩶"],
+        ])
+
+        callback = SimpleNamespace(
+            data="newincome:color:3|flow",
+            answer=AsyncMock(), from_user=SimpleNamespace(id=42), message=message,
+        )
+        await income.custom_income_color_choice(callback, state)
+
+        self.assertEqual(state.data["custom_income_type_color_family"], 3)
+        self.assertEqual(state.value, income.IncomeStates.custom_income_confirm.state)
+        self.assertIn("Цвет — <b>💚</b>", message.answer.await_args.args[0])
+
     async def test_one_off_tax_editor_uses_compact_nested_menus(self):
         allocator = FinancialAllocator(UserSettings(
             has_debts=False,

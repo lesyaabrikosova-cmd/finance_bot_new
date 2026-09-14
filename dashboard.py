@@ -27,6 +27,15 @@ from taxes import (
     is_income_tax_profile_label,
     reconcile_tax_obligation_balances,
 )
+from income_colors import (
+    INCOME_COLOR_FAMILIES,
+    assign_missing_income_type_colors,
+    income_color_name,
+    is_distinct_income_color,
+    next_automatic_income_color,
+    next_income_color_shade,
+    select_income_color,
+)
 from income_deletion import IncomeDeletionError, delete_income_safely
 from time_utils import moscow_today
 
@@ -1554,9 +1563,9 @@ async def send_income_history(
     if last_page:
         navigation = []
         if page > 0:
-            navigation.append(("< К последним", f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
+            navigation.append((("< К последним" if is_month_history else "К последним >"), f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
         if page < last_page:
-            navigation.append(("Предыдущие >", f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
+            navigation.append((("Предыдущие >" if is_month_history else "< Предыдущие"), f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
         rows.append(navigation)
     rows.extend([
         [
@@ -2083,19 +2092,6 @@ async def income_history_distribution(callback: CallbackQuery, state: FSMContext
     )
 
 
-INCOME_COLOR_FAMILIES = (
-    ("Красный", "❤️", ("#E68091", "#F0A6B2", "#C9566B", "#F6CDD4")),
-    ("Оранжевый", "🧡", ("#E89555", "#F1B887", "#C96B2A", "#F6D4B3")),
-    ("Жёлтый", "💛", ("#E5B65B", "#F0CF8B", "#C7922D", "#F6E2B4")),
-    ("Зелёный", "💚", ("#69BE98", "#9AD7B7", "#3C9C73", "#C3E9D4")),
-    ("Синий", "💙", ("#5584DB", "#88A9E9", "#315EAF", "#B7C9F2")),
-    ("Фиолетовый", "💜", ("#9675E5", "#B59AEC", "#7152C8", "#D0C1F4")),
-    ("Розовый", "🩷", ("#CE91D1", "#E2B5E4", "#A65BAA", "#EFD5F0")),
-    ("Коричневый", "🤎", ("#9A6B4A", "#BC9274", "#70482F", "#D8BBA7")),
-    ("Серый", "🩶", ("#8B92A1", "#B2B8C2", "#636B78", "#D0D4DA")),
-)
-
-
 def income_analysis_items(allocator, operations: list[dict]) -> list[dict]:
     """Aggregate income by immutable type ID and expose chart-ready labels.
 
@@ -2174,13 +2170,18 @@ def income_analysis_totals(allocator, operations: list[dict]) -> dict[str, Decim
 
 
 def income_analysis_chart_colors(allocator, operations: list[dict]) -> dict[str, str]:
-    """Map visible chart labels to the user's persistent income-type colors."""
+    """Map labels to colours and validate every visible pair for the chart."""
     saved_colors = getattr(allocator.settings, "income_type_colors", {}) or {}
-    return {
-        item["display_label"]: saved_colors[item["identifier"]]
-        for item in income_analysis_items(allocator, operations)
-        if item["identifier"] and item["identifier"] in saved_colors
-    }
+    result: dict[str, str] = {}
+    used: list[str] = []
+    for item in income_analysis_items(allocator, operations):
+        saved = saved_colors.get(item["identifier"]) if item["identifier"] else None
+        # Persisted colours are normally already valid.  This final guard also
+        # protects historic records created before colour persistence existed.
+        color = saved if saved and is_distinct_income_color(saved, used) else select_income_color(used)
+        result[item["display_label"]] = color
+        used.append(color)
+    return result
 
 
 def income_analysis_fallback_text(
@@ -2213,13 +2214,6 @@ def income_analysis_navigation() -> object:
         [("Настроить цвета диаграммы", "incomeanalysis:colors")],
         [("← Главное меню", "menu:back")],
     ])
-
-
-def income_color_name(color: str | None) -> str:
-    for name, icon, shades in INCOME_COLOR_FAMILIES:
-        if color in shades:
-            return icon
-    return "Автоматический"
 
 
 def income_color_types(allocator) -> list[tuple[str, str]]:
@@ -2259,16 +2253,6 @@ async def send_income_color_types(message: Message, telegram_id: int) -> None:
         "<b>ЦВЕТА ДИАГРАММЫ</b>\n\nВыберите тип дохода, для которого хотите изменить цвет.",
         reply_markup=keyboard(rows),
     )
-
-
-def next_income_color_shade(allocator, identifier: str, family_index: int) -> str:
-    """Choose an unused shade within the selected family before cycling."""
-    _, _, shades = INCOME_COLOR_FAMILIES[family_index]
-    used = {
-        color for saved_id, color in allocator.settings.income_type_colors.items()
-        if saved_id != identifier
-    }
-    return next((shade for shade in shades if shade not in used), shades[0])
 
 
 def income_months_keyboard(year: int) -> object:
@@ -2313,6 +2297,8 @@ async def send_income_period_analysis(
             reply_markup=keyboard([[("Настроить профиль", "setup:start")]]),
         )
         return
+    if assign_missing_income_type_colors(allocator):
+        db.save_allocator(telegram_id, allocator)
     operations = income_operations_for_period(
         db.load_operations(telegram_id, limit=-1), period_type, year, month,
     )
@@ -2388,6 +2374,8 @@ async def send_income_analysis(
             reply_markup=keyboard([[("Настроить профиль", "setup:start")]]),
         )
         return
+    if assign_missing_income_type_colors(allocator):
+        db.save_allocator(telegram_id, allocator)
 
     # Берём операции прямо из SQLite.
     # Они уже отсортированы:
@@ -2505,9 +2493,11 @@ async def save_income_color_choice(
         await send_income_color_types(callback.message, callback.from_user.id)
         return
     if family_index is None:
-        allocator.settings.income_type_colors.pop(identifier, None)
-        result = "Автоматический цвет включён."
+        assign_missing_income_type_colors(allocator, excluded_identifier=identifier)
+        allocator.settings.income_type_colors[identifier] = next_automatic_income_color(allocator, identifier)
+        result = f"Выбран автоматический цвет: {income_color_name(allocator.settings.income_type_colors[identifier])}."
     else:
+        assign_missing_income_type_colors(allocator, excluded_identifier=identifier)
         color = next_income_color_shade(allocator, identifier, family_index)
         allocator.settings.income_type_colors[identifier] = color
         result = f"Выбран цвет: {income_color_name(color)}."
