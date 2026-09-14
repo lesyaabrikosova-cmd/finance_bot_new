@@ -802,8 +802,9 @@ def period_balance_chart(allocator, allocations):
         ('#573410', '#BC3F06', '#F6802C', '#E1C5A8'), range(30, 71, 5),
     )
     life_colors = oklch_family_palette(
-        ('#AD7575', '#72111D', '#A02364', '#B5452F', '#E76348', '#E1A6A4', '#856374'),
-        (*range(335, 360, 5), *range(0, 31, 5)),
+        ('#C94242',), range(20, 33, 3),
+        lightnesses=(.36, .42, .48, .54, .60, .66, .72),
+        chromas=(.08, .11, .14, .17),
     )
     household_reserve_colors = oklch_family_palette(
         ('#2E5839', '#429723', '#47A498', '#C3D1AD'), range(120, 181, 5),
@@ -813,8 +814,9 @@ def period_balance_chart(allocator, allocations):
         range(65, 111, 5),
     )
     chest_colors = oklch_family_palette(
-        ('#5F482E', '#896366', '#B9827D', '#FDB89C'), range(35, 76, 5),
-        chromas=(.03, .05, .07, .09),
+        ('#70482F',), range(52, 65, 3),
+        lightnesses=(.34, .40, .46, .52, .58, .64),
+        chromas=(.04, .06, .08, .10),
     )
     archived_suffix = re.compile(r"^(?P<name>.+?) · прежний (?P<id>[^ ]+)$")
     archived_counts: dict[tuple[str, str], int] = {}

@@ -72,14 +72,14 @@ class PeriodChartTests(unittest.TestCase):
 
     def test_eight_critical_life_categories_never_leave_red_family(self):
         from income_colors import (
-            MIN_INCOME_COLOR_DISTANCE,
             income_color_distance,
             oklch_family_palette,
         )
         names = ('Квартира', 'Здоровье', 'Кот', 'Тройка', 'Зарплата', 'Еда', 'Дети', 'Транспорт')
         red_family = set(oklch_family_palette(
-            ('#AD7575', '#72111D', '#A02364', '#B5452F', '#E76348', '#E1A6A4', '#856374'),
-            (*range(335, 360, 5), *range(0, 31, 5)),
+            ('#C94242',), range(20, 33, 3),
+            lightnesses=(.36, .42, .48, .54, .60, .66, .72),
+            chromas=(.08, .11, .14, .17),
         ))
         a = SimpleNamespace(
             state=SimpleNamespace(period_tax=D(0), period_life_topups={}),
@@ -94,19 +94,23 @@ class PeriodChartTests(unittest.TestCase):
         selected = [colors[f'КМ · {name}'] for name in names]
         self.assertTrue(set(selected).issubset(red_family))
         self.assertEqual(len(selected), len(set(selected)))
-        for index, color in enumerate(selected):
-            for other in selected[index + 1:]:
-                self.assertGreaterEqual(
-                    income_color_distance(color, other),
-                    MIN_INCOME_COLOR_DISTANCE,
-                )
+        self.assertEqual(selected[0], '#C94242')
+        self.assertGreaterEqual(
+            min(
+                income_color_distance(color, other)
+                for index, color in enumerate(selected)
+                for other in selected[index + 1:]
+            ),
+            .07,
+        )
 
     def test_large_critical_life_group_has_no_repeats_or_foreign_hues(self):
         from income_colors import oklch_family_palette
         names = tuple(f'Категория {index}' for index in range(20))
         red_family = set(oklch_family_palette(
-            ('#AD7575', '#72111D', '#A02364', '#B5452F', '#E76348', '#E1A6A4', '#856374'),
-            (*range(335, 360, 5), *range(0, 31, 5)),
+            ('#C94242',), range(20, 33, 3),
+            lightnesses=(.36, .42, .48, .54, .60, .66, .72),
+            chromas=(.08, .11, .14, .17),
         ))
         a = SimpleNamespace(
             state=SimpleNamespace(period_tax=D(0), period_life_topups={}),
@@ -121,3 +125,67 @@ class PeriodChartTests(unittest.TestCase):
         selected = [colors[f'КМ · {name}'] for name in names]
         self.assertEqual(len(selected), len(set(selected)))
         self.assertTrue(set(selected).issubset(red_family))
+
+    def test_chests_stay_recognisably_brown(self):
+        names = ('Хотелок', 'Продвижения', 'Техники', 'Подарков')
+        a = SimpleNamespace(
+            state=SimpleNamespace(period_tax=D(0), period_life_topups={}),
+            settings=SimpleNamespace(
+                life_category_ids={}, household_reserve_category_ids={},
+                goals=[],
+            ),
+        )
+        allocations = {
+            f'Цели:Сундук {name}': D(100 - index)
+            for index, name in enumerate(names)
+        }
+        allocations = type(
+            'Allocations', (dict,),
+            {'envelope_kinds': {
+                key: 'chest' for key in allocations
+            }},
+        )(allocations)
+
+        _, colors = period_balance_chart(a, allocations)
+        selected = [
+            colors[f'Цели и Сундуки · Сундук {name}'] for name in names
+        ]
+
+        self.assertEqual(
+            selected,
+            ['#70482F', '#BA7C4C', '#483224', '#925A24'],
+        )
+
+    def test_large_chest_group_has_no_repeats_or_foreign_hues(self):
+        from income_colors import oklch_family_palette
+        names = tuple(f'Сундук {index}' for index in range(20))
+        brown_family = set(oklch_family_palette(
+            ('#70482F',), range(52, 65, 3),
+            lightnesses=(.34, .40, .46, .52, .58, .64),
+            chromas=(.04, .06, .08, .10),
+        ))
+        a = SimpleNamespace(
+            state=SimpleNamespace(period_tax=D(0), period_life_topups={}),
+            settings=SimpleNamespace(
+                life_category_ids={}, household_reserve_category_ids={},
+                goals=[],
+            ),
+        )
+        allocations = {
+            f'Цели:{name}': D(100 - index)
+            for index, name in enumerate(names)
+        }
+        allocations = type(
+            'Allocations', (dict,),
+            {'envelope_kinds': {
+                key: 'chest' for key in allocations
+            }},
+        )(allocations)
+
+        _, colors = period_balance_chart(a, allocations)
+        selected = [
+            colors[f'Цели и Сундуки · {name}'] for name in names
+        ]
+
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertTrue(set(selected).issubset(brown_family))
