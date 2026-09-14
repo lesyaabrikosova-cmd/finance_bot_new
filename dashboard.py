@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 from html import escape
@@ -10,7 +11,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, FSInputFile
+from aiogram.types import BufferedInputFile, CallbackQuery, Message, FSInputFile
 
 from archetypes import ARCHETYPES
 from financial_engine import (
@@ -23,6 +24,7 @@ from storage import db
 from ui import keyboard, main_menu_keyboard, reserve_fraction
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
 from charts import send_chart_report
+from reserve_card import render_reserve_card
 from taxes import (
     compact_income_tax_profile,
     is_income_tax_profile_label,
@@ -2717,9 +2719,32 @@ async def menu_reserves(callback: CallbackQuery):
     if allocator.profile_id == "cyclic":
         rows.append([("Баланс Фонда Зарплаты", "reserves:edit:salary_fund")])
     rows.append([("← Главное меню", "menu:back")])
-    await callback.message.answer(
-        "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
-        "Выберите резерв и укажите, сколько денег в нём сейчас. "
-        "Аллокатор учтёт новую сумму при определении вашего уровня.",
-        reply_markup=keyboard(rows),
-    )
+    settings, state = allocator.settings, allocator.state
+    try:
+        image = await asyncio.to_thread(
+            render_reserve_card,
+            allocator.profile_id,
+            pillow_balance=allocator.pillow_total_balance,
+            pillow_target=settings.force_majeure_limit,
+            stabilizer_balance=state.pillow_stabilizer,
+            stabilizer_critical_target=settings.stabilizer_life_limit,
+            stabilizer_full_target=settings.stabilizer_full_limit,
+            salary_fund_balance=state.intercontract_reserve,
+            salary_fund_critical_target=allocator.intercontract_current_life_limit,
+            salary_fund_full_target=allocator.intercontract_current_limit,
+        )
+        await callback.message.answer_photo(
+            BufferedInputFile(image, filename="reserves.png"),
+            caption=(
+                "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
+                "Выберите резерв, чтобы изменить его текущий баланс."
+            ),
+            reply_markup=keyboard(rows),
+        )
+    except Exception:
+        await callback.message.answer(
+            "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
+            "Выберите резерв и укажите, сколько денег в нём сейчас. "
+            "Аллокатор учтёт новую сумму при определении вашего уровня.",
+            reply_markup=keyboard(rows),
+        )
