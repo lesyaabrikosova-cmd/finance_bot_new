@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from functools import cache
 
 
 # Euclidean OKLab distance.  At .12, adjacent sectors remain distinct at the
@@ -20,6 +21,21 @@ INCOME_COLOR_FAMILIES = (
     ("Розовый", "🩷", ("#CE91D1", "#A65BAA", "#E2B5E4", "#EFD5F0")),
     ("Коричневый", "🤎", ("#9A6B4A", "#70482F", "#BC9274", "#D8BBA7")),
     ("Серый", "🩶", ("#8B92A1", "#636B78", "#B2B8C2", "#D0D4DA")),
+)
+
+# Narrow OKLCH corridors keep every manually requested shade recognisably in
+# the selected heart family.  Lightness and chroma provide most of the visual
+# separation; hue only moves inside the named colour.
+_INCOME_COLOR_FAMILY_GRIDS = (
+    (range(15, 28, 3), (.42, .48, .54, .60, .66, .72, .78), (.11, .14, .17, .20)),
+    (range(42, 63, 4), (.44, .50, .56, .62, .68, .74, .80), (.10, .13, .16, .19)),
+    (range(82, 103, 4), (.50, .56, .62, .68, .74, .80, .86), (.09, .12, .15, .18)),
+    (range(138, 159, 4), (.40, .46, .52, .58, .64, .70, .76, .80), (.09, .12, .15, .18)),
+    (range(245, 266, 4), (.40, .46, .52, .58, .64, .70, .76, .80), (.09, .12, .15, .18)),
+    (range(282, 307, 4), (.40, .46, .52, .58, .64, .70, .76, .80), (.09, .12, .15, .18)),
+    (range(322, 341, 4), (.44, .50, .56, .62, .68, .74, .80, .84), (.08, .11, .14, .17)),
+    (range(52, 65, 3), (.34, .40, .46, .52, .58, .64, .70), (.04, .06, .08, .10)),
+    ((250,), (.32, .38, .44, .50, .56, .62, .68, .74, .80), (.008, .015, .022, .029)),
 )
 
 # The first nine automatic assignments use one vetted shade per family.  They
@@ -104,6 +120,19 @@ def oklch_family_palette(
     return tuple(colors)
 
 
+@cache
+def income_color_family_palette(family_index: int) -> tuple[str, ...]:
+    """Return the scalable palette for one user-selected heart colour."""
+    _, _, preferred = INCOME_COLOR_FAMILIES[family_index]
+    hues, lightnesses, chromas = _INCOME_COLOR_FAMILY_GRIDS[family_index]
+    return oklch_family_palette(
+        preferred,
+        hues,
+        lightnesses=lightnesses,
+        chromas=chromas,
+    )
+
+
 def _generated_candidates() -> Iterable[str]:
     """Deterministic reserve palette, used only after prepared colours."""
     for lightness in (.52, .68, .80):
@@ -159,15 +188,15 @@ def next_automatic_income_color(allocator, identifier: str) -> str:
 
 
 def income_color_name(color: str | None) -> str:
-    for _, icon, shades in INCOME_COLOR_FAMILIES:
-        if color and color.upper() in shades:
+    for family_index, (_, icon, _) in enumerate(INCOME_COLOR_FAMILIES):
+        if color and color.upper() in income_color_family_palette(family_index):
             return icon
     return "Автоматический"
 
 
 def next_income_color_shade(allocator, identifier: str, family_index: int) -> str:
-    """Choose a safe shade from a requested family, then another safe hue."""
-    _, _, shades = INCOME_COLOR_FAMILIES[family_index]
+    """Choose a distinct shade without ever leaving the requested family."""
+    palette = income_color_family_palette(family_index)
     colors = allocator.settings.income_type_colors
     active_ids = _active_income_type_ids(allocator, excluded_identifier=str(identifier))
     used = [colors[item] for item in active_ids if colors.get(item)]
@@ -175,4 +204,19 @@ def next_income_color_shade(allocator, identifier: str, family_index: int) -> st
     # treat every saved colour as active rather than risk a duplicate.
     if not active_ids:
         used = [color for saved_id, color in colors.items() if str(saved_id) != str(identifier)]
-    return select_income_color(used, preferred=shades)
+    used = [str(color).upper() for color in used if color]
+    remaining = [color for color in palette if color not in used]
+    if not remaining:
+        raise ValueError("Не удалось подобрать новый оттенок выбранного цвета.")
+
+    family = set(palette)
+    used_in_family = [color for color in used if color in family]
+    if not used_in_family:
+        return remaining[0]
+    return max(
+        remaining,
+        key=lambda candidate: min(
+            income_color_distance(candidate, existing)
+            for existing in used_in_family
+        ),
+    )

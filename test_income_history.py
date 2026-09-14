@@ -371,6 +371,29 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             MIN_INCOME_COLOR_DISTANCE,
         )
 
+    def test_twenty_manual_repeats_never_leave_selected_heart_family(self):
+        from income_colors import income_color_name
+
+        expected_icons = [icon for _, icon, _ in INCOME_COLOR_FAMILIES]
+        for family_index, expected_icon in enumerate(expected_icons):
+            allocator = SimpleNamespace(settings=SimpleNamespace(
+                income_type_colors={},
+            ))
+            selected = []
+            for index in range(20):
+                identifier = f"income-{family_index}-{index}"
+                color = next_income_color_shade(
+                    allocator, identifier, family_index,
+                )
+                allocator.settings.income_type_colors[identifier] = color
+                selected.append(color)
+
+            self.assertEqual(len(selected), len(set(selected)))
+            self.assertEqual(
+                [income_color_name(color) for color in selected],
+                [expected_icon] * 20,
+            )
+
     def test_color_settings_exclude_legacy_tax_rules(self):
         allocator = SimpleNamespace(settings=SimpleNamespace(
             income_type_ids={
