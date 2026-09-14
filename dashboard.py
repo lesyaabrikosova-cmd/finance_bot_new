@@ -31,10 +31,11 @@ from taxes import (
 from income_colors import (
     INCOME_COLOR_FAMILIES,
     assign_missing_income_type_colors,
+    income_color_distance,
     income_color_name,
-    is_distinct_income_color,
     next_automatic_income_color,
     next_income_color_shade,
+    oklch_family_palette,
     select_income_color,
 )
 from income_deletion import IncomeDeletionError, delete_income_safely
@@ -784,19 +785,37 @@ def period_balance_chart(allocator, allocations):
     archived label instead of dropping the money or merging it with a newly
     created envelope that happens to reuse the same name.
     """
-    from hashlib import sha256
     values, colors = {}, {}
 
     # Semantic colour families for the balance chart.  The selector below
     # compares candidates in OKLab, so these are not merely different HEXes.
-    tax_colors = ('#7152C8', '#9675E5', '#D0C1F4')
-    salary_fund_colors = ('#636B78', '#8B92A1', '#D0D4DA')
-    bracket_reserve_colors = ('#315EAF', '#5584DB', '#88A9E9', '#B7C9F2')
-    debt_colors = ('#C96B2A', '#E89555', '#F1B887', '#F6D4B3')
-    life_colors = ('#9D2635', '#C9566B', '#E68091', '#F6CDD4')
-    household_reserve_colors = ('#185337', '#3C9C73', '#69BE98', '#9AD7B7', '#C3E9D4')
-    goal_colors = ('#C7922D', '#E5B65B', '#F0CF8B', '#F6E2B4')
-    chest_colors = ('#70482F', '#9A6B4A', '#BC9274', '#D8BBA7')
+    tax_colors = oklch_family_palette(
+        ('#4D2A91', '#9675E5', '#D0C1F4'), range(280, 326, 5),
+    )
+    salary_fund_colors = oklch_family_palette(
+        ('#4B515C', '#8B92A1', '#D0D4DA'), (250,), chromas=(.01, .025),
+    )
+    bracket_reserve_colors = oklch_family_palette(
+        ('#315EAF', '#5584DB', '#88A9E9', '#B7C9F2'), range(205, 271, 5),
+    )
+    debt_colors = oklch_family_palette(
+        ('#573410', '#BC3F06', '#F6802C', '#E1C5A8'), range(30, 71, 5),
+    )
+    life_colors = oklch_family_palette(
+        ('#AD7575', '#72111D', '#A02364', '#B5452F', '#E76348', '#E1A6A4', '#856374'),
+        (*range(335, 360, 5), *range(0, 31, 5)),
+    )
+    household_reserve_colors = oklch_family_palette(
+        ('#2E5839', '#429723', '#47A498', '#C3D1AD'), range(120, 181, 5),
+    )
+    goal_colors = oklch_family_palette(
+        ('#E5B65B', '#3C3C24', '#A7611B', '#999B7F', '#5F5F06', '#E3E437', '#DCDEC0'),
+        range(65, 111, 5),
+    )
+    chest_colors = oklch_family_palette(
+        ('#5F482E', '#896366', '#B9827D', '#FDB89C'), range(35, 76, 5),
+        chromas=(.03, .05, .07, .09),
+    )
     archived_suffix = re.compile(r"^(?P<name>.+?) · прежний (?P<id>[^ ]+)$")
     archived_counts: dict[tuple[str, str], int] = {}
     used_family_colors: dict[tuple[str, ...], list[str]] = {}
@@ -829,17 +848,26 @@ def period_balance_chart(allocator, allocations):
     def shade(name, palette):
         """Pick a perceptually distinct shade within its semantic family."""
         family_used = used_family_colors.setdefault(tuple(palette), [])
-        seed = int.from_bytes(sha256(name.encode()).digest()[:4], 'big')
-        start = seed % len(palette)
-        for offset in range(len(palette)):
-            color = palette[(start + offset) % len(palette)]
-            if color not in colors.values() and is_distinct_income_color(color, family_used):
-                family_used.append(color)
-                return color
-        # A large number of same-family envelopes can exhaust its prepared
-        # shades.  The shared selector still checks perceptual distance before
-        # using a deterministic reserve colour.
-        color = select_income_color(family_used, preferred=palette)
+        remaining = [
+            color for color in palette
+            if color not in family_used and color not in colors.values()
+        ]
+        if not remaining:
+            # The generated family contains hundreds of shades, so this is a
+            # defensive fallback for an unrealistically large single chart.
+            return palette[0]
+        if not family_used:
+            color = remaining[0]
+        else:
+            # Farthest-point sampling maximises the weakest OKLab distance for
+            # the actual number of categories instead of exhausting a short
+            # fixed list and jumping to a foreign hue.
+            color = max(
+                remaining,
+                key=lambda candidate: min(
+                    income_color_distance(candidate, used) for used in family_used
+                ),
+            )
         family_used.append(color)
         return color
 

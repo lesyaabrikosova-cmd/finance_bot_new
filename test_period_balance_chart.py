@@ -23,7 +23,7 @@ class PeriodChartTests(unittest.TestCase):
         self.assertEqual(len(values),7)
         self.assertNotIn('Подушка',values)
         self.assertEqual(sum(values.values()),D('85669.74'))
-        self.assertIn(colors['Налог'], {'#7152C8', '#9675E5', '#D0C1F4'})
+        self.assertIn(colors['Налог'], {'#4D2A91', '#9675E5', '#D0C1F4'})
         self.assertEqual(len({colors[k] for k in values if k.startswith('КМ')}),5)
 
     def test_keeps_all_goals_and_every_household_sub_envelope(self):
@@ -52,8 +52,8 @@ class PeriodChartTests(unittest.TestCase):
             'БР:Продукты': D(10), 'Бытовой резерв': D(10),
             'Цели:Отпуск': D(10), 'Цели:Сундук': D(10),
         })
-        self.assertIn(colors['Налог'], {'#7152C8', '#9675E5', '#D0C1F4'})
-        self.assertIn(colors['Фонд Зарплаты'], {'#636B78', '#8B92A1', '#D0D4DA'})
+        self.assertIn(colors['Налог'], {'#4D2A91', '#9675E5', '#D0C1F4'})
+        self.assertIn(colors['Фонд Зарплаты'], {'#4B515C', '#8B92A1', '#D0D4DA'})
         groups = (
             ('Подушка', 'Стабилизатор', 'Инвестиции'),
             ('Минимальные платежи по долгам', 'Досрочное погашение'),
@@ -69,3 +69,55 @@ class PeriodChartTests(unittest.TestCase):
                         income_color_distance(color, other),
                         MIN_INCOME_COLOR_DISTANCE,
                     )
+
+    def test_eight_critical_life_categories_never_leave_red_family(self):
+        from income_colors import (
+            MIN_INCOME_COLOR_DISTANCE,
+            income_color_distance,
+            oklch_family_palette,
+        )
+        names = ('Квартира', 'Здоровье', 'Кот', 'Тройка', 'Зарплата', 'Еда', 'Дети', 'Транспорт')
+        red_family = set(oklch_family_palette(
+            ('#AD7575', '#72111D', '#A02364', '#B5452F', '#E76348', '#E1A6A4', '#856374'),
+            (*range(335, 360, 5), *range(0, 31, 5)),
+        ))
+        a = SimpleNamespace(
+            state=SimpleNamespace(period_tax=D(0), period_life_topups={}),
+            settings=SimpleNamespace(
+                life_category_ids={name: name for name in names},
+                household_reserve_category_ids={}, goals=[],
+            ),
+        )
+        _, colors = period_balance_chart(
+            a, {f'КЖ:{name}': D(10) for name in names},
+        )
+        selected = [colors[f'КМ · {name}'] for name in names]
+        self.assertTrue(set(selected).issubset(red_family))
+        self.assertEqual(len(selected), len(set(selected)))
+        for index, color in enumerate(selected):
+            for other in selected[index + 1:]:
+                self.assertGreaterEqual(
+                    income_color_distance(color, other),
+                    MIN_INCOME_COLOR_DISTANCE,
+                )
+
+    def test_large_critical_life_group_has_no_repeats_or_foreign_hues(self):
+        from income_colors import oklch_family_palette
+        names = tuple(f'Категория {index}' for index in range(20))
+        red_family = set(oklch_family_palette(
+            ('#AD7575', '#72111D', '#A02364', '#B5452F', '#E76348', '#E1A6A4', '#856374'),
+            (*range(335, 360, 5), *range(0, 31, 5)),
+        ))
+        a = SimpleNamespace(
+            state=SimpleNamespace(period_tax=D(0), period_life_topups={}),
+            settings=SimpleNamespace(
+                life_category_ids={name: name for name in names},
+                household_reserve_category_ids={}, goals=[],
+            ),
+        )
+        _, colors = period_balance_chart(
+            a, {f'КЖ:{name}': D(10) for name in names},
+        )
+        selected = [colors[f'КМ · {name}'] for name in names]
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertTrue(set(selected).issubset(red_family))

@@ -82,6 +82,28 @@ def _oklch_to_hex(lightness: float, chroma: float, hue: float) -> str | None:
     return "#" + "".join(f"{round(_srgb_from_linear(channel) * 255):02X}" for channel in rgb)
 
 
+def oklch_family_palette(
+    preferred: Iterable[str],
+    hues: Iterable[int],
+    *,
+    lightnesses: Iterable[float] = (.38, .46, .54, .62, .70, .78, .86),
+    chromas: Iterable[float] = (.07, .10, .13, .16),
+) -> tuple[str, ...]:
+    """Build a large deterministic palette without leaving one hue family.
+
+    Prepared brand shades remain first.  The OKLCH grid supplies additional
+    hue/lightness/chroma combinations for users with larger category sets.
+    """
+    colors = [str(color).upper() for color in preferred]
+    for lightness in lightnesses:
+        for chroma in chromas:
+            for hue in hues:
+                color = _oklch_to_hex(lightness, chroma, hue)
+                if color is not None and color not in colors:
+                    colors.append(color)
+    return tuple(colors)
+
+
 def _generated_candidates() -> Iterable[str]:
     """Deterministic reserve palette, used only after prepared colours."""
     for lightness in (.52, .68, .80):
