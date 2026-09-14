@@ -453,7 +453,7 @@ class TaxAccountingIntegrityTests(unittest.TestCase):
         self.assertNotIn("До 1 ноября предварительная сумма будет собрана", text)
         with patch.object(taxes, "moscow_today", return_value=date(2026, 12, 2)):
             overdue = taxes.tax_obligation_card_text(item, Decimal("0"))
-        self.assertIn("Срок оплаты 1 декабря уже прошёл", overdue)
+        self.assertIn("Срок оплаты <b>1 декабря</b> уже прошёл", overdue)
         self.assertNotIn("налог должен быть оплачен", overdue)
 
     def test_snapshot_restore_preserves_tax_and_planned_payment_state(self):

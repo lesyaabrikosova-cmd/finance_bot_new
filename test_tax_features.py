@@ -101,11 +101,13 @@ class TaxFeatureTests(unittest.TestCase):
             "notice_received": True,
             "due_date": "2026-12-01",
         }
-        text = tax_obligation_card_text(item, Decimal("0"))
+        text = tax_obligation_card_text(item, Decimal("0"), show_changes=True)
         self.assertIn("Сейчас откладываем — 6 000 ₽/мес", text)
         self.assertIn("Если бы копили весь год", text)
-        self.assertIn("До 1 ноября предварительная сумма будет собрана.", text)
-        self.assertIn("До 1 декабря — налог должен быть оплачен.", text)
+        self.assertIn("До <b>1 ноября</b> предварительная сумма будет собрана.", text)
+        self.assertIn("До <b>1 декабря</b> — налог должен быть оплачен.", text)
+        self.assertIn("Аллокатор пришлет вам напоминания.", text)
+        self.assertNotIn("Критический минимум и долгосрочные резервы пока не изменились.", text)
 
         item["monthly_amount"] = Decimal("1000")
         self.assertNotIn(
@@ -1202,8 +1204,11 @@ class TaxFeatureTests(unittest.TestCase):
             )
         }
         text = report_text(groups, Decimal("0"), 2026, Decimal("0"), None, True)
-        self.assertIn("Все налоги храним на одном накопительном счёте", text)
-        self.assertIn("суммы не смешаются", text)
+        self.assertIn("Все налоги можно хранить на одном накопительном счёте в банке.", text)
+        self.assertIn(
+            "Аллокатор отдельно считает, сколько внутри него предназначено для каждого налога.",
+            text,
+        )
         self.assertNotIn("0 ₽", text)
         self.assertEqual(TAX_COLORS["Налог на доход"], "#7656D8")
         self.assertEqual(TAX_COLORS["Транспортный налог"], "#7A7F87")

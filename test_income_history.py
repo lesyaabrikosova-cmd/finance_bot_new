@@ -12,7 +12,9 @@ from dashboard import (
     MONTH_EMOJIS,
     income_distribution_text,
     income_analysis_chart_colors,
+    income_analysis_totals,
     income_analysis_periods,
+    income_history_distribution,
     income_history_operations,
     income_color_types,
     income_months_keyboard,
@@ -22,6 +24,7 @@ from dashboard import (
     rebuild_period_analytics_from_history,
     send_income_period_analysis,
     send_income_history,
+    send_income_history_detail,
 )
 from financial_engine import FinancialAllocator, UserSettings
 from storage import (
@@ -75,12 +78,40 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         message = SimpleNamespace(answer=AsyncMock())
         with patch("dashboard.db") as db:
             db.load_operations.return_value = [operation()]
+            db.load_allocator.return_value = None
             await send_income_history(message, 42)
+        self.assertIn(
+            "ИСТОРИЯ ТЕКУЩЕГО ПЕРИОДА",
+            message.answer.await_args.args[0],
+        )
+        self.assertIn(
+            "Здесь показаны доходы с момента последнего закрытия расчётного периода.",
+            message.answer.await_args.args[0],
+        )
         markup = message.answer.await_args.kwargs["reply_markup"]
         buttons = [button.text for row in markup.inline_keyboard for button in row]
         self.assertIn("09.09.2026 · Частник · 3 700", buttons)
         self.assertIn("← Назад", buttons)
         self.assertIn("← Главное меню", buttons)
+
+    async def test_primary_history_only_shows_open_period_incomes(self):
+        message = SimpleNamespace(answer=AsyncMock())
+        current_income = operation(3)
+        current_income["payload"]["date"] = "2026-09-10"
+        older_income = operation(1)
+        older_income["payload"]["date"] = "2026-08-10"
+        period_reset = {"id": 2, "type": "period_reset", "payload": {}}
+        with patch("dashboard.db") as db:
+            # The operation log is read from newest to oldest.
+            db.load_operations.return_value = [current_income, period_reset, older_income]
+            await send_income_history(message, 42)
+        buttons = [
+            button.text
+            for row in message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("10.09.2026 · Частник · 3 700", buttons)
+        self.assertNotIn("10.08.2026 · Частник · 3 700", buttons)
 
     async def test_month_history_filters_operations_and_returns_to_same_month(self):
         message = SimpleNamespace(answer=AsyncMock())
@@ -105,6 +136,68 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<blockquote>", text)
         self.assertLess(text.index("📈"), text.index("❤️ <b>Квартира</b>"))
         self.assertLess(text.index("Квартира"), text.index("Тройка"))
+
+    async def test_month_detail_and_distribution_keep_selected_month(self):
+        detail_message = SimpleNamespace(answer=AsyncMock())
+        with (
+            patch("dashboard.find_income_history_operation", return_value=operation()),
+            patch("dashboard.current_period_income_ids", return_value=set()),
+        ):
+            await send_income_history_detail(
+                detail_message, 42, 17, year=2025, month=3,
+            )
+        detail_callbacks = [
+            button.callback_data
+            for row in detail_message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("incomehistory:distribution:17:2025:3", detail_callbacks)
+        self.assertIn("incomehistory:note:17:2025:3", detail_callbacks)
+        self.assertIn("incomehistory:month:2025:3", detail_callbacks)
+
+        callback = SimpleNamespace(
+            answer=AsyncMock(),
+            data="incomehistory:distribution:17:2025:3",
+            from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        state = SimpleNamespace(clear=AsyncMock())
+        allocator = SimpleNamespace(settings=SimpleNamespace(goals=[]))
+        with (
+            patch("dashboard.find_income_history_operation", return_value=operation()),
+            patch("dashboard.db") as db,
+        ):
+            db.load_allocator.return_value = allocator
+            await income_history_distribution(callback, state)
+        distribution_callbacks = [
+            button.callback_data
+            for row in callback.message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("incomehistory:detail:17:2025:3", distribution_callbacks)
+        self.assertIn("incomehistory:month:2025:3", distribution_callbacks)
+
+    def test_recreated_income_type_name_does_not_break_analysis(self):
+        allocator = SimpleNamespace(settings=SimpleNamespace(
+            income_type_ids={"Работа": "new-id"},
+            income_type_labels={"new-id": "Работа", "old-id": "Работа"},
+        ))
+        current = operation(2)
+        current["payload"].update(
+            income="100", income_type="Работа", income_type_id="new-id",
+        )
+        previous = operation(1)
+        previous["payload"].update(
+            income="50", income_type="Работа", income_type_id="old-id",
+        )
+
+        self.assertEqual(
+            income_analysis_totals(allocator, [current, previous]),
+            {
+                "Работа": Decimal("100"),
+                "Работа · прежний тип": Decimal("50"),
+            },
+        )
 
     def test_deletion_rebuilds_chart_totals_from_remaining_ledger(self):
         allocator = FinancialAllocator(UserSettings(
@@ -366,6 +459,11 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         state = SimpleNamespace(clear=AsyncMock())
         await income_analysis_periods(callback, state)
+        self.assertIn(
+            "Здесь доходы собраны по календарным месяцам — по указанной вами дате. "
+            "Календарный месяц может не совпадать с вашим расчётным периодом.",
+            callback.message.answer.await_args.args[0],
+        )
         markup = callback.message.answer.await_args.kwargs["reply_markup"]
         self.assertEqual([button.text for button in markup.inline_keyboard[0]], ["По годам", "По месяцам"])
 
@@ -376,6 +474,7 @@ class IncomeHistoryTests(unittest.IsolatedAsyncioTestCase):
             item["payload"]["date"] = f"2026-09-{index + 1:02d}"
         with patch("dashboard.db") as db:
             db.load_operations.return_value = operations
+            db.load_allocator.return_value = None
             await send_income_history(message, 42)
             await send_income_history(message, 42, page=1)
         first_markup = message.answer.await_args_list[0].kwargs["reply_markup"]

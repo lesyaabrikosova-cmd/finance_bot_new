@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -76,6 +77,24 @@ class MemoryState:
 
 
 class TaxIncomeProfileMenus(unittest.IsolatedAsyncioTestCase):
+    async def test_tax_help_uses_current_tax_years(self):
+        callback = SimpleNamespace(
+            answer=AsyncMock(),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        with patch('taxes.moscow_today', return_value=date(2027, 1, 2)):
+            await taxes.taxes_help(callback)
+
+        text = callback.message.answer.await_args.args[0]
+        self.assertIn(
+            "<b>➤ НАЛОГИ НА КВАРТИРУ, МАШИНУ И ЗЕМЛЮ</b>",
+            text,
+        )
+        self.assertIn("в 2027 году", text)
+        self.assertIn("за 2026 год", text)
+        self.assertIn("<b>➤ НАЛОГ С ДОХОДА — НПД, УСН</b>", text)
+        self.assertIn("<b>➤ ПАТЕНТ И ДРУГИЕ ПЛАНОВЫЕ НАЛОГИ</b>", text)
+
     async def test_income_types_are_grouped_by_two_buttons_per_row(self):
         current = allocator()
         current.settings.income_type_tax_rates = {

@@ -349,7 +349,7 @@ class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):
 
         db.update_income_note.assert_called_once_with(42, 17, "")
         state.clear.assert_awaited_once()
-        detail.assert_awaited_once_with(callback.message, 42, 17)
+        detail.assert_awaited_once_with(callback.message, 42, 17, None, None)
 
     async def test_stale_income_card_always_offers_navigation(self):
         message = SimpleNamespace(answer=AsyncMock())

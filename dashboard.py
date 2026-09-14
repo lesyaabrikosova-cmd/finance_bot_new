@@ -1425,16 +1425,69 @@ def income_history_navigation():
     ])
 
 
-def income_note_edit_keyboard(operation_id: int, has_note: bool):
+def income_history_operation_callback(
+    action: str,
+    operation_id: int,
+    year: int | None = None,
+    month: int | None = None,
+) -> str:
+    callback = f"incomehistory:{action}:{operation_id}"
+    if year is not None and month is not None:
+        callback += f":{year}:{month}"
+    return callback
+
+
+def parse_income_history_operation_callback(
+    callback_data: str | None,
+) -> tuple[int, int | None, int | None]:
+    parts = str(callback_data or "").split(":")
+    if len(parts) not in {3, 5}:
+        raise ValueError("Invalid income history callback")
+    operation_id = int(parts[2])
+    if len(parts) == 3:
+        return operation_id, None, None
+    year, month = int(parts[3]), int(parts[4])
+    if not 1 <= month <= 12:
+        raise ValueError("Invalid income history month")
+    return operation_id, year, month
+
+
+def income_history_scope_callback(
+    year: int | None = None,
+    month: int | None = None,
+) -> str:
+    return (
+        f"incomehistory:month:{year}:{month}"
+        if year is not None and month is not None
+        else "incomehistory:open"
+    )
+
+
+def income_note_edit_keyboard(
+    operation_id: int,
+    has_note: bool,
+    year: int | None = None,
+    month: int | None = None,
+):
     rows = []
     if has_note:
         rows.append([
-            ("🗑️ Удалить заметку", f"incomehistory:note_delete:{operation_id}"),
+            (
+                "🗑️ Удалить заметку",
+                income_history_operation_callback(
+                    "note_delete", operation_id, year, month,
+                ),
+            ),
         ])
     rows.extend([
         [
             ("← Главное меню", "menu:back"),
-            ("← Назад", f"incomehistory:note_back:{operation_id}"),
+            (
+                "← Назад",
+                income_history_operation_callback(
+                    "note_back", operation_id, year, month,
+                ),
+            ),
         ],
     ])
     return keyboard(rows)
@@ -1451,6 +1504,15 @@ async def send_income_history(
     is_month_history = year is not None and month is not None
     if is_month_history:
         operations = income_operations_for_period(operations, "month", year, month)
+    else:
+        # The primary history is a working view of the open calculation
+        # period.  Calendar history remains available from "Другой период".
+        current_income_ids = current_period_income_ids(telegram_id)
+        operations = [
+            operation
+            for operation in operations
+            if operation.get("id") in current_income_ids
+        ]
     last_page = max(0, (len(operations) - 1) // INCOME_HISTORY_PAGE_SIZE)
     page = max(0, min(page, last_page))
     page_operations = operations[
@@ -1459,8 +1521,12 @@ async def send_income_history(
 
     if not operations:
         await message.answer(
-            f"<b>{'ПОСТУПЛЕНИЯ ' + MONTH_NAMES[month - 1].upper() if is_month_history else 'ИСТОРИЯ ДОХОДОВ'}</b>\n\n"
-            + ("За этот период доходов пока нет." if is_month_history else "Вы ещё не добавили ни одного дохода."),
+            f"<b>{'ПОСТУПЛЕНИЯ ' + MONTH_NAMES[month - 1].upper() if is_month_history else 'ИСТОРИЯ ТЕКУЩЕГО ПЕРИОДА'}</b>\n\n"
+            + (
+                "За этот период доходов пока нет."
+                if is_month_history
+                else "Здесь показаны доходы с момента последнего закрытия расчётного периода.\n\nВ текущем периоде пока нет доходов."
+            ),
             reply_markup=keyboard([
                 [
                     ("← Главное меню", "menu:back"),
@@ -1494,7 +1560,12 @@ async def send_income_history(
         ],
     ])
     await message.answer(
-        f"<b>{'ПОСТУПЛЕНИЯ ' + MONTH_NAMES[month - 1].upper() if is_month_history else 'ИСТОРИЯ ДОХОДОВ'}</b>",
+        f"<b>{'ПОСТУПЛЕНИЯ ' + MONTH_NAMES[month - 1].upper() if is_month_history else 'ИСТОРИЯ ТЕКУЩЕГО ПЕРИОДА'}</b>"
+        + (
+            ""
+            if is_month_history
+            else "\n\nЗдесь показаны доходы с момента последнего закрытия расчётного периода."
+        ),
         reply_markup=keyboard(rows),
     )
 
@@ -1540,22 +1611,30 @@ async def send_income_history_detail(
     edit_row = [
         (
             "✎ Заметка" if has_note else "+ Заметка",
-            f"incomehistory:note:{operation_id}",
+            income_history_operation_callback(
+                "note", operation_id, year, month,
+            ),
         ),
     ]
     if current_period:
         edit_row.append(
-            ("🗑️ Удалить доход", f"incomehistory:delete:{operation_id}")
+            (
+                "🗑️ Удалить доход",
+                income_history_operation_callback(
+                    "delete", operation_id, year, month,
+                ),
+            )
         )
-    back_callback = (
-        f"incomehistory:month:{year}:{month}"
-        if year is not None and month is not None
-        else "incomehistory:open"
-    )
+    back_callback = income_history_scope_callback(year, month)
     await message.answer(
         income_operation_card_text(operation),
         reply_markup=keyboard([
-            [("Показать распределение", f"incomehistory:distribution:{operation_id}")],
+            [(
+                "Показать распределение",
+                income_history_operation_callback(
+                    "distribution", operation_id, year, month,
+                ),
+            )],
             edit_row,
             [
                 ("← Главное меню", "menu:back"),
@@ -1718,9 +1797,12 @@ async def income_history_detail(callback: CallbackQuery, state: FSMContext):
 async def ask_history_income_note(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data
+        )
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     operation = find_income_history_operation(callback.from_user.id, operation_id)
     if operation is None:
         await callback.message.answer(
@@ -1728,7 +1810,10 @@ async def ask_history_income_note(callback: CallbackQuery, state: FSMContext):
             reply_markup=income_history_navigation(),
         )
         return
-    await state.update_data(history_note_operation_id=operation_id)
+    note_state = {"history_note_operation_id": operation_id}
+    if year is not None and month is not None:
+        note_state.update(history_note_year=year, history_note_month=month)
+    await state.update_data(**note_state)
     await state.set_state(IncomeHistoryStates.note)
     await callback.message.answer(
         "<b>ЗАМЕТКА К ПОСТУПЛЕНИЮ</b>\n\n"
@@ -1736,6 +1821,8 @@ async def ask_history_income_note(callback: CallbackQuery, state: FSMContext):
         reply_markup=income_note_edit_keyboard(
             operation_id,
             bool((operation.get("payload") or {}).get("note")),
+            year,
+            month,
         ),
     )
 
@@ -1745,6 +1832,10 @@ async def save_history_income_note(message: Message, state: FSMContext):
     note = " ".join((message.text or "").split())
     data = await state.get_data()
     operation_id = data.get("history_note_operation_id")
+    year = data.get("history_note_year")
+    month = data.get("history_note_month")
+    if not isinstance(year, int) or not isinstance(month, int) or not 1 <= month <= 12:
+        year = month = None
     operation = (
         find_income_history_operation(message.from_user.id, operation_id)
         if isinstance(operation_id, int)
@@ -1760,6 +1851,8 @@ async def save_history_income_note(message: Message, state: FSMContext):
     note_keyboard = income_note_edit_keyboard(
         operation_id,
         bool((operation.get("payload") or {}).get("note")),
+        year,
+        month,
     )
     if not note:
         await message.answer(
@@ -1785,16 +1878,21 @@ async def save_history_income_note(message: Message, state: FSMContext):
         )
         return
     await state.clear()
-    await send_income_history_detail(message, message.from_user.id, operation_id)
+    await send_income_history_detail(
+        message, message.from_user.id, operation_id, year, month,
+    )
 
 
 @router.callback_query(F.data.startswith("incomehistory:note_delete:"))
 async def delete_history_income_note(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data
+        )
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     if not db.update_income_note(callback.from_user.id, operation_id, ""):
         await state.clear()
         await callback.message.answer(
@@ -1807,6 +1905,8 @@ async def delete_history_income_note(callback: CallbackQuery, state: FSMContext)
         callback.message,
         callback.from_user.id,
         operation_id,
+        year,
+        month,
     )
 
 
@@ -1815,20 +1915,28 @@ async def delete_history_income_note(callback: CallbackQuery, state: FSMContext)
 async def history_income_note_back(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data
+        )
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     await state.clear()
-    await send_income_history_detail(callback.message, callback.from_user.id, operation_id)
+    await send_income_history_detail(
+        callback.message, callback.from_user.id, operation_id, year, month,
+    )
 
 
 @router.callback_query(F.data.startswith("incomehistory:delete:"))
 async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data
+        )
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     operation = find_income_history_operation(callback.from_user.id, operation_id)
     if operation is None:
         await callback.message.answer(
@@ -1847,11 +1955,21 @@ async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
         "резервы и итоги расчётного периода.\n\n"
         "Удалить это поступление безвозвратно?",
         reply_markup=keyboard([
-            [("🗑️ Удалить доход", f"incomehistory:delete_confirm:{operation_id}")],
-            [("← К доходу", f"incomehistory:detail:{operation_id}")],
+            [(
+                "🗑️ Удалить доход",
+                income_history_operation_callback(
+                    "delete_confirm", operation_id, year, month,
+                ),
+            )],
+            [(
+                "← К доходу",
+                income_history_operation_callback(
+                    "detail", operation_id, year, month,
+                ),
+            )],
             [
                 ("← Главное меню", "menu:back"),
-                ("← К истории", "incomehistory:open"),
+                ("← К истории", income_history_scope_callback(year, month)),
             ],
         ]),
     )
@@ -1861,20 +1979,28 @@ async def ask_delete_income_history(callback: CallbackQuery, state: FSMContext):
 async def cancel_delete_income_history(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Удаление отменено")
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data
+        )
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     await state.clear()
-    await send_income_history_detail(callback.message, callback.from_user.id, operation_id)
+    await send_income_history_detail(
+        callback.message, callback.from_user.id, operation_id, year, month,
+    )
 
 
 @router.callback_query(F.data.startswith("incomehistory:delete_confirm:"))
 async def confirm_delete_income_history(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data
+        )
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     try:
         delete_income_safely(
             db,
@@ -1889,8 +2015,8 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
             f"{escape(str(error))}\n\n"
             "Бот сохранил все балансы без изменений.",
             reply_markup=keyboard([
-                [("← К доходу", f"incomehistory:detail:{operation_id}")],
-                [("← К истории", "incomehistory:open")],
+                [("← К доходу", income_history_operation_callback("detail", operation_id, year, month))],
+                [("← К истории", income_history_scope_callback(year, month))],
                 [("← Главное меню", "menu:back")],
             ]),
         )
@@ -1901,8 +2027,8 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
             "Не удалось завершить удаление. Бот сохранил все балансы без изменений.\n\n"
             "Попробуйте ещё раз или обратитесь в поддержку.",
             reply_markup=keyboard([
-                [("← К доходу", f"incomehistory:detail:{operation_id}")],
-                [("← К истории", "incomehistory:open")],
+                [("← К доходу", income_history_operation_callback("detail", operation_id, year, month))],
+                [("← К истории", income_history_scope_callback(year, month))],
                 [("← Главное меню", "menu:back")],
             ]),
         )
@@ -1912,7 +2038,7 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
         "<b>ДОХОД УДАЛЁН</b>\n\n"
         "Налог, распределение, балансы и итоги периода восстановлены.",
         reply_markup=keyboard([
-            [("← К истории доходов", "incomehistory:open")],
+            [("← К истории доходов", income_history_scope_callback(year, month))],
             [("← Главное меню", "menu:back")],
         ]),
     )
@@ -1922,9 +2048,12 @@ async def confirm_delete_income_history(callback: CallbackQuery, state: FSMConte
 async def income_history_distribution(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     try:
-        operation_id = int(callback.data.rsplit(":", 1)[1])
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data
+        )
     except (AttributeError, ValueError):
         operation_id = 0
+        year = month = None
     operation = find_income_history_operation(callback.from_user.id, operation_id)
     allocator = db.load_allocator(callback.from_user.id)
     if operation is None or allocator is None:
@@ -1937,8 +2066,13 @@ async def income_history_distribution(callback: CallbackQuery, state: FSMContext
     await callback.message.answer(
         income_distribution_text(operation, allocator),
         reply_markup=keyboard([
-            [("← К доходу", f"incomehistory:detail:{operation_id}")],
-            [("← К истории", "incomehistory:open")],
+            [(
+                "← К доходу",
+                income_history_operation_callback(
+                    "detail", operation_id, year, month,
+                ),
+            )],
+            [("← К истории", income_history_scope_callback(year, month))],
             [("← Главное меню", "menu:back")],
         ]),
     )
@@ -2013,13 +2147,13 @@ def income_analysis_items(allocator, operations: list[dict]) -> list[dict]:
     for item in grouped.values():
         label = item["label"]
         if label_counts[label] > 1:
-            if item["active"] and label not in totals:
+            if item["active"]:
                 display_label = label
             else:
                 duplicate_indexes[label] = duplicate_indexes.get(label, 0) + 1
                 suffix = duplicate_indexes[label]
                 display_label = f"{label} · прежний тип"
-                if display_label in totals:
+                if suffix > 1:
                     display_label = f"{display_label} {suffix}"
         else:
             display_label = label
@@ -2069,7 +2203,7 @@ def income_analysis_fallback_text(
 
 def income_analysis_navigation() -> object:
     return keyboard([
-        [("История доходов", "incomehistory:open")],
+        [("История текущего периода", "incomehistory:open")],
         [("Другой период", "incomeanalysis:periods")],
         [("Настроить цвета диаграммы", "incomeanalysis:colors")],
         [("← Главное меню", "menu:back")],
@@ -2402,7 +2536,9 @@ async def income_analysis_periods(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
     await callback.message.answer(
-        "<b>ДРУГОЙ ПЕРИОД</b>",
+        "<b>ДРУГОЙ ПЕРИОД</b>\n\n"
+        "Здесь доходы собраны по календарным месяцам — по указанной вами дате. "
+        "Календарный месяц может не совпадать с вашим расчётным периодом.",
         reply_markup=keyboard([
             [
                 ("По годам", f"incomeanalysis:year:{moscow_today().year}"),
