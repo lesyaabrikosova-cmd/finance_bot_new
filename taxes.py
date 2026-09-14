@@ -1131,7 +1131,7 @@ async def show_taxes(message: Message, telegram_id: int, detailed: bool = False)
         allocator.settings,
     )
     text += f"\n\n————————————\n{overview}"
-    rows = [[("Мои плановые налоги", "taxes:edit")]]
+    rows = [[("Мои налоги", "taxes:edit")]]
     rows.append([("Получено уведомление ФНС", "taxes:notice")])
     rows.append([("Налог оплачен", "taxes:payment")])
     rows.append([("ℹ️ Помощь", "taxes:help")])
