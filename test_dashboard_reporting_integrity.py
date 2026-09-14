@@ -224,7 +224,9 @@ class BalanceChartCompletenessTests(unittest.TestCase):
             sum(values.values(), D("0")),
             D("10") + sum(allocations.values(), D("0")),
         )
-        self.assertEqual(colors["Бытовой резерв"], "#24734A")
+        self.assertIn(colors["Бытовой резерв"], {
+            "#185337", "#3C9C73", "#69BE98", "#9AD7B7", "#C3E9D4",
+        })
 
 
 class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):

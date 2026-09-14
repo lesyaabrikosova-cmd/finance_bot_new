@@ -31,6 +31,7 @@ from income_colors import (
     INCOME_COLOR_FAMILIES,
     assign_missing_income_type_colors,
     income_color_name,
+    is_distinct_income_color,
     next_automatic_income_color,
     next_income_color_shade,
     select_income_color,
@@ -780,24 +781,19 @@ def period_balance_chart(allocator, allocations):
     from hashlib import sha256
     values, colors = {}, {}
 
-    life_colors = (
-        '#B83F4A', '#D45A66', '#E77A82', '#9D2635',
-        '#F09AA0', '#C94B5B', '#A83345', '#D96B73',
-    )
-    goal_colors = (
-        '#E7B52E', '#F2C94C', '#D99A1A', '#F6D365',
-        '#C98A13', '#FFD86B', '#E9AD35', '#F4C54F',
-    )
-    chest_colors = (
-        '#7A4B2B', '#9C6338', '#B87943', '#6B3E25',
-        '#C68A50', '#8A5732', '#A96D3D', '#704126',
-    )
-    reserve_colors = (
-        '#24734A', '#2F8F5B', '#48A66F', '#1F6440',
-        '#65B985', '#3A8055', '#79C596', '#185337',
-    )
+    # Semantic colour families for the balance chart.  The selector below
+    # compares candidates in OKLab, so these are not merely different HEXes.
+    tax_colors = ('#7152C8', '#9675E5', '#D0C1F4')
+    salary_fund_colors = ('#636B78', '#8B92A1', '#D0D4DA')
+    bracket_reserve_colors = ('#315EAF', '#5584DB', '#88A9E9', '#B7C9F2')
+    debt_colors = ('#C96B2A', '#E89555', '#F1B887', '#F6D4B3')
+    life_colors = ('#9D2635', '#C9566B', '#E68091', '#F6CDD4')
+    household_reserve_colors = ('#185337', '#3C9C73', '#69BE98', '#9AD7B7', '#C3E9D4')
+    goal_colors = ('#C7922D', '#E5B65B', '#F0CF8B', '#F6E2B4')
+    chest_colors = ('#70482F', '#9A6B4A', '#BC9274', '#D8BBA7')
     archived_suffix = re.compile(r"^(?P<name>.+?) · прежний (?P<id>[^ ]+)$")
     archived_counts: dict[tuple[str, str], int] = {}
+    used_family_colors: dict[tuple[str, ...], list[str]] = {}
 
     def readable_name(raw_name: str, kind: str) -> tuple[str, str, bool]:
         """Hide the technical ID while keeping archived identities distinct."""
@@ -824,16 +820,22 @@ def period_balance_chart(allocator, allocations):
             values[label] = values.get(label, Decimal(0)) + value
             colors[label] = color
 
-    def shade(name, palette, used):
-        """Choose distinct shades within a color family for the current chart."""
+    def shade(name, palette):
+        """Pick a perceptually distinct shade within its semantic family."""
+        family_used = used_family_colors.setdefault(tuple(palette), [])
         seed = int.from_bytes(sha256(name.encode()).digest()[:4], 'big')
         start = seed % len(palette)
         for offset in range(len(palette)):
             color = palette[(start + offset) % len(palette)]
-            if color not in used:
-                used.add(color)
+            if color not in colors.values() and is_distinct_income_color(color, family_used):
+                family_used.append(color)
                 return color
-        return palette[start]
+        # A large number of same-family envelopes can exhaust its prepared
+        # shades.  The shared selector still checks perceptual distance before
+        # using a deterministic reserve colour.
+        color = select_income_color(family_used, preferred=palette)
+        family_used.append(color)
+        return color
 
     consumed: set[str] = set()
     planned_tax = D(allocations.get('КЖ:Налоги', 0))
@@ -843,15 +845,15 @@ def period_balance_chart(allocator, allocations):
         # Compatibility for direct calls with a plain dict and legacy users
         # whose operation ledger predates income snapshots.
         ledger_tax = D(allocator.state.period_tax)
-    add('Налог', D(ledger_tax) + planned_tax + direct_tax, '#7656D8')
+    add('Налог', D(ledger_tax) + planned_tax + direct_tax, shade('tax', tax_colors))
     consumed.update({'КЖ:Налоги', 'Налог'})
 
-    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), '#00B7E8')
-    add('Подушка', allocations.get('Подушка', 0), '#173F8A')
-    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), '#7EC8F5')
-    add('Инвестиции', allocations.get('Инвестиции', 0), '#32A9E0')
-    add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), '#9C7BAB')
-    add('Досрочное погашение', allocations.get('Досрочное', 0), '#74608C')
+    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), shade('salary-fund', salary_fund_colors))
+    add('Подушка', allocations.get('Подушка', 0), shade('pillow', bracket_reserve_colors))
+    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), shade('stabilizer', bracket_reserve_colors))
+    add('Инвестиции', allocations.get('Инвестиции', 0), shade('investments', bracket_reserve_colors))
+    add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), shade('minimum-debt', debt_colors))
+    add('Досрочное погашение', allocations.get('Досрочное', 0), shade('early-debt', debt_colors))
     consumed.update({
         'Фонд Зарплаты', 'Подушка', 'Стабилизатор дохода',
         'Инвестиции', 'Мин. платеж', 'Досрочное',
@@ -862,6 +864,9 @@ def period_balance_chart(allocator, allocations):
         if str(key).startswith('Рабочие обязательства:')
     ]
     for key, value in sorted(work_obligations, key=lambda item: D(item[1]), reverse=True):
+        # This legacy cyclic-income route is outside the user-facing balance
+        # colour scheme; retain its existing presentation until it is designed
+        # as a separate feature.
         add(key.replace(':', ' · '), value, '#B36C75')
         consumed.add(key)
 
@@ -889,15 +894,14 @@ def period_balance_chart(allocator, allocations):
         }
 
     salary = life.pop('Зарплата', None)
-    used_life_colors = set()
     for raw_name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
         name, identity, _ = readable_name(raw_name, 'life')
         add(
             f'КМ · {name}', value,
-            shade(category_ids.get(raw_name, identity), life_colors, used_life_colors),
+            shade(category_ids.get(raw_name, identity), life_colors),
         )
     if salary is not None:
-        add('КМ · Зарплата', salary, shade(category_ids.get('Зарплата', 'Зарплата'), life_colors, used_life_colors))
+        add('КМ · Зарплата', salary, shade(category_ids.get('Зарплата', 'Зарплата'), life_colors))
 
     reserve_items = [
         (str(key)[3:], value)
@@ -908,7 +912,6 @@ def period_balance_chart(allocator, allocations):
         str(key) for key in allocations
         if str(key).startswith('БР:')
     )
-    used_reserve_colors = set()
     for raw_name, value in sorted(reserve_items, key=lambda item: D(item[1]), reverse=True):
         name, identity, _ = readable_name(raw_name, 'reserve')
         add(
@@ -917,11 +920,10 @@ def period_balance_chart(allocator, allocations):
                 getattr(settings, 'household_reserve_category_ids', {}).get(
                     raw_name, identity,
                 ),
-                reserve_colors,
-                used_reserve_colors,
+                household_reserve_colors,
             ),
         )
-    add('Бытовой резерв', allocations.get('Бытовой резерв', 0), '#24734A')
+    add('Бытовой резерв', allocations.get('Бытовой резерв', 0), shade('household-reserve', household_reserve_colors))
     consumed.add('Бытовой резерв')
 
     goal_map = {goal.name: goal for goal in getattr(settings, 'goals', [])}
@@ -934,7 +936,6 @@ def period_balance_chart(allocator, allocations):
         str(key) for key in allocations
         if str(key).startswith('Цели:')
     )
-    used_goal_colors, used_chest_colors = set(), set()
     for raw_name, value, recorded_kind in sorted(
         goal_items, key=lambda item: D(item[1]), reverse=True,
     ):
@@ -950,9 +951,8 @@ def period_balance_chart(allocator, allocations):
         if archived:
             display += clean_name[len(base_name):]
         palette = chest_colors if is_chest else goal_colors
-        used = used_chest_colors if is_chest else used_goal_colors
         identity = getattr(goal, 'uid', '') or identity
-        add(f'Цели и Сундуки · {display}', value, shade(identity, palette, used))
+        add(f'Цели и Сундуки · {display}', value, shade(identity, palette))
 
     # Keep future/legacy one-off destinations visible until the presentation
     # layer receives an explicit family for them. Silently omitting a positive
@@ -960,7 +960,7 @@ def period_balance_chart(allocator, allocations):
     for key, value in allocations.items():
         key = str(key)
         if key not in consumed:
-            add(f'Прочее · {key.replace(":", " · ")}', value, '#8B7D91')
+            add(f'Прочее · {key.replace(":", " · ")}', value, shade(key, ('#8B7D91',)))
     return values, colors
 
 

@@ -23,7 +23,7 @@ class PeriodChartTests(unittest.TestCase):
         self.assertEqual(len(values),7)
         self.assertNotIn('Подушка',values)
         self.assertEqual(sum(values.values()),D('85669.74'))
-        self.assertEqual(colors['Налог'],'#7656D8')
+        self.assertIn(colors['Налог'], {'#7152C8', '#9675E5', '#D0C1F4'})
         self.assertEqual(len({colors[k] for k in values if k.startswith('КМ')}),5)
 
     def test_keeps_all_goals_and_every_household_sub_envelope(self):
@@ -35,3 +35,37 @@ class PeriodChartTests(unittest.TestCase):
         self.assertEqual(sum(values.values()),D(320))
         self.assertEqual(values['Бытовой резерв'], D(100))
         self.assertEqual(values['Бытовой резерв · Продукты'], D(100))
+
+    def test_semantic_balance_families_use_visually_distinct_shades(self):
+        from income_colors import MIN_INCOME_COLOR_DISTANCE, income_color_distance
+        a = SimpleNamespace(
+            state=SimpleNamespace(period_tax=D(10), period_life_topups={}),
+            settings=SimpleNamespace(
+                life_category_ids={}, household_reserve_category_ids={}, goals=[],
+            ),
+        )
+        _, colors = period_balance_chart(a, {
+            'Фонд Зарплаты': D(10), 'Подушка': D(10),
+            'Стабилизатор дохода': D(10), 'Инвестиции': D(10),
+            'Мин. платеж': D(10), 'Досрочное': D(10),
+            'КЖ:Квартира': D(10), 'КЖ:Еда': D(10),
+            'БР:Продукты': D(10), 'Бытовой резерв': D(10),
+            'Цели:Отпуск': D(10), 'Цели:Сундук': D(10),
+        })
+        self.assertIn(colors['Налог'], {'#7152C8', '#9675E5', '#D0C1F4'})
+        self.assertIn(colors['Фонд Зарплаты'], {'#636B78', '#8B92A1', '#D0D4DA'})
+        groups = (
+            ('Подушка', 'Стабилизатор', 'Инвестиции'),
+            ('Минимальные платежи по долгам', 'Досрочное погашение'),
+            ('КМ · Квартира', 'КМ · Еда'),
+            ('Бытовой резерв · Продукты', 'Бытовой резерв'),
+        )
+        for labels in groups:
+            selected = [colors[label] for label in labels]
+            self.assertEqual(len(selected), len(set(selected)))
+            for index, color in enumerate(selected):
+                for other in selected[index + 1:]:
+                    self.assertGreaterEqual(
+                        income_color_distance(color, other),
+                        MIN_INCOME_COLOR_DISTANCE,
+                    )
