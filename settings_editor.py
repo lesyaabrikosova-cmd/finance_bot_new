@@ -59,18 +59,25 @@ class FinancialArchetypeStates(StatesGroup):
     preview = State()
 
 
-async def show_reserve_balances(message: Message, telegram_id: int) -> None:
+async def show_reserve_balances(
+    message: Message, telegram_id: int, *, from_level: bool = False,
+) -> None:
     """Return to the compact reserve-balance menu, not full settings."""
     allocator = db.load_allocator(telegram_id)
     if allocator is None:
         await message.answer("Сначала создайте профиль через /start.")
         return
-    rows = [[("Баланс Подушки", "reserves:edit:pillow")]]
-    if allocator.settings.needs_stabilizer:
-        rows.append([("Баланс Стабилизатора", "reserves:edit:stabilizer")])
+    edit_prefix = "reserves:level:edit" if from_level else "reserves:edit"
+    rows = []
     if allocator.profile_id == "cyclic":
-        rows.append([("Баланс Фонда Зарплаты", "reserves:edit:salary_fund")])
-    rows.append([("← Главное меню", "menu:back")])
+        rows.append([("✎ Баланс Фонда Зарплаты", f"{edit_prefix}:salary_fund")])
+    rows.append([("✎ Баланс Подушки", f"{edit_prefix}:pillow")])
+    if allocator.settings.needs_stabilizer:
+        rows.append([("✎ Баланс Стабилизатора", f"{edit_prefix}:stabilizer")])
+    rows.append(
+        [("← Главное меню", "menu:back"), ("← Уровень", "menu:state")]
+        if from_level else [("← Главное меню", "menu:back")]
+    )
     await message.answer(
         "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
         "Выберите резерв и укажите, сколько денег в нём сейчас. "
@@ -82,8 +89,11 @@ async def show_reserve_balances(message: Message, telegram_id: int) -> None:
 async def reserve_balance_exit(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
-    if data.get("reserve_balance_context") == "reserves":
-        await show_reserve_balances(callback.message, callback.from_user.id)
+    if data.get("reserve_balance_context") in {"reserves", "level_reserves"}:
+        await show_reserve_balances(
+            callback.message, callback.from_user.id,
+            from_level=data.get("reserve_balance_context") == "level_reserves",
+        )
     else:
         await show_settings_actions(callback.message, callback.from_user.id)
 
@@ -126,6 +136,24 @@ async def reserve_balance_edit_stabilizer(callback: CallbackQuery, state: FSMCon
 @router.callback_query(F.data == "reserves:edit:salary_fund")
 async def reserve_balance_edit_salary_fund(callback: CallbackQuery, state: FSMContext):
     await state.update_data(reserve_balance_context="reserves")
+    await edit_intercontract_balance(callback, state)
+
+
+@router.callback_query(F.data == "reserves:level:edit:pillow")
+async def level_reserve_balance_edit_pillow(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(reserve_balance_context="level_reserves")
+    await edit_pillow(callback, state)
+
+
+@router.callback_query(F.data == "reserves:level:edit:stabilizer")
+async def level_reserve_balance_edit_stabilizer(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(reserve_balance_context="level_reserves")
+    await edit_stabilizer_balance(callback, state)
+
+
+@router.callback_query(F.data == "reserves:level:edit:salary_fund")
+async def level_reserve_balance_edit_salary_fund(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(reserve_balance_context="level_reserves")
     await edit_intercontract_balance(callback, state)
 
 

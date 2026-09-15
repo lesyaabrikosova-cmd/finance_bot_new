@@ -616,7 +616,7 @@ async def send_mode(
     )
 
     rows = [
-        [("✎ Балансы резервов", "menu:reserves")],
+        [("✎ Балансы резервов", "menu:reserves:level")],
         [("← Главное меню", "menu:back")],
     ]
 
@@ -2706,19 +2706,25 @@ async def income_analysis_year(callback: CallbackQuery, state: FSMContext):
     await send_income_period_analysis(callback.message, callback.from_user.id, "year", year)
 
 
-@router.callback_query(F.data == "menu:reserves")
+@router.callback_query(F.data.in_({"menu:reserves", "menu:reserves:level"}))
 async def menu_reserves(callback: CallbackQuery):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is None:
         await callback.message.answer("Сначала создайте профиль через /start.")
         return
-    rows = [[("Баланс Подушки", "reserves:edit:pillow")]]
-    if allocator.settings.needs_stabilizer:
-        rows.append([("Баланс Стабилизатора", "reserves:edit:stabilizer")])
+    from_level = callback.data == "menu:reserves:level"
+    edit_prefix = "reserves:level:edit" if from_level else "reserves:edit"
+    rows = []
     if allocator.profile_id == "cyclic":
-        rows.append([("Баланс Фонда Зарплаты", "reserves:edit:salary_fund")])
-    rows.append([("← Главное меню", "menu:back")])
+        rows.append([("✎ Баланс Фонда Зарплаты", f"{edit_prefix}:salary_fund")])
+    rows.append([("✎ Баланс Подушки", f"{edit_prefix}:pillow")])
+    if allocator.settings.needs_stabilizer:
+        rows.append([("✎ Баланс Стабилизатора", f"{edit_prefix}:stabilizer")])
+    rows.append(
+        [("← Главное меню", "menu:back"), ("← Уровень", "menu:state")]
+        if from_level else [("← Главное меню", "menu:back")]
+    )
     settings, state = allocator.settings, allocator.state
     debt_level_one = (
         any(credit.active for credit in settings.credits)
