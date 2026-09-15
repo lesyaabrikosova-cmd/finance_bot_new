@@ -5,9 +5,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from financial_engine import AllocatorState, FinancialAllocator, Goal, UserSettings
-from goals_manager import toggle_position, delete_position, complete_position
-from onboarding import finish_goals_onboarding, finish_without_goals
+from financial_engine import (
+    AllocatorState,
+    FinancialAllocator,
+    Goal,
+    UserSettings,
+    active_position_limit_error,
+)
+from goals_manager import (
+    complete_position,
+    delete_position,
+    persist_new_position,
+    toggle_position,
+)
+from onboarding import add_goal_draft, finish_goals_onboarding, finish_without_goals
 from storage import Database
 
 
@@ -30,7 +41,70 @@ class GoalOverflowTests(unittest.TestCase):
         self.assertEqual(result, {"Цели:Ноутбук": D(2000), "Цели:Поездка": D(2000),
                                   "Цели:Подарки": D(1500), "Цели:Хотелки": D(4500)})
         self.assertEqual(a.state.goal_balances["Ноутбук"], D(10000))
-        self.assertEqual(a.settings.goals[0].status, "active")
+        self.assertEqual(a.settings.goals[0].status, "completed")
+
+    def test_three_goals_and_five_chests_are_allowed(self):
+        existing = [Goal(f"Цель {index}", 10) for index in range(3)]
+        existing += [
+            Goal(f"Сундук {index}", 10, position_type="chest")
+            for index in range(4)
+        ]
+        self.assertIsNone(active_position_limit_error(existing, "chest"))
+
+    def test_five_goals_and_three_chests_are_allowed(self):
+        existing = [Goal(f"Цель {index}", 10) for index in range(5)]
+        existing += [
+            Goal(f"Сундук {index}", 10, position_type="chest")
+            for index in range(2)
+        ]
+        self.assertIsNone(active_position_limit_error(existing, "chest"))
+
+    def test_sixth_active_goal_is_rejected(self):
+        existing = [Goal(f"Цель {index}", 10) for index in range(5)]
+        existing.append(Goal("Сундук", 50, position_type="chest"))
+        self.assertIn("5 Целей", active_position_limit_error(existing, "goal"))
+
+    def test_ninth_active_position_is_rejected(self):
+        existing = [Goal(f"Цель {index}", 10) for index in range(5)]
+        existing += [
+            Goal(f"Сундук {index}", 10, position_type="chest")
+            for index in range(3)
+        ]
+        self.assertIn("8", active_position_limit_error(existing, "chest"))
+
+    def test_core_rejects_activating_sixth_goal(self):
+        goals = [Goal(f"Цель {index}", 19, target_amount=1000) for index in range(5)]
+        goals += [
+            Goal("Сундук", 5, position_type="chest"),
+            Goal("Шестая", 0, status="paused", target_amount=1000),
+        ]
+        a = allocator(goals)
+        with self.assertRaisesRegex(ValueError, "5 Целей"):
+            a.activate_position(goals[-1])
+        self.assertEqual(goals[-1].status, "paused")
+
+    def test_core_rejects_activating_ninth_position(self):
+        goals = [Goal(f"Цель {index}", 10, target_amount=1000) for index in range(4)]
+        goals += [
+            Goal(f"Сундук {index}", 15, position_type="chest")
+            for index in range(4)
+        ]
+        waiting = Goal("Ещё один", 0, position_type="chest", status="paused")
+        goals.append(waiting)
+        a = allocator(goals)
+        with self.assertRaisesRegex(ValueError, "8"):
+            a.activate_position(waiting)
+        self.assertEqual(waiting.status, "paused")
+
+    def test_pause_and_reactivation_preserve_balance(self):
+        goal = Goal("Отпуск", 40, target_amount=1000, balance=250)
+        chest = Goal("Подарки", 60, position_type="chest")
+        a = allocator([goal, chest])
+        original_balance = a.state.goal_balances[goal.name]
+        a.pause_position(goal)
+        self.assertEqual(a.state.goal_balances[goal.name], original_balance)
+        a.activate_position(goal)
+        self.assertEqual(a.state.goal_balances[goal.name], original_balance)
 
     def test_second_allocation_does_not_refill_full_goal(self):
         a = allocator([Goal("Цель", 100, target_amount=10)])
@@ -38,6 +112,59 @@ class GoalOverflowTests(unittest.TestCase):
         a._allocate_goals(D(100), {})
         self.assertEqual(a.state.goal_balances["Цель"], D(10))
         self.assertEqual(a.state.goal_balances["Будущие покупки"], D(190))
+
+    def test_completed_goal_releases_an_active_slot(self):
+        goals = [Goal("Готовая", 20, target_amount=10)]
+        goals += [Goal(f"Цель {index}", 10, target_amount=1000) for index in range(4)]
+        goals += [
+            Goal("Сундук 0", 20, position_type="chest"),
+            Goal("Сундук 1", 10, position_type="chest"),
+            Goal("Сундук 2", 10, position_type="chest"),
+        ]
+        a = allocator(goals)
+        a._allocate_goals(D(50), {})
+        self.assertEqual(a.settings.goals[0].status, "completed")
+        self.assertIsNone(active_position_limit_error(a.settings.goals, "goal"))
+        self.assertEqual(
+            sum((goal.percentage for goal in a.settings.active_goals), D(0)),
+            D(100),
+        )
+
+    def test_paused_goal_forecast_has_zero_monthly_funding(self):
+        a = allocator([
+            Goal("Пауза", 50, status="paused", target_amount=1000),
+            Goal("Сундук", 100, position_type="chest"),
+        ])
+        forecast = a.goal_forecast(a.settings.goals[0])
+        self.assertEqual(forecast["monthly_minimum"], D(0))
+        self.assertEqual(forecast["monthly_maximum"], D(0))
+
+    def test_paused_chest_receives_zero(self):
+        a = allocator([
+            Goal("Активный", 100, position_type="chest"),
+            Goal("Ожидающий", 40, position_type="chest", status="paused"),
+        ])
+        allocations = {}
+        a._allocate_goals(D(100), allocations)
+        self.assertEqual(allocations, {"Цели:Активный": D(100)})
+        self.assertEqual(a.state.goal_balances["Ожидающий"], D(0))
+
+    def test_legacy_over_limit_profile_is_preserved_for_user_choice(self):
+        goals = [Goal(f"Цель {index}", 10, target_amount=1000) for index in range(5)]
+        goals += [
+            Goal("Сундук 0", 13, position_type="chest"),
+            Goal("Сундук 1", 13, position_type="chest"),
+            Goal("Сундук 2", 12, position_type="chest"),
+            Goal("Сундук 3", 12, position_type="chest"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "legacy-limit.db")
+            database.save_allocator(42, allocator(goals))
+            restored = database.load_allocator(42)
+            self.assertEqual(len(restored.settings.goals), 9)
+            self.assertEqual(len(restored.settings.active_goals), 9)
+            self.assertTrue(all(goal.status == "active" for goal in restored.settings.goals))
+            database.close()
 
     def test_buffer_is_part_of_cap(self):
         a = allocator([Goal("Цель", 100, target_amount=100, buffer_enabled=True,
@@ -104,6 +231,86 @@ class GoalOverflowTests(unittest.TestCase):
 
 
 class ChestLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_main_manager_creates_ninth_position_in_waiting(self):
+        goals = [Goal(f"Цель {index}", 10, target_amount=1000) for index in range(4)]
+        goals += [
+            Goal(f"Сундук {index}", 15, position_type="chest")
+            for index in range(4)
+        ]
+        a = allocator(goals)
+        state = AsyncMock()
+        state.get_data.return_value = {
+            "goal_draft": {
+                "name": "Девятая позиция",
+                "position_type": "chest",
+            }
+        }
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42),
+            answer=AsyncMock(),
+        )
+        with (
+            patch("goals_manager.db") as db,
+            patch("goals_manager.show_goals_manager", new=AsyncMock()),
+        ):
+            db.load_allocator.return_value = a
+            await persist_new_position(message, state)
+            db.save_allocator.assert_called_once()
+        created = a.settings.goals[-1]
+        self.assertEqual(created.status, "paused")
+        self.assertEqual(created.percentage, D(0))
+        self.assertEqual(created.balance, D(0))
+
+    async def test_ninth_onboarding_position_is_created_paused(self):
+        class DraftState:
+            def __init__(self):
+                self.data = {
+                    "goal_drafts": [
+                        {
+                            "name": f"Сундук {index}",
+                            "position_type": "chest",
+                            "status": "active",
+                        }
+                        for index in range(8)
+                    ]
+                }
+
+            async def get_data(self):
+                return self.data
+
+            async def update_data(self, **values):
+                self.data.update(values)
+
+        state = DraftState()
+        await add_goal_draft(state, {"name": "Девятый", "position_type": "chest"})
+        self.assertEqual(len(state.data["goal_drafts"]), 9)
+        self.assertEqual(state.data["goal_drafts"][-1]["status"], "paused")
+        self.assertEqual(state.data["goal_drafts"][-1]["percentage"], "0")
+
+    async def test_sixth_onboarding_goal_is_created_paused(self):
+        class DraftState:
+            def __init__(self):
+                self.data = {
+                    "goal_drafts": [
+                        {
+                            "name": f"Цель {index}",
+                            "position_type": "goal",
+                            "status": "active",
+                        }
+                        for index in range(5)
+                    ]
+                }
+
+            async def get_data(self):
+                return self.data
+
+            async def update_data(self, **values):
+                self.data.update(values)
+
+        state = DraftState()
+        await add_goal_draft(state, {"name": "Шестая", "position_type": "goal"})
+        self.assertEqual(state.data["goal_drafts"][-1]["status"], "paused")
+
     async def test_onboarding_requires_chest_before_percentages(self):
         state = AsyncMock()
         state.get_data.return_value = {"goal_drafts": [{"name": "Ноутбук", "position_type": "goal"}]}

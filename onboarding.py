@@ -24,6 +24,8 @@ from financial_engine import (
     Credit,
     FinancialAllocator,
     Goal,
+    MAX_ACTIVE_GOALS,
+    MAX_ACTIVE_POSITIONS,
     PhaseLifeBudget,
     UserSettings,
     VACATION_BUDGET_ITEMS,
@@ -7249,9 +7251,7 @@ def build_settings_from_data(
     goals = [
         Goal(
             name=item["name"],
-            percentage=Decimal(
-                item["percentage"]
-            ),
+            percentage=Decimal(item.get("percentage", "0")),
             position_type=item.get("position_type", "goal"),
             order_index=index,
             is_auto_percentage=bool(item.get("is_auto_percentage", False)),
@@ -7264,6 +7264,7 @@ def build_settings_from_data(
             deadline=item.get("deadline"),
             buffer_enabled=bool(item.get("buffer_enabled", False)),
             buffer_percent=Decimal(str(item.get("buffer_percent", "0"))),
+            status=item.get("status", "active"),
         )
         for index, item in enumerate(data.get(
             "goals",
@@ -7759,6 +7760,8 @@ def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
         suffix = ""
         if percentages and item.get("percentage") is not None:
             suffix = f" — <b>{item['percentage']}%</b>"
+        if item.get("status", "active") == "paused":
+            suffix += " · <i>в ожидании</i>"
         lines.append(
             f"• {goal_icon(item)} <b>{escape(goal_draft_display_name(item))}</b>{suffix}"
         )
@@ -7771,6 +7774,9 @@ def goal_percentage_progress(drafts: list[dict]) -> str:
     for item in drafts:
         name = escape(goal_draft_display_name(item))
         percentage = item.get("percentage")
+        if item.get("status", "active") == "paused":
+            lines.append(f"• {goal_icon(item)} <b>{name}</b> · <i>в ожидании</i>")
+            continue
         if percentage is None:
             lines.append(f"• {goal_icon(item)} <b>{name}</b>")
         else:
@@ -7830,9 +7836,17 @@ def goals_capacity_profile_text(data: dict) -> str:
 async def show_goals_menu(message: Message, state: FSMContext):
     data = await state.get_data()
     drafts = data.get("goal_drafts", [])
+    active_drafts = [
+        item for item in drafts if item.get("status", "active") == "active"
+    ]
+    active_goal_count = sum(
+        item.get("position_type", "goal") == "goal" for item in active_drafts
+    )
     selected = {str(item.get("name", "")).casefold() for item in drafts}
     rows: list[list[tuple[str, str]]] = []
-    can_add = len(drafts) < 10
+    # Creation is unlimited. Positions beyond the funding limits remain in
+    # the profile as PAUSED and may be activated after a slot opens.
+    can_add = True
     if can_add and "подарки" not in selected:
         rows.append([("🧳 Сундук Подарков", "goals:gift:offer")])
     for index, item in enumerate(data.get("br_items", [])):
@@ -7866,6 +7880,9 @@ async def show_goals_menu(message: Message, state: FSMContext):
         "Сначала Аллокатор обеспечивает Критический Минимум, Бытовой Резерв и "
         "текущую финансовую защиту. Оставшиеся деньги можно направлять на Цели и в Сундуки.\n\n"
         f"{goals_capacity_profile_text(data)}\n\n"
+        f"Активно: <b>{len(active_drafts)} из {MAX_ACTIVE_POSITIONS}</b> · "
+        f"Целей: <b>{active_goal_count} из {MAX_ACTIVE_GOALS}</b>.\n"
+        "Остальные позиции сохранятся в ожидании и будут получать 0 ₽.\n\n"
         f"{goal_draft_summary(drafts)}\n\n"
         "Рекомендую познакомиться с вариантами, которые многие недооценивают. "
         "Нажмите на любой — я коротко расскажу, зачем он нужен. "
@@ -7903,8 +7920,18 @@ async def add_goal_draft(state: FSMContext, item: dict):
         for draft in drafts
     ):
         raise ValueError("Позиция с таким названием уже есть в списке.")
-    if len(drafts) >= 10:
-        raise ValueError("Одновременно можно настроить не больше 10 Целей и Сундуков.")
+    item = dict(item)
+    active = [draft for draft in drafts if draft.get("status", "active") == "active"]
+    active_goals = sum(draft.get("position_type", "goal") == "goal" for draft in active)
+    if (
+        item.get("position_type", "goal") == "goal"
+        and active_goals >= MAX_ACTIVE_GOALS
+    ) or len(active) >= MAX_ACTIVE_POSITIONS:
+        item["status"] = "paused"
+        item["percentage"] = "0"
+        item["is_auto_percentage"] = False
+    else:
+        item["status"] = "active"
     drafts.append(item)
     await state.update_data(goal_drafts=drafts)
 
@@ -8382,8 +8409,12 @@ async def finish_goals_onboarding(callback: CallbackQuery, state: FSMContext):
         )
         return
     for item in drafts:
-        item.pop("percentage", None)
-        item.pop("is_auto_percentage", None)
+        if item.get("status", "active") == "active":
+            item.pop("percentage", None)
+            item.pop("is_auto_percentage", None)
+        else:
+            item["percentage"] = "0"
+            item["is_auto_percentage"] = False
     await state.update_data(goal_percentages=[])
     await state.update_data(goal_drafts=drafts)
     await ask_next_goal_percentage(callback.message, state)
@@ -8392,19 +8423,25 @@ async def finish_goals_onboarding(callback: CallbackQuery, state: FSMContext):
 async def ask_next_goal_percentage(message: Message, state: FSMContext):
     data = await state.get_data()
     drafts = list(data.get("goal_drafts", []))
+    active_indices = [
+        draft_index
+        for draft_index, draft in enumerate(drafts)
+        if draft.get("status", "active") == "active"
+    ]
+    active_drafts = [drafts[draft_index] for draft_index in active_indices]
     chosen = [Decimal(str(value)) for value in data.get("goal_percentages", [])]
     index = len(chosen)
-    if index >= len(drafts) - 1:
-        percentages = sequential_goal_percentages(chosen, len(drafts))
-        for position, percentage in zip(drafts, percentages):
-            position["percentage"] = str(percentage)
-            position["is_auto_percentage"] = False
-        drafts[-1]["is_auto_percentage"] = True
+    if index >= len(active_drafts) - 1:
+        percentages = sequential_goal_percentages(chosen, len(active_drafts))
+        for draft_index, percentage in zip(active_indices, percentages):
+            drafts[draft_index]["percentage"] = str(percentage)
+            drafts[draft_index]["is_auto_percentage"] = False
+        drafts[active_indices[-1]]["is_auto_percentage"] = True
         await state.update_data(goal_drafts=drafts, goals=drafts)
         await show_goal_percentages_review(message, state)
         return
 
-    minimum, maximum = goal_percentage_bounds(chosen, len(drafts) - index - 1)
+    minimum, maximum = goal_percentage_bounds(chosen, len(active_drafts) - index - 1)
     capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
     await state.set_state(SetupStates.goal_percentage)
     capacity_text = (
@@ -8412,7 +8449,7 @@ async def ask_next_goal_percentage(message: Message, state: FSMContext):
     )
     prompt = (
         f"<b>→ Введите процент от {minimum} до {maximum} </b>\n\n"
-        f"<b>на {goal_icon(drafts[index])} {escape(goal_draft_display_name(drafts[index]))}.</b>\n\n"
+        f"<b>на {goal_icon(active_drafts[index])} {escape(goal_draft_display_name(active_drafts[index]))}.</b>\n\n"
         "Например: 20"
     )
     if index == 0:
@@ -8446,8 +8483,13 @@ async def save_goal_percentage(message: Message, state: FSMContext):
     data = await state.get_data()
     chosen = [Decimal(str(item)) for item in data.get("goal_percentages", [])]
     drafts = list(data.get("goal_drafts", []))
+    active_indices = [
+        draft_index
+        for draft_index, draft in enumerate(drafts)
+        if draft.get("status", "active") == "active"
+    ]
     index = len(chosen)
-    minimum, maximum = goal_percentage_bounds(chosen, len(drafts) - index - 1)
+    minimum, maximum = goal_percentage_bounds(chosen, len(active_indices) - index - 1)
     if (
         value is None
         or value != value.to_integral_value()
@@ -8456,7 +8498,7 @@ async def save_goal_percentage(message: Message, state: FSMContext):
         await message.answer(f"Введите целое число от {minimum} до {maximum}.")
         return
     chosen.append(value)
-    drafts[index]["percentage"] = str(value)
+    drafts[active_indices[index]]["percentage"] = str(value)
     await state.update_data(goal_percentages=[str(item) for item in chosen], goal_drafts=drafts)
     await ask_next_goal_percentage(message, state)
 
@@ -8468,7 +8510,13 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
     minimum = Decimal(str(capacity["minimum"]))
     maximum = Decimal(str(capacity["maximum"]))
     preview_allocator = onboarding_goal_allocator(data, drafts)
-    review_items = list(enumerate(zip(drafts, preview_allocator.settings.goals)))
+    review_items = [
+        (draft_index, (item, goal))
+        for draft_index, (item, goal) in enumerate(
+            zip(drafts, preview_allocator.settings.goals)
+        )
+        if item.get("status", "active") == "active"
+    ]
     review_items.sort(key=lambda pair: Decimal(str(pair[1][0]["percentage"])), reverse=True)
     lines = []
     warning_indices = []
@@ -8506,6 +8554,14 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
                         estimate = f"примерно {fast}–{slow} мес."
                     line += f"\n&#160;&#160;&#160;&#160;&#160;&#160;ℹ️ <i>Ориентировочный срок — {estimate}.</i>"
         lines.append(line)
+    waiting = [
+        f"{goal_icon(item)} <b>{escape(goal_review_name(item))}</b> · "
+        "<i>в ожидании, 0 ₽</i>"
+        for item in drafts
+        if item.get("status", "active") == "paused"
+    ]
+    if waiting:
+        lines.append("<b>В ОЖИДАНИИ</b>\n" + "\n".join(waiting))
     await state.set_state(SetupStates.goal_percentages_review)
     action_rows = [
         [(f"✎ {goal_draft_display_name(drafts[index])}", f"goals:quick-edit:{index}")]

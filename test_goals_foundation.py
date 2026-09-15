@@ -160,6 +160,34 @@ class GoalFoundationTests(unittest.TestCase):
         self.assertEqual(goal.full_target_amount, Decimal("165000"))
         self.assertTrue(goal.is_auto_percentage)
 
+    def test_onboarding_preserves_waiting_position_status(self):
+        settings = build_settings_from_data({
+            "has_debts": False,
+            "employment_type": "Фрилансер",
+            "critical_life": "90000",
+            "household_reserve": "20000",
+            "average_income": "180000",
+            "tax_rate": "0",
+            "force_majeure_months": "4",
+            "goals": [
+                {
+                    "name": "Подарки",
+                    "position_type": "chest",
+                    "percentage": "100",
+                    "status": "active",
+                },
+                {
+                    "name": "Позже",
+                    "position_type": "goal",
+                    "percentage": "0",
+                    "status": "paused",
+                    "target_amount": "100000",
+                },
+            ],
+        })
+        self.assertEqual(settings.goals[1].status, "paused")
+        self.assertEqual(settings.goals[1].percentage, Decimal("0"))
+
     def test_onboarding_summary_distinguishes_goal_and_chest(self):
         summary = goal_draft_summary([
             {"name": "Отпуск", "position_type": "goal"},

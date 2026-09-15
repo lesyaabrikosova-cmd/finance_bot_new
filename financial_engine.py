@@ -30,6 +30,12 @@ ONE = Decimal("1")
 HUNDRED = Decimal("100")
 CENT = Decimal("0.01")
 
+# Goals and chests may be created without a limit, but only this many are
+# allowed to receive new money at the same time.
+MAX_ACTIVE_GOALS = 5
+MAX_ACTIVE_POSITIONS = 8
+RECOMMENDED_ACTIVE_GOALS = 3
+
 # These labels identify allocator-owned routes. User-created life envelopes
 # must not reuse them, otherwise a tax/reserve allocation can overwrite a
 # category that merely happens to have the same visible name.
@@ -534,6 +540,32 @@ class Goal:
         if not self.buffer_enabled:
             return self.target_amount
         return self.target_amount * (ONE + pct(self.buffer_percent))
+
+
+def active_position_limit_error(
+    goals: List[Goal],
+    position_type: str,
+) -> Optional[str]:
+    """Return the reason a new/paused position cannot become active.
+
+    Existing over-limit profiles are deliberately not mutated here: the user
+    keeps every position and balance and can choose what to pause.
+    """
+    active = [goal for goal in goals if goal.status == "active"]
+    normalized_type = str(position_type or "goal").strip().lower()
+    if normalized_type == "goal":
+        active_goal_count = sum(goal.is_goal for goal in active)
+        if active_goal_count >= MAX_ACTIVE_GOALS:
+            return (
+                f"Одновременно можно финансировать не больше {MAX_ACTIVE_GOALS} Целей. "
+                "Сначала поставьте одну из активных Целей на паузу."
+            )
+    if len(active) >= MAX_ACTIVE_POSITIONS:
+        return (
+            f"Одновременно можно финансировать не больше {MAX_ACTIVE_POSITIONS} "
+            "Целей и Сундуков. Сначала поставьте одну из активных позиций на паузу."
+        )
+    return None
 
 
 @dataclass
@@ -2081,6 +2113,39 @@ class FinancialAllocator:
         return (goal.is_chest and goal.status == "active"
                 and sum(g.is_chest for g in self.settings.active_goals) == 1)
 
+    def activate_position(self, goal: Goal) -> None:
+        """Activate a paused Goal/Chest while enforcing funding limits."""
+        if goal not in self.settings.goals:
+            raise ValueError("Позиция не принадлежит этому профилю.")
+        if goal.status != "paused":
+            raise ValueError("Активировать можно только позицию в ожидании.")
+        limit_error = self.position_activation_error(goal.position_type)
+        if limit_error:
+            raise ValueError(limit_error)
+        goal.status = "active"
+        goal.percentage = goal.previous_percentage or ONE
+        normalize_active_goal_percentages(self.settings.goals)
+
+    def pause_position(self, goal: Goal) -> None:
+        """Pause a position without moving its balance or changing history."""
+        if goal not in self.settings.goals:
+            raise ValueError("Позиция не принадлежит этому профилю.")
+        if goal.status != "active":
+            raise ValueError("Поставить на паузу можно только активную позицию.")
+        if self.is_last_active_chest(goal):
+            raise ValueError(
+                "Это последний активный Сундук. Добавьте или возобновите другой, "
+                "чтобы было куда направлять остаток от заполненных Целей."
+            )
+        goal.previous_percentage = goal.percentage
+        goal.status = "paused"
+        normalize_active_goal_percentages(self.settings.goals)
+
+    def position_activation_error(self, position_type: str) -> Optional[str]:
+        """Refresh completed Goals, then check whether an active slot exists."""
+        self._complete_funded_goals()
+        return active_position_limit_error(self.settings.goals, position_type)
+
     def goal_remaining_capacity(self, goal: Goal) -> Optional[Decimal]:
         if goal.is_chest or goal.full_target_amount is None:
             return None
@@ -2089,6 +2154,52 @@ class FinancialAllocator:
             return ZERO
         current = self.state.goal_balances.get(goal.name, goal.balance)
         return max(ZERO, goal.full_target_amount - current)
+
+    def goal_has_reached_target(self, goal: Goal) -> bool:
+        """Whether a finite ruble Goal has actually reached its finish line."""
+        if (
+            not goal.is_goal
+            or goal.full_target_amount is None
+            or goal.currency_code != "RUB"
+        ):
+            return False
+        current = D(self.state.goal_balances.get(goal.name, goal.balance))
+        return current >= goal.full_target_amount
+
+    def _complete_funded_goals(self) -> List[Goal]:
+        """Stop funded Goals and route their released share to active chests.
+
+        This is the same explicit fallback used by manual completion. It keeps
+        active percentages at 100% without changing or deleting history.
+        """
+        completed = [
+            goal
+            for goal in self.settings.active_goals
+            if self.goal_has_reached_target(goal)
+        ]
+        if not completed:
+            return []
+
+        self.ensure_active_chest()
+        released = sum((max(ZERO, goal.percentage) for goal in completed), ZERO)
+        completed_at = moscow_now().isoformat()
+        for goal in completed:
+            goal.previous_percentage = goal.percentage
+            goal.percentage = ZERO
+            goal.is_auto_percentage = False
+            goal.status = "completed"
+            goal.completed_at = completed_at
+            goal.updated_at = completed_at
+
+        if released > ZERO:
+            for name, share in self._split_chest_overflow(released).items():
+                chest = next(
+                    goal
+                    for goal in self.settings.active_goals
+                    if goal.is_chest and goal.name == name
+                )
+                chest.percentage += share
+        return completed
 
     def _ensure_goal_balances(self):
         for goal in self.settings.goals:
@@ -3069,7 +3180,11 @@ class FinancialAllocator:
         """Прогноз одной Цели без требования вручную вести банковский баланс."""
         today = today or date.today()
         capacity = self.estimated_goals_capacity_range()
-        share = max(ZERO, goal.percentage) / HUNDRED
+        share = (
+            max(ZERO, goal.percentage) / HUNDRED
+            if goal.status == "active"
+            else ZERO
+        )
         monthly_minimum = money(D(capacity["minimum"]) * share)
         monthly_maximum = money(D(capacity["maximum"]) * share)
         current = max(
@@ -3823,6 +3938,7 @@ class FinancialAllocator:
             return
 
         self.ensure_active_chest()
+        self._complete_funded_goals()
         split = self.split_goal_amount(amount)
         for name, part in split.items():
             if part <= ZERO:
@@ -3830,6 +3946,7 @@ class FinancialAllocator:
             self.state.goal_balances[name] = self.state.goal_balances.get(name, ZERO) + part
             key = f"Цели:{name}"
             allocations[key] = allocations.get(key, ZERO) + part
+        self._complete_funded_goals()
 
     def _split_chest_overflow(self, amount: Decimal) -> Dict[str, Decimal]:
         chests = [g for g in self.settings.active_goals if g.is_chest]

@@ -15,6 +15,9 @@ from aiogram.types import CallbackQuery, Message
 
 from financial_engine import (
     Goal,
+    MAX_ACTIVE_GOALS,
+    MAX_ACTIVE_POSITIONS,
+    RECOMMENDED_ACTIVE_GOALS,
     VACATION_BUDGET_ITEMS,
     goal_percentage_bounds,
     normalize_active_goal_percentages,
@@ -92,7 +95,7 @@ def goal_by_token(allocator, token: str) -> tuple[int, Goal] | None:
 
 def goal_line(allocator, goal: Goal) -> str:
     state_labels = {
-        "paused": " · на паузе",
+        "paused": " · в ожидании",
         "completed": " · выполнена",
         "archived": " · в архиве",
     }
@@ -106,8 +109,9 @@ def goal_line(allocator, goal: Goal) -> str:
         current = allocator.state.goal_balances.get(goal.name, goal.balance)
         target_text = rub(goal.full_target_amount).replace(" ₽", f" {goal.currency_code}" if goal.currency_code != "RUB" else " ₽")
         target = f"\n  Учтено: {rub(current)} · цель: {target_text}"
+    funded_percentage = goal.percentage if goal.status == "active" else Decimal("0")
     return (
-        f"{icon(goal)} <b>{escape(display_name(goal))}</b> — {goal.percentage}%{state_label}"
+        f"{icon(goal)} <b>{escape(display_name(goal))}</b> — {funded_percentage}%{state_label}"
         f"{target}"
     )
 
@@ -151,10 +155,30 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
     visible = [goal for goal in goals if goal.status != "archived"]
     archived_count = sum(goal.status == "archived" for goal in goals)
     estimates, explanation = goal_income_preview(allocator, telegram_id)
-    if visible:
-        listing = "\n\n".join(goal_line(allocator, goal) + f"\n  Примерное пополнение: {rub(estimates.get(display_name(goal), 0))}" for goal in visible)
-    else:
-        listing = "<b>Пока список пуст.</b>"
+    active = [goal for goal in visible if goal.status == "active"]
+    waiting = [goal for goal in visible if goal.status == "paused"]
+    completed = [goal for goal in visible if goal.status == "completed"]
+    sections = []
+    if active:
+        sections.append(
+            "<b>АКТИВНЫЕ</b>\n\n"
+            + "\n\n".join(
+                goal_line(allocator, goal)
+                + f"\n  Примерное пополнение: {rub(estimates.get(display_name(goal), 0))}"
+                for goal in active
+            )
+        )
+    if waiting:
+        sections.append(
+            "<b>В ОЖИДАНИИ · НЕ ФИНАНСИРУЮТСЯ</b>\n\n"
+            + "\n\n".join(goal_line(allocator, goal) for goal in waiting)
+        )
+    if completed:
+        sections.append(
+            "<b>ВЫПОЛНЕННЫЕ</b>\n\n"
+            + "\n\n".join(goal_line(allocator, goal) for goal in completed)
+        )
+    listing = "\n\n".join(sections) if sections else "<b>Пока список пуст.</b>"
     rows = [
         [(f"{icon(goal)} {display_name(goal)}", f"goalmanage:view:{goal.uid}")]
         for goal in visible
@@ -173,13 +197,29 @@ async def show_goals_manager(message: Message, telegram_id: int) -> None:
         [("← Главное меню", "menu:back")],
     ])
     total_estimate = sum(estimates.values(), Decimal("0"))
-    chart_values = estimates if total_estimate > 0 else {display_name(g): g.percentage for g in allocator.settings.active_goals}
+    chart_estimates = {
+        display_name(goal): estimates.get(display_name(goal), Decimal("0"))
+        for goal in active
+    }
+    chart_values = chart_estimates if total_estimate > 0 else {
+        display_name(goal): goal.percentage for goal in active
+    }
+    active_goal_count = sum(goal.is_goal for goal in allocator.settings.active_goals)
+    limit_warning = ""
+    if len(allocator.settings.active_goals) > MAX_ACTIVE_POSITIONS or active_goal_count > MAX_ACTIVE_GOALS:
+        limit_warning = (
+            "\n\n⚠️ В старом профиле активных позиций больше нового лимита. "
+            f"Оставьте активными не больше {MAX_ACTIVE_POSITIONS} позиций, "
+            f"из них не больше {MAX_ACTIVE_GOALS} Целей; выбор за вас не менялся."
+        )
     await send_chart_report(
         message, chart_values, "ЦЕЛИ И СУНДУКИ",
         "<b><u>ЦЕЛИ И СУНДУКИ</u></b>\n\n"
         "⭐️ Цель — конкретная сумма, которую нужно накопить.\n"
         "🧳 Сундук — постоянный запас, который можно пополнять и использовать снова.\n\n"
-        f"{explanation}\n\n{listing}\n\n"
+        f"Активно: <b>{len(active)} из {MAX_ACTIVE_POSITIONS}</b> · "
+        f"Целей: <b>{active_goal_count} из {MAX_ACTIVE_GOALS}</b>.\n\n"
+        f"{explanation}{limit_warning}\n\n{listing}\n\n"
         "Цели пополняются до нужной суммы с запасом, если он включён. Остаток идёт в активные Сундуки "
         "пропорционально их долям. Если все доли Сундуков — 0%, остаток делится поровну.\n\n"
         "Хотя бы один Сундук всегда остаётся активным. «Будущие покупки» — Сундук для остатка "
@@ -287,16 +327,17 @@ async def open_goals_manager(callback: CallbackQuery, state: FSMContext):
 async def choose_position_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
-    if len(allocator.settings.active_goals) >= 10:
-        await callback.message.answer(
-            "Одновременно можно использовать не больше 10 Целей и Сундуков. "
-            "Поставьте ненужную позицию на паузу или удалите её."
+    waiting_note = ""
+    if len(allocator.settings.active_goals) >= MAX_ACTIVE_POSITIONS:
+        waiting_note = (
+            f"\n\nСейчас активно {MAX_ACTIVE_POSITIONS} позиций. Новая позиция сохранится "
+            "<b>В ожидании</b> и не будет получать деньги, пока вы не освободите место."
         )
-        return
     await callback.message.answer(
         "<b>ЧТО ДОБАВИТЬ?</b>\n\n"
         "⭐️ <b>Цель</b> — конкретная сумма: путёвка, автомобиль или парфюм.\n\n"
-        "🧳 <b>Сундук</b> — постоянный запас: Подарки, Хотелки или Замена техники.",
+        "🧳 <b>Сундук</b> — постоянный запас: Подарки, Хотелки или Замена техники."
+        f"{waiting_note}",
         reply_markup=keyboard([
             [("⭐️ Цель", "goalmanage:type:goal"), ("🧳 Сундук", "goalmanage:type:chest")],
             [("✖️ Отмена", "goals:manage")],
@@ -313,9 +354,6 @@ async def start_vacation_calculator(callback: CallbackQuery, state: FSMContext):
             "Позиция «Отпуск» уже существует. Откройте её, чтобы изменить сумму или срок.",
             reply_markup=keyboard([[("← К целям", "goals:manage")]]),
         )
-        return
-    if len(allocator.settings.active_goals) >= 10:
-        await callback.message.answer("Сначала освободите место среди десяти активных позиций.")
         return
     await state.set_state(GoalManagerStates.vacation_item)
     await state.update_data(vacation_index=0, vacation_amounts={})
@@ -554,24 +592,40 @@ async def persist_new_position(message: Message, state: FSMContext, buffer: Deci
     data = await state.get_data()
     draft = dict(data["goal_draft"])
     now = datetime.now(timezone.utc).isoformat()
+    allocator = db.load_allocator(message.from_user.id)
+    limit_error = allocator.position_activation_error(draft["position_type"])
     goal = Goal(
         name=draft["name"],
-        percentage=Decimal("1"),
+        percentage=Decimal("0") if limit_error else Decimal("1"),
         balance=Decimal(draft.get("balance", "0")),
         position_type=draft["position_type"],
         target_amount=(Decimal(draft["target_amount"]) if draft.get("target_amount") else None),
         deadline=draft.get("deadline"),
         buffer_enabled=buffer > 0,
         buffer_percent=buffer,
+        status="paused" if limit_error else "active",
+        previous_percentage=Decimal("1") if limit_error else None,
         created_at=now,
         updated_at=now,
     )
-    allocator = db.load_allocator(message.from_user.id)
     allocator.settings.goals.append(goal)
     allocator.state.goal_balances[goal.name] = goal.balance
     normalize_active_goal_percentages(allocator.settings.goals)
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
+    if limit_error:
+        await message.answer(
+            f"{icon(goal)} <b>{escape(display_name(goal))}</b> создана в статусе "
+            f"<b>«В ожидании»</b>. {limit_error}"
+        )
+        await show_goals_manager(message, message.from_user.id)
+        return
+    active_goal_count = sum(item.is_goal for item in allocator.settings.active_goals)
+    if goal.is_goal and active_goal_count > RECOMMENDED_ACTIVE_GOALS:
+        await message.answer(
+            f"У вас уже {active_goal_count} активных Цели. Чем их больше, тем медленнее "
+            "копится каждая. Можно продолжить или позже поставить одну из Целей на паузу."
+        )
     await begin_percentage_setup(message, message.from_user.id, state)
 
 
@@ -670,7 +724,7 @@ async def view_position(callback: CallbackQuery):
                 f"Нужно — <b>{rub(forecast['target'])}</b>\n"
                 + (f"Срок — <b>{date.fromisoformat(goal.deadline).strftime('%d.%m.%Y')}</b>\n" if goal.deadline else "Срок — <b>не задан</b>\n")
             )
-    status = "На паузе" if goal.status == "paused" else "Активна"
+    status = "В ожидании" if goal.status == "paused" else "Активна"
     if goal.status == "completed":
         status = "Выполнена"
     elif goal.status == "archived":
@@ -681,7 +735,7 @@ async def view_position(callback: CallbackQuery):
            [("Изменить запас", f"goalmanage:edit:buffer:{uid}")]] if goal.is_goal and goal.status not in {"completed", "archived"} else []),
     ]
     if goal.status in {"active", "paused"} and not goal.is_system_chest:
-        actions.append([(("Возобновить" if goal.status == "paused" else "Поставить на паузу"), f"goalmanage:toggle:{uid}")])
+        actions.append([(("Активировать" if goal.status == "paused" else "Поставить на паузу"), f"goalmanage:toggle:{uid}")])
     if goal.is_goal and goal.status in {"active", "paused"}:
         actions.append([("✔️ Отметить выполненной", f"goalmanage:complete:ask:{uid}")])
     if goal.status == "completed":
@@ -695,7 +749,7 @@ async def view_position(callback: CallbackQuery):
     actions.append([("← Назад", "goals:manage")])
     await callback.message.answer(
         f"<b>{icon(goal)} {escape(goal.name.upper())}</b>\n\n"
-        f"Доля — <b>{goal.percentage}%</b>\n"
+        f"Доля — <b>{goal.percentage if goal.status == 'active' else Decimal('0')}%</b>\n"
         f"Статус — <b>{status}</b>{target}",
         reply_markup=keyboard(actions),
     )
@@ -856,26 +910,34 @@ async def toggle_position(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Эту позицию сначала нужно вернуть из архива.")
         return
     if goal.status == "paused":
-        if len(allocator.settings.active_goals) >= 10:
-            await callback.message.answer(
-                "Сначала поставьте на паузу другую позицию: одновременно можно использовать не больше 10."
-            )
+        try:
+            allocator.activate_position(goal)
+        except ValueError as error:
+            await callback.message.answer(str(error))
             return
-        goal.status = "active"
-        goal.percentage = goal.previous_percentage or Decimal("1")
     else:
-        if allocator.is_last_active_chest(goal):
-            await callback.message.answer("Это последний активный Сундук. Добавьте или возобновите другой, чтобы было куда направлять остаток от заполненных Целей.")
+        try:
+            allocator.pause_position(goal)
+        except ValueError as error:
+            await callback.message.answer(str(error))
             return
-        goal.previous_percentage = goal.percentage
-        goal.status = "paused"
     goal.updated_at = datetime.now(timezone.utc).isoformat()
-    normalize_active_goal_percentages(allocator.settings.goals)
     db.save_allocator(callback.from_user.id, allocator)
     await state.clear()
     if goal.status == "active":
+        active_goal_count = sum(item.is_goal for item in allocator.settings.active_goals)
+        if goal.is_goal and active_goal_count > RECOMMENDED_ACTIVE_GOALS:
+            await callback.message.answer(
+                f"Сейчас активно {active_goal_count} Цели. Чем их больше, тем медленнее "
+                "копится каждая."
+            )
         await begin_percentage_setup(callback.message, callback.from_user.id, state)
     else:
+        await callback.message.answer(
+            "Позиция переведена в ожидание: баланс и история сохранены, новые деньги "
+            "не поступают. Доли оставшихся активных позиций безопасно нормализованы; "
+            "при желании настройте их заново."
+        )
         await show_goals_manager(callback.message, callback.from_user.id)
 
 
