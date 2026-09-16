@@ -30,9 +30,9 @@ class ReserveCardTests(unittest.TestCase):
         self.assertEqual(
             items,
             [
-                ("#008080", "Форс-мажор — хватит на 2 мес"),
-                ("#4E77F9", "Бытовой резерв — хватит на 0 мес"),
-                ("#000080", "Критический Минимум — хватит на 1 мес"),
+                ("#176B87", "Форс-мажор — хватит на 2 мес"),
+                ("#3E6FD8", "Бытовой резерв — хватит на 0 мес"),
+                ("#1b3a9d", "Критический Минимум — хватит на 1 мес"),
             ],
         )
 
@@ -47,9 +47,9 @@ class ReserveCardTests(unittest.TestCase):
             salary_fund_full_target=D("110"), salary_fund_months=D("1"),
         )
         colors = set(Image.open(BytesIO(data)).getdata())
-        self.assertIn(tuple(bytes.fromhex("008080")), colors)
-        self.assertNotIn(tuple(bytes.fromhex("000080")), colors)
-        self.assertNotIn(tuple(bytes.fromhex("4E77F9")), colors)
+        self.assertIn(tuple(bytes.fromhex("176B87")), colors)
+        self.assertNotIn(tuple(bytes.fromhex("1b3a9d")), colors)
+        self.assertNotIn(tuple(bytes.fromhex("3E6FD8")), colors)
         items = reserve_legend_items(
             stabilizer_balance=D("0"), stabilizer_critical_target=D("0"), stabilizer_full_target=D("0"),
             stabilizer_months=D("0"), salary_fund_balance=D("0"), salary_fund_critical_target=D("0"),
@@ -57,7 +57,7 @@ class ReserveCardTests(unittest.TestCase):
             pillow_balance=D("90"), pillow_target=D("180"), pillow_months=D("2"),
             pillow_legend_label="Минимальная подушка",
         )
-        self.assertEqual(items, [("#008080", "Минимальная подушка — хватит на 1 мес")])
+        self.assertEqual(items, [("#176B87", "Минимальная подушка — хватит на 1 мес")])
 
     def test_legends_show_current_full_month_coverage(self):
         base = dict(
@@ -69,9 +69,9 @@ class ReserveCardTests(unittest.TestCase):
             reserve_legend_items(stabilizer_balance=D("100"), **base),
             [
                 ("#A9A9A9", "Бытовой резерв — хватит на 0 мес"),
-                ("#4E77F9", "Бытовой резерв — хватит на 0 мес"),
+                ("#3E6FD8", "Бытовой резерв — хватит на 0 мес"),
                 ("#393939", "Критический Минимум — хватит на 1 мес"),
-                ("#000080", "Критический Минимум — хватит на 1 мес"),
+                ("#1b3a9d", "Критический Минимум — хватит на 1 мес"),
             ],
         )
         salary_base = dict(base, stabilizer_balance=D("0"), salary_fund_balance=D("0"))
@@ -79,9 +79,9 @@ class ReserveCardTests(unittest.TestCase):
             reserve_legend_items(**salary_base),
             [
                 ("#A9A9A9", "Бытовой резерв — хватит на 0 мес"),
-                ("#4E77F9", "Бытовой резерв — хватит на 0 мес"),
+                ("#3E6FD8", "Бытовой резерв — хватит на 0 мес"),
                 ("#393939", "Критический Минимум — хватит на 0 мес"),
-                ("#000080", "Критический Минимум — хватит на 0 мес"),
+                ("#1b3a9d", "Критический Минимум — хватит на 0 мес"),
             ],
         )
 
@@ -108,7 +108,7 @@ class ReserveCardTests(unittest.TestCase):
             salary_fund_balance=D("100"), salary_fund_critical_target=D("50"), salary_fund_full_target=D("100"),
         )
         colors = set(Image.open(BytesIO(data)).getdata())
-        for color in ("#008080", "#000080", "#4E77F9", "#393939", "#A9A9A9"):
+        for color in ("#176B87", "#1b3a9d", "#3E6FD8", "#393939", "#A9A9A9"):
             rgb = tuple(bytes.fromhex(color[1:]))
             self.assertIn(rgb, colors)
 
@@ -119,7 +119,7 @@ class ReserveCardTests(unittest.TestCase):
             stabilizer_balance=D("100"), stabilizer_critical_target=D("40"), stabilizer_full_target=D("100"),
         )
         image = Image.open(BytesIO(data))
-        light_blue = tuple(bytes.fromhex("4E77F9"))
+        light_blue = tuple(bytes.fromhex("3E6FD8"))
         # The top-left corner of the inner rounded vessel is outside its mask;
         # a rectangular second level must never leak into that point.
         self.assertNotEqual(image.getpixel((592, 257)), light_blue)

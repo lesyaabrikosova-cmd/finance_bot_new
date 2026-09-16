@@ -204,17 +204,17 @@ class BalanceChartCompletenessTests(unittest.TestCase):
 
         self.assertEqual(labels[:7], [
             "Налог",
+            "Минимальные платежи по долгам",
+            "Досрочное погашение",
             "Фонд Зарплаты",
             "Подушка",
             "Стабилизатор",
             "Инвестиции",
-            "Минимальные платежи по долгам",
-            "Досрочное погашение",
         ])
-        self.assertLess(labels.index("Рабочие обязательства · Карта · Связь"), labels.index("КМ · Квартира"))
         self.assertLess(labels.index("КМ · Квартира"), labels.index("КМ · Зарплата"))
         self.assertLess(labels.index("КМ · Зарплата"), labels.index("Бытовой резерв · Дети"))
         self.assertLess(labels.index("Бытовой резерв"), labels.index("Цели и Сундуки · Отпуск"))
+        self.assertLess(labels.index("Цели и Сундуки · Отпуск"), labels.index("Рабочие обязательства · Карта · Связь"))
         self.assertIn("КМ · Старая · прежняя категория", values)
         self.assertIn("Бытовой резерв · Старый · прежний конверт", values)
         self.assertIn("Цели и Сундуки · Сундук Хотелок · прежняя позиция", values)
@@ -224,7 +224,7 @@ class BalanceChartCompletenessTests(unittest.TestCase):
             sum(values.values(), D("0")),
             D("10") + sum(allocations.values(), D("0")),
         )
-        self.assertEqual(colors["Бытовой резерв"], "#006400")
+        self.assertEqual(colors["Бытовой резерв"], "#45A86B")
 
 
 class IncomeHistoryNavigationTests(unittest.IsolatedAsyncioTestCase):

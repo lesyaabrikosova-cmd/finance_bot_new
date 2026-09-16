@@ -11,6 +11,9 @@ BACKGROUND = "#191321"
 GOLD = "#F1CD83"
 WHITE = "#F9F4ED"
 MUTED = "#D0C2D8"
+PILLOW_COLOR = "#176B87"
+STABILIZER_CRITICAL_COLOR = "#1b3a9d"
+STABILIZER_SUSTAINABLE_COLOR = "#3E6FD8"
 
 
 def _tint(image, mask, color: str, opacity: float) -> None:
@@ -48,19 +51,19 @@ def reserve_legend_items(*, stabilizer_balance: Decimal, stabilizer_critical_tar
     items = []
     if pillow_target > 0:
         months = _covered_months(pillow_balance, pillow_target, pillow_months)
-        items.append(("#008080", f"{pillow_legend_label} — хватит на {months} мес"))
+        items.append((PILLOW_COLOR, f"{pillow_legend_label} — хватит на {months} мес"))
     if salary_fund_full_target > 0:
         months = _covered_months(salary_fund_balance, salary_fund_full_target, salary_fund_months)
         items.append(("#A9A9A9", f"Бытовой резерв — хватит на {months} мес"))
     if stabilizer_full_target > 0:
         months = _covered_months(stabilizer_balance, stabilizer_full_target, stabilizer_months)
-        items.append(("#4E77F9", f"Бытовой резерв — хватит на {months} мес"))
+        items.append((STABILIZER_SUSTAINABLE_COLOR, f"Бытовой резерв — хватит на {months} мес"))
     if salary_fund_critical_target > 0:
         months = _covered_months(salary_fund_balance, salary_fund_critical_target, salary_fund_months)
         items.append(("#393939", f"Критический Минимум — хватит на {months} мес"))
     if stabilizer_critical_target > 0:
         months = _covered_months(stabilizer_balance, stabilizer_critical_target, stabilizer_months)
-        items.append(("#000080", f"Критический Минимум — хватит на {months} мес"))
+        items.append((STABILIZER_CRITICAL_COLOR, f"Критический Минимум — хватит на {months} мес"))
     return items
 
 
@@ -276,17 +279,19 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
     """
     from PIL import Image, ImageDraw, ImageFont
 
-    vessels = [("Подушка", pillow_balance, None, pillow_target, ("#008080",), "shield")]
+    vessels = [("Подушка", pillow_balance, None, pillow_target, (PILLOW_COLOR,), "shield")]
     if profile_id == "piecework":
         vessels.append(("Стабилизатор", stabilizer_balance, stabilizer_critical_target,
-                        stabilizer_full_target, ("#000080", "#4E77F9"), "flask"))
+                        stabilizer_full_target,
+                        (STABILIZER_CRITICAL_COLOR, STABILIZER_SUSTAINABLE_COLOR), "flask"))
     if profile_id == "cyclic":
         vessels = [
             ("Фонд Зарплаты", salary_fund_balance, salary_fund_critical_target,
              salary_fund_full_target, ("#393939", "#A9A9A9"), "jar"),
-            ("Подушка", pillow_balance, None, pillow_target, ("#008080",), "shield"),
+            ("Подушка", pillow_balance, None, pillow_target, (PILLOW_COLOR,), "shield"),
             ("Стабилизатор", stabilizer_balance, stabilizer_critical_target,
-             stabilizer_full_target, ("#000080", "#4E77F9"), "flask"),
+             stabilizer_full_target,
+             (STABILIZER_CRITICAL_COLOR, STABILIZER_SUSTAINABLE_COLOR), "flask"),
         ]
 
     image = Image.new("RGB", (1080, 1200), BACKGROUND)
@@ -350,9 +355,9 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
         legend_frame = (54, 1018, 1026, 1148)
         draw.rounded_rectangle(legend_frame, radius=30, outline="#3F384E", width=2)
         legend_slots = {
-            "#008080": (0, 0),
-            "#A9A9A9": (0, 0), "#4E77F9": (1, 0),
-            "#393939": (0, 1), "#000080": (1, 1),
+            PILLOW_COLOR: (0, 0),
+            "#A9A9A9": (0, 0), STABILIZER_SUSTAINABLE_COLOR: (1, 0),
+            "#393939": (0, 1), STABILIZER_CRITICAL_COLOR: (1, 1),
         }
         for color, text in legend_items:
             column, row = legend_slots[color]

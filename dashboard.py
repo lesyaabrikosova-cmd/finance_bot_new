@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime
 from decimal import Decimal
+from hashlib import sha256
 from html import escape
 from pathlib import Path
 import re
@@ -36,7 +37,6 @@ from income_colors import (
     income_color_name,
     next_automatic_income_color,
     next_income_color_shade,
-    oklch_family_palette,
     select_income_color,
 )
 from income_deletion import IncomeDeletionError, delete_income_safely
@@ -821,6 +821,43 @@ async def confirm_reserve_rebalancing(callback: CallbackQuery):
 # БАЛАНСЫ
 # ============================================================
 
+BALANCE_TAX_COLOR = "#7C3AED"
+BALANCE_DEBT_COLORS = ("#A91E68", "#E65C9C")
+BALANCE_SALARY_FUND_COLORS = ("#4B5563", "#9CA3AF")
+BALANCE_PROTECTION_COLORS = {
+    "pillow": "#176B87",
+    "stabilizer": "#3E6FD8",
+    "investments": "#72B7D7",
+}
+BALANCE_CRITICAL_MINIMUM_COLORS = (
+    "#a61e2e", "#d64550", "#c73a4a", "#f0787f", "#e46878",
+    "#f3a0a6", "#c55c6d", "#e88c98", "#f6c1c8", "#8e2832",
+)
+BALANCE_CRITICAL_SALARY_COLOR = "#8e2832"
+BALANCE_HOUSEHOLD_RESERVE_COLOR = "#45A86B"
+BALANCE_CHEST_COLORS = (
+    "#6a432f", "#a66f45", "#7b523a", "#be8760",
+    "#5c392B", "#915c47", "#b47452", "#845744",
+)
+BALANCE_GOAL_COLORS = ("#FDE047", "#F7C948", "#F0A929", "#E08B00", "#C77D00")
+
+
+def _stable_palette_index(identity: str, ordered_ids=()) -> int:
+    """Return a saved position, with a deterministic index for archived data."""
+    identity = str(identity)
+    ordered = [str(item) for item in ordered_ids if str(item)]
+    try:
+        return ordered.index(identity)
+    except ValueError:
+        # Old archived operations may outlive their settings entry. Their
+        # immutable identity still produces the same shade on every render.
+        return len(ordered) + int.from_bytes(sha256(identity.encode("utf-8")).digest()[:8], "big")
+
+
+def _stable_palette_color(identity: str, palette: tuple[str, ...], ordered_ids=()) -> str:
+    """Assign a fixed family shade by saved position, with a stable legacy fallback."""
+    return palette[_stable_palette_index(identity, ordered_ids) % len(palette)]
+
 def period_balance_chart(allocator, allocations):
     """Return every positive flow of the current period in UI order.
 
@@ -832,49 +869,8 @@ def period_balance_chart(allocator, allocations):
     """
     values, colors = {}, {}
 
-    # Approved balance-chart palette.  Colours at the beginning of each tuple
-    # are deliberately fixed and applied in this order; a generated tail only
-    # protects legacy profiles with more categories than the UI normally allows.
-    tax_colors = ('#4B0082',)
-    # The period chart contains one actual Fund Salary flow.  It uses the KМ
-    # colour; #A9A9A9 is reserved for a future separate УЖ flow.
-    salary_fund_colors = ('#393939', '#A9A9A9')
-    bracket_reserve_colors = ('#008080', '#4E77F9', '#87CEEB')
-    debt_colors = oklch_family_palette(
-        ('#573410', '#BC3F06', '#F6802C', '#E1C5A8'), range(30, 71, 5),
-    )
-    life_colors = (
-        '#DC143C', '#CD5C5C', '#FF0000', '#F4AFAF', '#B22222', '#FA757F',
-        '#750A2D', '#FA8072',
-        *oklch_family_palette(
-            (), range(15, 28, 3),
-            lightnesses=(.42, .48, .54, .60, .66, .72, .78),
-            chromas=(.11, .14, .17, .20),
-        ),
-    )
-    household_reserve_colors = ('#006400',)
-    goal_colors = (
-        '#FFB02E', '#FFF44F', '#D6AE01', '#FFFF99', '#E6CE2D', '#E28B00',
-        '#FFEBB7', '#BAAA36', '#FFF5A5',
-        *oklch_family_palette(
-            (), range(82, 103, 4),
-            lightnesses=(.50, .56, .62, .68, .74, .80, .86),
-            chromas=(.09, .12, .15, .18),
-        ),
-    )
-    system_chest_color = '#3F2003'
-    chest_colors = (
-        '#5B3A29', '#431804', '#8B4513', '#342018', '#85592E', '#342822',
-        '#685440', '#321414',
-        *oklch_family_palette(
-            (), range(52, 65, 3),
-            lightnesses=(.34, .40, .46, .52, .58, .64, .70),
-            chromas=(.04, .06, .08, .10),
-        ),
-    )
     archived_suffix = re.compile(r"^(?P<name>.+?) · прежний (?P<id>[^ ]+)$")
     archived_counts: dict[tuple[str, str], int] = {}
-    used_family_colors: dict[tuple[str, ...], list[str]] = {}
 
     def readable_name(raw_name: str, kind: str) -> tuple[str, str, bool]:
         """Hide the technical ID while keeping archived identities distinct."""
@@ -901,23 +897,6 @@ def period_balance_chart(allocator, allocations):
             values[label] = values.get(label, Decimal(0)) + value
             colors[label] = color
 
-    def shade(name, palette):
-        """Pick a perceptually distinct shade within its semantic family."""
-        family_used = used_family_colors.setdefault(tuple(palette), [])
-        remaining = [
-            color for color in palette
-            if color not in family_used and color not in colors.values()
-        ]
-        if not remaining:
-            # The generated family contains hundreds of shades, so this is a
-            # defensive fallback for an unrealistically large single chart.
-            return palette[0]
-        # The order in the approved palettes is intentional and must remain
-        # stable as values change between reporting periods.
-        color = remaining[0]
-        family_used.append(color)
-        return color
-
     consumed: set[str] = set()
     planned_tax = D(allocations.get('КЖ:Налоги', 0))
     direct_tax = D(allocations.get('Налог', 0))
@@ -926,30 +905,22 @@ def period_balance_chart(allocator, allocations):
         # Compatibility for direct calls with a plain dict and legacy users
         # whose operation ledger predates income snapshots.
         ledger_tax = D(allocator.state.period_tax)
-    add('Налог', D(ledger_tax) + planned_tax + direct_tax, shade('tax', tax_colors))
+    add('Налог', D(ledger_tax) + planned_tax + direct_tax, BALANCE_TAX_COLOR)
     consumed.update({'КЖ:Налоги', 'Налог'})
 
-    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), shade('salary-fund', salary_fund_colors))
-    add('Подушка', allocations.get('Подушка', 0), shade('pillow', bracket_reserve_colors))
-    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), shade('stabilizer', bracket_reserve_colors))
-    add('Инвестиции', allocations.get('Инвестиции', 0), shade('investments', bracket_reserve_colors))
-    add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), shade('minimum-debt', debt_colors))
-    add('Досрочное погашение', allocations.get('Досрочное', 0), shade('early-debt', debt_colors))
+    # Canonical group order: taxes, debts, salary fund, protection/development.
+    add('Минимальные платежи по долгам', allocations.get('Мин. платеж', 0), BALANCE_DEBT_COLORS[0])
+    add('Досрочное погашение', allocations.get('Досрочное', 0), BALANCE_DEBT_COLORS[1])
+    # The period ledger currently stores Fund Salary as one flow. It uses the
+    # first (КМ) grey; the second shade remains fixed for a future УЖ split.
+    add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), BALANCE_SALARY_FUND_COLORS[0])
+    add('Подушка', allocations.get('Подушка', 0), BALANCE_PROTECTION_COLORS['pillow'])
+    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), BALANCE_PROTECTION_COLORS['stabilizer'])
+    add('Инвестиции', allocations.get('Инвестиции', 0), BALANCE_PROTECTION_COLORS['investments'])
     consumed.update({
         'Фонд Зарплаты', 'Подушка', 'Стабилизатор дохода',
         'Инвестиции', 'Мин. платеж', 'Досрочное',
     })
-    work_obligations = [
-        (str(key), value)
-        for key, value in allocations.items()
-        if str(key).startswith('Рабочие обязательства:')
-    ]
-    for key, value in sorted(work_obligations, key=lambda item: D(item[1]), reverse=True):
-        # This legacy cyclic-income route is outside the user-facing balance
-        # colour scheme; retain its existing presentation until it is designed
-        # as a separate feature.
-        add(key.replace(':', ' · '), value, '#B36C75')
-        consumed.add(key)
 
     settings = getattr(allocator, 'settings', None)
     envelope_kinds = getattr(allocations, 'envelope_kinds', {}) or {}
@@ -974,15 +945,43 @@ def period_balance_chart(allocator, allocations):
             if str(name) != 'Налоги'
         }
 
-    salary = life.pop('Зарплата', None)
-    for raw_name, value in sorted(life.items(), key=lambda item: D(item[1]), reverse=True):
+    critical_order = tuple(category_ids.values())
+    # Salary is the remaining balance after every other critical-minimum
+    # category. It always receives its dedicated shade and is rendered last
+    # inside the КМ group, regardless of its saved position.
+    has_salary_category = any(
+        str(category_name).strip().casefold() == 'зарплата'
+        for category_name in category_ids
+    ) or any(str(category_name).strip().casefold() == 'зарплата' for category_name in life)
+    critical_non_salary_order = tuple(
+        identity
+        for category_name, identity in category_ids.items()
+        if str(category_name).strip().casefold() != 'зарплата'
+    )
+    critical_non_salary_colors = (
+        BALANCE_CRITICAL_MINIMUM_COLORS[:-1]
+        if has_salary_category
+        else BALANCE_CRITICAL_MINIMUM_COLORS
+    )
+    critical_rows = []
+    for raw_name, value in life.items():
         name, identity, _ = readable_name(raw_name, 'life')
-        add(
-            f'КМ · {name}', value,
-            shade(category_ids.get(raw_name, identity), life_colors),
+        stable_identity = category_ids.get(raw_name, identity)
+        is_salary = str(raw_name).strip().casefold() == 'зарплата'
+        critical_rows.append(
+            (
+                1 if is_salary else 0,
+                _stable_palette_index(stable_identity, critical_order),
+                name.casefold(),
+                f'КМ · {name}',
+                value,
+                BALANCE_CRITICAL_SALARY_COLOR if is_salary else _stable_palette_color(
+                    stable_identity, critical_non_salary_colors, critical_non_salary_order,
+                ),
+            )
         )
-    if salary is not None:
-        add('КМ · Зарплата', salary, '#800000')
+    for _, _, _, label, value, color in sorted(critical_rows):
+        add(label, value, color)
 
     reserve_items = [
         (str(key)[3:], value)
@@ -993,18 +992,23 @@ def period_balance_chart(allocator, allocations):
         str(key) for key in allocations
         if str(key).startswith('БР:')
     )
-    for raw_name, value in sorted(reserve_items, key=lambda item: D(item[1]), reverse=True):
+    household_ids = getattr(settings, 'household_reserve_category_ids', {}) or {}
+    household_order = tuple(household_ids.values())
+    household_rows = []
+    for raw_name, value in reserve_items:
         name, identity, _ = readable_name(raw_name, 'reserve')
-        add(
-            f'Бытовой резерв · {name}', value,
-            shade(
-                getattr(settings, 'household_reserve_category_ids', {}).get(
-                    raw_name, identity,
-                ),
-                household_reserve_colors,
-            ),
+        stable_identity = household_ids.get(raw_name, identity)
+        household_rows.append(
+            (
+                _stable_palette_index(stable_identity, household_order),
+                name.casefold(),
+                f'Бытовой резерв · {name}',
+                value,
+            )
         )
-    add('Бытовой резерв', allocations.get('Бытовой резерв', 0), shade('household-reserve', household_reserve_colors))
+    for _, _, label, value in sorted(household_rows):
+        add(label, value, BALANCE_HOUSEHOLD_RESERVE_COLOR)
+    add('Бытовой резерв', allocations.get('Бытовой резерв', 0), BALANCE_HOUSEHOLD_RESERVE_COLOR)
     consumed.add('Бытовой резерв')
 
     goal_map = {goal.name: goal for goal in getattr(settings, 'goals', [])}
@@ -1019,7 +1023,7 @@ def period_balance_chart(allocator, allocations):
     )
 
     def goal_sort_key(item):
-        """Keep all Goals and Chests together, ordered by their saved share."""
+        """Order positions inside each semantic group by saved share."""
         raw_name, value, _ = item
         match = archived_suffix.match(str(raw_name))
         base_name = match.group('name') if match else str(raw_name)
@@ -1030,9 +1034,20 @@ def period_balance_chart(allocator, allocations):
         order = int(getattr(goal, 'order_index', 10 ** 6)) if goal is not None else 10 ** 6
         return -percentage, order, -D(value), base_name.casefold()
 
-    for raw_name, value, recorded_kind in sorted(
-        goal_items, key=goal_sort_key,
-    ):
+    configured_goals = sorted(
+        getattr(settings, 'goals', []),
+        key=lambda goal: int(getattr(goal, 'order_index', 10 ** 6)),
+    )
+    chest_order = tuple(
+        getattr(goal, 'uid', '') or goal.name
+        for goal in configured_goals if bool(getattr(goal, 'is_chest', False))
+    )
+    goal_order = tuple(
+        getattr(goal, 'uid', '') or goal.name
+        for goal in configured_goals if not bool(getattr(goal, 'is_chest', False))
+    )
+    prepared_positions = []
+    for raw_name, value, recorded_kind in goal_items:
         clean_name, identity, archived = readable_name(raw_name, 'goal')
         base_name = clean_name.split(' · прежняя позиция', 1)[0]
         goal = None if archived else goal_map.get(base_name)
@@ -1044,14 +1059,26 @@ def period_balance_chart(allocator, allocations):
         display = goal_display_name(base_name, is_chest)
         if archived:
             display += clean_name[len(base_name):]
-        palette = chest_colors if is_chest else goal_colors
         identity = getattr(goal, 'uid', '') or identity
-        color = (
-            system_chest_color
-            if is_chest and goal is not None and goal.is_system_chest
-            else shade(identity, palette)
+        palette = BALANCE_CHEST_COLORS if is_chest else BALANCE_GOAL_COLORS
+        ordered_ids = chest_order if is_chest else goal_order
+        prepared_positions.append(
+            (
+                is_chest,
+                goal_sort_key((raw_name, value, recorded_kind)),
+                f'Цели и Сундуки · {display}',
+                value,
+                _stable_palette_color(identity, palette, ordered_ids),
+            )
         )
-        add(f'Цели и Сундуки · {display}', value, color)
+    # Chests and Goals are separate adjacent groups. Within each group the
+    # user's percentage order is retained, while colour follows saved identity.
+    for is_chest in (True, False):
+        for _, _, label, value, color in sorted(
+            (row for row in prepared_positions if row[0] is is_chest),
+            key=lambda row: row[1],
+        ):
+            add(label, value, color)
 
     # Keep future/legacy one-off destinations visible until the presentation
     # layer receives an explicit family for them. Silently omitting a positive
@@ -1059,7 +1086,10 @@ def period_balance_chart(allocator, allocations):
     for key, value in allocations.items():
         key = str(key)
         if key not in consumed:
-            add(f'Прочее · {key.replace(":", " · ")}', value, shade(key, ('#8B7D91',)))
+            if key.startswith('Рабочие обязательства:'):
+                add(key.replace(':', ' · '), value, '#B36C75')
+            else:
+                add(f'Прочее · {key.replace(":", " · ")}', value, '#8B7D91')
     return values, colors
 
 
