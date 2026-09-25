@@ -262,10 +262,10 @@ async def show_bracket_text(callback, state: FSMContext):
 
 @router.callback_query(F.data == "brackets:cancel")
 async def cancel_brackets(callback, state: FSMContext):
-    from settings_editor import show_settings_menu
+    from settings_editor import show_settings_actions
     await callback.answer()
     await state.clear()
-    await show_settings_menu(callback.message, callback.from_user.id)
+    await show_settings_actions(callback.message, callback.from_user.id)
 
 
 @router.callback_query(F.data == "brackets:edit")

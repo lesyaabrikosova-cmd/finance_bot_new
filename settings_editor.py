@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from html import escape
@@ -11,6 +12,7 @@ from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 from archetypes import ARCHETYPES, ARCHETYPE_ROWS
 from financial_engine import goal_display_name, is_system_envelope_name
+from reserve_help import render_reserve_help
 from income_colors import INCOME_COLOR_FAMILIES, next_automatic_income_color, next_income_color_shade
 from storage import db
 from time_utils import moscow_now
@@ -33,7 +35,11 @@ class EditSettingsStates(StatesGroup):
     average_income = State()
     income_gap_months = State()
     income_work_months = State()
+    current_phase_months_remaining = State()
     force_majeure_months = State()
+    minimum_reserve_months = State()
+    minimum_payment_balance = State()
+    budget_optimizer_amount = State()
     stabilizer_months = State()
     stabilizer_balance = State()
     intercontract_balance = State()
@@ -59,6 +65,23 @@ class FinancialArchetypeStates(StatesGroup):
     preview = State()
 
 
+RESERVE_BALANCES_TEXT = (
+    "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
+    "Здесь можно сверить данные Аллокатора с тем, что <b>реально лежит в вашем банке</b>.\n\n"
+    "<b>Когда стоит сверить:</b>\n"
+    "• если вы воспользовались резервом — лучше сразу;\n"
+    "• если банк начисляет проценты — достаточно раз в несколько месяцев.\n\n"
+    "Выберите резерв, чтобы изменить сумму."
+)
+
+
+def reserve_balances_rows(from_level: bool) -> list[list[tuple[str, str]]]:
+    rows = [[("← Главное меню", "menu:back"), ("ℹ️ Помощь", "reserves:help")]]
+    if from_level:
+        rows.append([("← Уровень", "menu:state")])
+    return rows
+
+
 async def show_reserve_balances(
     message: Message, telegram_id: int, *, from_level: bool = False,
 ) -> None:
@@ -74,25 +97,44 @@ async def show_reserve_balances(
     rows.append([("✎ Баланс Подушки", f"{edit_prefix}:pillow")])
     if allocator.settings.needs_stabilizer:
         rows.append([("✎ Баланс Стабилизатора", f"{edit_prefix}:stabilizer")])
-    rows.append(
-        [("← Главное меню", "menu:back"), ("← Уровень", "menu:state")]
-        if from_level else [("← Главное меню", "menu:back")]
-    )
+    rows.extend(reserve_balances_rows(from_level))
     await message.answer(
-        "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
-        "Выберите резерв и укажите, сколько денег в нём сейчас. "
-        "Аллокатор учтёт новую сумму при определении вашего уровня.",
+        RESERVE_BALANCES_TEXT,
         reply_markup=keyboard(rows),
+    )
+
+
+@router.callback_query(F.data == "reserves:help")
+async def show_reserve_help(callback: CallbackQuery) -> None:
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await callback.message.answer("Сначала создайте профиль через /start.")
+        return
+    await callback.message.answer(
+        render_reserve_help(
+            allocator.profile_id,
+            has_stabilizer=allocator.settings.needs_stabilizer,
+            has_salary_fund=allocator.profile_id == "cyclic",
+        ),
+        reply_markup=keyboard([[("← Назад", "menu:reserves"), ("← Главное меню", "menu:back")]]),
     )
 
 
 async def reserve_balance_exit(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
-    if data.get("reserve_balance_context") in {"reserves", "level_reserves"}:
+    context = data.get("reserve_balance_context")
+    if context in {"reserves", "level_reserves"}:
         await show_reserve_balances(
             callback.message, callback.from_user.id,
-            from_level=data.get("reserve_balance_context") == "level_reserves",
+            from_level=context == "level_reserves",
+        )
+    elif context in {"settings_pillow", "settings_stabilizer", "settings_salary_fund"}:
+        await show_reserve_settings(
+            callback.message,
+            callback.from_user.id,
+            context.removeprefix("settings_"),
         )
     else:
         await show_settings_actions(callback.message, callback.from_user.id)
@@ -179,7 +221,7 @@ def tax_profile_name(subject: str, mode: str, rate: Decimal) -> str:
 def tax_profile_navigation(data: dict) -> list[tuple[str, str]]:
     """Keep the back row identical when the builder was opened from Taxes."""
     if data.get("income_profile_return") == "taxes:income":
-        return [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")]
+        return [("← Назад", "taxes:income"), ("← Главное меню", "taxes:back")]
     return [("Отмена", "incomesettings:cancel")]
 
 
@@ -216,6 +258,128 @@ def fmt_money(value: Decimal) -> str:
     return formatted[:-3] if formatted.endswith(",00") else formatted
 
 
+def _breakdown_decimal(value) -> Decimal:
+    try:
+        return max(Decimal("0"), Decimal(str(value or "0")))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _breakdown_item_name(item: dict) -> str:
+    name = str(item.get("name") or item.get("item_name") or "Расход").strip()
+    tax_labels = {
+        "tax": "Транспортный налог",
+        "property_tax": "Налог на имущество",
+        "land_tax": "Земельный налог",
+    }
+    tax_label = tax_labels.get(item.get("subcategory"))
+    return f"{tax_label} · {name}" if tax_label else name
+
+
+def _breakdown_source_note(item: dict, monthly: Decimal) -> str:
+    amount = _breakdown_decimal(item.get("amount"))
+    months = _breakdown_decimal(item.get("months", "1"))
+    if amount <= 0 or months == 1 or amount == monthly:
+        return ""
+    if item.get("subcategory") in {"tax", "property_tax", "land_tax"}:
+        period = "в год"
+    elif months == 12:
+        period = "в год"
+    elif abs(months - Decimal("12") / Decimal("52")) < Decimal("0.0001") or months == Decimal("0.25"):
+        period = "в неделю"
+    else:
+        period = f"за {fmt_money(months)} мес."
+    return f" <i>(введено {rub(amount)} {period})</i>"
+
+
+def life_breakdown_blocks(items: list[dict]) -> tuple[list[str], Decimal]:
+    """Форматирует исходные расходы онбординга по разделам."""
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        monthly = _breakdown_decimal(item.get("monthly"))
+        if monthly <= 0:
+            continue
+        label = str(item.get("category_label") or "Другое").strip() or "Другое"
+        groups.setdefault(label, []).append(item)
+
+    blocks: list[str] = []
+    subtotal = Decimal("0")
+    for label, group_items in groups.items():
+        lines = [f"<b><u>{escape(label.upper())}</u></b>"]
+        for item in group_items:
+            monthly = _breakdown_decimal(item.get("monthly"))
+            subtotal += monthly
+            lines.append(
+                f"• {escape(_breakdown_item_name(item))} — <b>{rub(monthly)} / мес.</b>"
+                + _breakdown_source_note(item, monthly)
+            )
+        blocks.append("\n".join(lines))
+    return blocks, subtotal
+
+
+def cost_breakdown_blocks(
+    title: str,
+    total: Decimal,
+    items: list[dict],
+    legacy_categories: dict[str, Decimal],
+) -> list[str]:
+    """Строит экран суммы и её состава, сохраняя поддержку старых профилей."""
+    total = _breakdown_decimal(total)
+    detail_blocks, subtotal = life_breakdown_blocks(items)
+    blocks = [f"<b>{title}</b>\n\nТекущая сумма — <b>{rub(total)}</b>"]
+    if detail_blocks:
+        blocks.extend(detail_blocks)
+        blocks.append(f"По указанным расходам — <b>{rub(subtotal)} / мес.</b>")
+        difference = total - subtotal
+        if difference > 0:
+            blocks.append(
+                f"Округление или ручная корректировка итога — <b>+{rub(difference)}</b>"
+            )
+        elif difference < 0:
+            blocks.append(
+                "⚠️ Итоговая сумма меньше суммы перечисленных расходов на "
+                f"<b>{rub(-difference)}</b>. Итог стоит проверить."
+            )
+        return blocks
+
+    blocks.append(
+        "Подробные строки расходов не сохранились: профиль был рассчитан до появления этой функции."
+    )
+    if legacy_categories:
+        known = ["<b>Сохранившиеся конверты:</b>"]
+        known.extend(
+            f"• {escape(name)} — <b>{rub(amount)}</b>"
+            for name, amount in legacy_categories.items()
+        )
+        blocks.append("\n".join(known))
+    blocks.append("Чтобы получить полную расшифровку, пересчитайте стоимость жизни в онбординге.")
+    return blocks
+
+
+async def answer_cost_breakdown(
+    message: Message,
+    blocks: list[str],
+    reply_markup,
+) -> None:
+    """Отправляет длинную расшифровку несколькими безопасными HTML-сообщениями."""
+    pages: list[str] = []
+    current = ""
+    for block in blocks:
+        candidate = current + ("\n\n" if current else "") + block
+        if current and len(candidate) > 3900:
+            pages.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        pages.append(current)
+    for page in pages[:-1]:
+        await message.answer(page)
+    await message.answer(pages[-1], reply_markup=reply_markup)
+
+
 def set_user_critical_life(settings, value: Decimal) -> Decimal:
     """Save the user's ordinary monthly costs without baking in automatics.
 
@@ -249,6 +413,13 @@ ARCHETYPE_INTRO = (
     "Выберите животное, которое сейчас лучше всего описывает ваш финансовый характер.\n\n"
     "Это лёгкая самооценка для настроения — она не влияет на расчёты и финансовые рекомендации."
 )
+
+
+PROFILE_NAMES = {
+    "stable": "Стабильный",
+    "piecework": "Сдельный",
+    "cyclic": "Циклический",
+}
 
 
 def archetype_keyboard():
@@ -324,6 +495,10 @@ async def show_settings_menu(message: Message, telegram_id: int):
                       if st.intercontract_break_active else
                       f"До следующего перерыва — {st.current_phase_months_remaining} мес.")
         lines.extend([f"Цикл — {s.income_work_months} мес. работы / {s.income_gap_months} мес. перерыва",
+                      "Сроки цикла — " + (
+                          "могут измениться" if s.cyclic_income_uncertain
+                          else "заранее известны"
+                      ),
                       f"Текущая фаза — {phase}", phase_line, "",
                       f"Средний доход за цикл — {fmt_money(s.cycle_regular_income_limit)}"])
     else:
@@ -388,47 +563,609 @@ async def show_settings_menu(message: Message, telegram_id: int):
 
 
 async def show_settings_actions(message: Message, telegram_id: int):
-    """Show editable settings separately from the user-settings overview."""
+    """Show the first, entity-oriented level of editable settings."""
     allocator = db.load_allocator(telegram_id)
     if allocator is None:
         await message.answer("Сначала настройте профиль через /start.")
         return
 
-    s = allocator.settings
-    dev_button = (
-        "🛠 Выключить режим разработчика"
-        if s.developer_mode
-        else "🛠 Включить режим разработчика"
-    )
     await message.answer(
         "<b>НАСТРОЙКИ</b>\n\nВыберите, что хотите изменить.",
         reply_markup=keyboard([
-            [(f"Профиль: { {'stable': 'Стабильный', 'piecework': 'Сдельный', 'cyclic': 'Циклический'}.get(allocator.profile_id, allocator.profile_id)}", "settings:rhythm")],
-            [("Выбрать финансовый архетип", "settings:archetype")],
-            [("Средний доход", "settings:income"), ("Типы доходов", "settings:income_types")],
-            [("Настройки Подушки", "settings:force_months")],
-            [("Баланс Подушки", "settings:pillow")],
-            *([
-                [("Настройки Стабилизатора", "settings:stabilizer_months")],
-                [("Баланс Стабилизатора", "settings:stabilizer_balance")],
-            ] if s.needs_stabilizer else []),
-            *([[("Баланс Фонда Зарплаты", "settings:intercontract_balance")]] if allocator.profile_id == "cyclic" else []),
-            [("Изменить КМ", "settings:critical"), ("Категории КМ", "settings:life_categories")],
-            [("Изменить Бытовой резерв", "settings:household")],
+            [("Профиль и доход", "settings:profile_income")],
+            [("Стоимость жизни", "settings:cost_living")],
+            [("Долги и кредиты", "settings:debts")],
+            [("Резервы", "settings:reserves")],
+            [("Налоги", "settings:taxes")],
             [("Цели и Сундуки", "goals:manage")],
             [("Бракеты", "brackets:open")],
             [("Расходы к дате", "settings:planned")],
-            *([
-                [("Изменить рабочую жизнь", "phaselife:fill:work")],
-                [("Изменить жизнь в перерыве", "phaselife:fill:break")],
-            ] if allocator.profile_id == "cyclic" else []),
-            [(dev_button, "settings:developer")],
-            [("🗑 Полный сброс учёта", "settings:full_reset")],
-            *([[("🗑️ Удалить профиль и всю историю", "settings:erase_all")]] if s.developer_mode else []),
-            [("🔄 Пройти настройку заново", "setup:restart")],
+            [("Финансовый архетип", "settings:archetype")],
+            [("Системные настройки", "settings:system")],
+            [("← Главное меню", "menu:back")],
+        ]),
+    )
+
+
+async def show_profile_income_settings(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    income_label = (
+        "Гарантированный доход"
+        if allocator.profile_id == "stable"
+        else "Средний доход"
+    )
+    if allocator.profile_id == "cyclic":
+        income_label += (
+            " · вручную" if allocator.settings.cyclic_income_uncertain
+            else " · авто"
+        )
+    rows = [
+        [(f"Профиль: {PROFILE_NAMES.get(allocator.profile_id, allocator.profile_id)}", "settings:rhythm")],
+        [(income_label, "settings:income")],
+        [("Типы доходов", "settings:income_types")],
+    ]
+    if allocator.profile_id == "cyclic":
+        rows.extend([
+            [(
+                "Сроки цикла: могут измениться"
+                if allocator.settings.cyclic_income_uncertain
+                else "Сроки цикла: заранее известны",
+                "settings:cycle_predictability",
+            )],
+            [("Текущая фаза цикла", "settings:cycle_phase")],
+            [("Жизнь в рабочей части", "phaselife:fill:work")],
+            [("Жизнь в перерыве", "phaselife:fill:break")],
+            [("Обязательства на время работы", "phaselife:obligations")],
+        ])
+    rows.append([("← Назад", "settings:open")])
+    await message.answer(
+        "<b>ПРОФИЛЬ И ДОХОД</b>\n\nВыберите параметр.",
+        reply_markup=keyboard(rows),
+    )
+
+
+async def show_cost_living_settings(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    await message.answer(
+        "<b>СТОИМОСТЬ ЖИЗНИ</b>\n\n"
+        "Здесь собраны обязательные и нерегулярные бытовые расходы.",
+        reply_markup=keyboard([
+            [("Редактировать все расходы", "settings:life_editor")],
+            [("Найти деньги для важного", "settings:budget_optimizer")],
+            [("Критический минимум", "settings:critical_menu")],
+            [("Бытовой резерв", "settings:household_menu")],
             [("← Назад", "settings:open")],
         ]),
     )
+
+
+async def show_debt_settings(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    active_count = sum(credit.active for credit in allocator.settings.credits)
+    savings = "включён" if allocator.settings.calculate_interest_savings else "выключен"
+    rows = [
+        [("Кредитный реестр", "menu:credits")],
+        [("Лавина", "settings:debt_strategy:avalanche"),
+         ("Снежный ком", "settings:debt_strategy:snowball")],
+        [("Ручной порядок", "settings:debt_strategy:manual")],
+        [("Вкл./выкл. расчёт экономии", "settings:interest_savings")],
+    ]
+    if active_count:
+        rows.append([("Сверить резерв минимальных платежей", "settings:minimum_payment_balance")])
+    rows.append([("← Назад", "settings:open")])
+    await message.answer(
+        "<b>ДОЛГИ И КРЕДИТЫ</b>\n\n"
+        f"Активных долгов — <b>{active_count}</b>\n"
+        f"Стратегия — <b>{escape(allocator.settings.debt_strategy)}</b>\n"
+        f"Расчёт экономии на процентах — <b>{savings}</b>.",
+        reply_markup=keyboard(rows),
+    )
+
+
+async def show_critical_life_settings(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    await answer_cost_breakdown(
+        message,
+        cost_breakdown_blocks(
+            "КРИТИЧЕСКИЙ МИНИМУМ",
+            allocator.settings.critical_life,
+            allocator.settings.critical_life_breakdown,
+            allocator.settings.life_categories,
+        ),
+        keyboard([
+            [("Редактировать расходы", "settings:life_editor")],
+            [("Конверты Критического минимума", "settings:life_categories")],
+            [("← Назад", "settings:cost_living")],
+        ]),
+    )
+
+
+async def show_household_settings(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    await answer_cost_breakdown(
+        message,
+        cost_breakdown_blocks(
+            "БЫТОВОЙ РЕЗЕРВ",
+            allocator.settings.household_reserve,
+            allocator.settings.household_reserve_breakdown,
+            allocator.settings.household_reserve_categories,
+        ),
+        keyboard([
+            [("Редактировать расходы", "settings:life_editor")],
+            [("← Назад", "settings:cost_living")],
+        ]),
+    )
+
+
+async def show_household_categories(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    categories = allocator.settings.household_reserve_categories
+    lines = [
+        f"• {escape(name)} — <b>{rub(amount)}</b>"
+        for name, amount in categories.items()
+    ]
+    await message.answer(
+        "<b>КАТЕГОРИИ БЫТОВОГО РЕЗЕРВА</b>\n\n"
+        + ("\n".join(lines) if lines else "Отдельных категорий сейчас нет."),
+        reply_markup=keyboard([[('← Назад', 'settings:household_menu')]]),
+    )
+
+
+def _optimizer_forecast(allocator) -> tuple[str, int | None, int | None] | None:
+    """Return the current protection priority and a conservative time range."""
+    from onboarding import simulate_priority_months
+
+    priority = allocator.current_protection_priority()
+    if priority is None or allocator.settings.average_income <= 0:
+        return None
+    name = (
+        "Долги"
+        if any(credit.active for credit in allocator.settings.credits)
+        else str(priority["name"])
+    )
+    average = allocator.settings.average_income
+    if allocator.settings.income_rhythm == "monthly":
+        low = high = average
+    else:
+        low = average * Decimal("0.85")
+        high = average * Decimal("1.15")
+    return (
+        name,
+        simulate_priority_months(allocator, high),
+        simulate_priority_months(allocator, low),
+    )
+
+
+def _optimizer_forecast_text(result: tuple[str, int | None, int | None] | None) -> str:
+    from onboarding import forecast_duration_range
+
+    if result is None:
+        return "срок пока нельзя надёжно определить"
+    _, fast, slow = result
+    if fast is None or slow is None:
+        return "срок пока нельзя надёжно определить"
+    return forecast_duration_range(fast, slow)
+
+
+async def show_saved_budget_optimizer_item(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    indices = list(data.get("settings_optimizer_indices", []))
+    position = int(data.get("settings_optimizer_position", 0))
+    if position >= len(indices):
+        await finish_saved_budget_optimizer(message, state, message.chat.id)
+        return
+    items = list(data.get("settings_optimizer_items", []))
+    index = int(indices[position])
+    item = items[index]
+    monthly = Decimal(str(item.get("monthly", "0")))
+    await state.set_state(None)
+    await message.answer(
+        f"<b>{escape(str(item.get('name', 'РАСХОД')).upper())}</b>\n\n"
+        f"Сейчас запланировано — <b>{rub(monthly)} / мес.</b>\n"
+        f"Расход {position + 1} из {len(indices)}.",
+        reply_markup=keyboard([
+            [(f"Освободить 10% ({rub(monthly * Decimal('0.10'))})", "settingsoptimizer:cut:10")],
+            [(f"Освободить 20% ({rub(monthly * Decimal('0.20'))})", "settingsoptimizer:cut:20")],
+            [("Указать свой план", "settingsoptimizer:custom")],
+            [("Не менять", "settingsoptimizer:skip")],
+            [("✖️ Отмена", "settings:cost_living")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "settings:budget_optimizer")
+async def start_saved_budget_optimizer(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator.settings.income_rhythm == "cyclic":
+        await callback.message.answer(
+            "Для циклического профиля расходы двух частей редактируются отдельно. "
+            "Откройте рабочую жизнь или жизнь в перерыве."
+        )
+        return
+    from onboarding import budget_optimizer_candidate, editable_life_item
+
+    items = [
+        editable_life_item(item)
+        for item in allocator.settings.household_reserve_breakdown
+        if isinstance(item, dict)
+    ]
+    indices = [index for index, item in enumerate(items) if budget_optimizer_candidate(item)]
+    if not indices:
+        await callback.message.answer(
+            "Гибких расходов для пересмотра не найдено.",
+            reply_markup=keyboard([[('← Назад', 'settings:cost_living')]]),
+        )
+        return
+    await state.clear()
+    await state.update_data(
+        settings_optimizer_items=items,
+        settings_optimizer_indices=indices,
+        settings_optimizer_position=0,
+        settings_optimizer_freed="0",
+        settings_optimizer_before=_optimizer_forecast(deepcopy(allocator)),
+    )
+    await callback.message.answer(
+        "<b>НАЙТИ ДЕНЬГИ ДЛЯ ВАЖНОГО</b>\n\n"
+        "Покажу только гибкие расходы Бытового резерва. Критический минимум не изменится."
+    )
+    await show_saved_budget_optimizer_item(callback.message, state)
+
+
+@router.callback_query(F.data.startswith("settingsoptimizer:cut:"))
+async def cut_saved_budget_optimizer_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    from onboarding import apply_budget_optimizer_plan
+
+    data = await state.get_data()
+    position = int(data["settings_optimizer_position"])
+    index = int(data["settings_optimizer_indices"][position])
+    items = list(data["settings_optimizer_items"])
+    item = dict(items[index])
+    old = Decimal(str(item["monthly"]))
+    percent = Decimal(callback.data.rsplit(":", 1)[1])
+    item = apply_budget_optimizer_plan(item, old * (Decimal("100") - percent) / Decimal("100"))
+    items[index] = item
+    await state.update_data(
+        settings_optimizer_items=items,
+        settings_optimizer_position=position + 1,
+        settings_optimizer_freed=str(
+            Decimal(str(data.get("settings_optimizer_freed", "0")))
+            + old - Decimal(str(item["monthly"]))
+        ),
+    )
+    await show_saved_budget_optimizer_item(callback.message, state)
+
+
+@router.callback_query(F.data == "settingsoptimizer:skip")
+async def skip_saved_budget_optimizer_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    await state.update_data(
+        settings_optimizer_position=int(data["settings_optimizer_position"]) + 1,
+    )
+    await show_saved_budget_optimizer_item(callback.message, state)
+
+
+@router.callback_query(F.data == "settingsoptimizer:custom")
+async def custom_saved_budget_optimizer_item(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    index = int(data["settings_optimizer_indices"][int(data["settings_optimizer_position"])])
+    item = data["settings_optimizer_items"][index]
+    await state.set_state(EditSettingsStates.budget_optimizer_amount)
+    await callback.message.answer(
+        f"Введите новую месячную сумму от 0 до {rub(Decimal(str(item['monthly'])))}."
+    )
+
+
+@router.message(EditSettingsStates.budget_optimizer_amount)
+async def save_custom_budget_optimizer_item(message: Message, state: FSMContext):
+    from onboarding import apply_budget_optimizer_plan
+
+    value = parse_decimal(message.text)
+    data = await state.get_data()
+    position = int(data["settings_optimizer_position"])
+    index = int(data["settings_optimizer_indices"][position])
+    items = list(data["settings_optimizer_items"])
+    item = dict(items[index])
+    old = Decimal(str(item["monthly"]))
+    if value is None or value < 0 or value > old:
+        await message.answer(f"Введите сумму от 0 до {rub(old)}.")
+        return
+    items[index] = apply_budget_optimizer_plan(item, value)
+    await state.update_data(
+        settings_optimizer_items=items,
+        settings_optimizer_position=position + 1,
+        settings_optimizer_freed=str(
+            Decimal(str(data.get("settings_optimizer_freed", "0"))) + old - value
+        ),
+    )
+    await show_saved_budget_optimizer_item(message, state)
+
+
+async def finish_saved_budget_optimizer(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+) -> None:
+    from onboarding import active_br_breakdown, br_group_totals, gift_history_monthly, round_up_thousand
+
+    data = await state.get_data()
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await state.clear()
+        return
+    items = list(data.get("settings_optimizer_items", []))
+    groups = br_group_totals(items)
+    exact = sum(groups.values(), Decimal("0"))
+    allocator.settings.household_reserve_breakdown = active_br_breakdown(items)
+    allocator.settings.household_reserve = round_up_thousand(exact) if exact > 0 else Decimal("0")
+    children = groups.get("Дети", Decimal("0"))
+    allocator.settings.household_reserve_categories = {"Дети": children} if children > 0 else {}
+    allocator.settings.historical_gifts_monthly = gift_history_monthly(items)
+    after = _optimizer_forecast(deepcopy(allocator))
+    db.save_allocator(telegram_id, allocator)
+    before = data.get("settings_optimizer_before")
+    freed = Decimal(str(data.get("settings_optimizer_freed", "0")))
+    await state.clear()
+    await message.answer(
+        "✅ <b>ПЛАН БЫТОВОГО РЕЗЕРВА ОБНОВЛЁН</b>\n\n"
+        f"Освобождается — <b>{rub(freed)} / мес.</b>\n"
+        f"Было — {_optimizer_forecast_text(tuple(before) if before else None)}.\n"
+        f"Стало — <b>{_optimizer_forecast_text(after)}</b>.",
+        reply_markup=keyboard([
+            [("← К стоимости жизни", "settings:cost_living")],
+            [("← Главное меню", "menu:back")],
+        ]),
+    )
+
+
+async def show_reserves_settings(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    rows = [[("🛡 Подушка", "settings:reserve:pillow")]]
+    if allocator.settings.needs_stabilizer:
+        rows.append([("⚗️ Стабилизатор", "settings:reserve:stabilizer")])
+    if allocator.profile_id == "cyclic":
+        rows.append([("🫙 Фонд зарплаты", "settings:reserve:salary_fund")])
+    rows.append([("← Назад", "settings:open")])
+    await message.answer("<b>РЕЗЕРВЫ</b>", reply_markup=keyboard(rows))
+
+
+async def show_reserve_settings(message: Message, telegram_id: int, reserve: str) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    definitions = {
+        "pillow": ("ПОДУШКА", "settings:force_months", "settings:pillow"),
+        "stabilizer": ("СТАБИЛИЗАТОР", "settings:stabilizer_months", "settings:stabilizer_balance"),
+        "salary_fund": ("ФОНД ЗАРПЛАТЫ", "settings:rhythm", "settings:intercontract_balance"),
+    }
+    if reserve == "stabilizer" and not allocator.settings.needs_stabilizer:
+        await show_reserves_settings(message, telegram_id)
+        return
+    if reserve == "salary_fund" and allocator.profile_id != "cyclic":
+        await show_reserves_settings(message, telegram_id)
+        return
+    title, setup_callback, balance_callback = definitions[reserve]
+    setup_rows = [[("Настройки", setup_callback)]]
+    if reserve == "pillow":
+        setup_rows = [
+            [("Форс-мажорная подушка", "settings:force_months")],
+            [("Минимальная подушка", "settings:minimum_reserve_months")],
+        ]
+    await message.answer(
+        f"<b>{title}</b>",
+        reply_markup=keyboard([
+            *setup_rows,
+            [("Сверить баланс", balance_callback)],
+            [("← Назад", "settings:reserves")],
+        ]),
+    )
+
+
+async def show_taxes_settings(message: Message, telegram_id: int) -> None:
+    if db.load_allocator(telegram_id) is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    await message.answer(
+        "<b>НАЛОГИ</b>\n\nВыберите, что хотите настроить или проверить.",
+        reply_markup=keyboard([
+            [("Налог с дохода", "settings:tax_income")],
+            [("Налоги на квартиру, машину и землю", "settings:tax_plans")],
+            [("Патент и плановые налоги", "settings:tax_plans")],
+            [("Текущие настройки", "menu:taxes")],
+            [("← Назад", "settings:open")],
+        ]),
+    )
+
+
+async def show_system_settings(message: Message, telegram_id: int) -> None:
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Сначала настройте профиль через /start.")
+        return
+    developer_label = (
+        "Выключить режим разработчика"
+        if allocator.settings.developer_mode
+        else "Включить режим разработчика"
+    )
+    rows = [
+        [(developer_label, "settings:developer")],
+        [("Настроить профиль заново", "setup:restart")],
+        [("Сбросить все данные", "settings:full_reset")],
+    ]
+    if allocator.settings.developer_mode:
+        rows.append([("Удалить профиль и всю историю", "settings:erase_all")])
+    rows.append([("← Назад", "settings:open")])
+    await message.answer(
+        "<b>СИСТЕМНЫЕ НАСТРОЙКИ</b>\n\n"
+        "Здесь находятся служебные и потенциально опасные действия.",
+        reply_markup=keyboard(rows),
+    )
+
+
+async def open_settings_screen(callback: CallbackQuery, state: FSMContext, renderer) -> None:
+    await callback.answer()
+    await state.clear()
+    await renderer(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data == "settings:profile_income")
+async def open_profile_income_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_profile_income_settings)
+
+
+@router.callback_query(F.data == "settings:cost_living")
+async def open_cost_living_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_cost_living_settings)
+
+
+@router.callback_query(F.data == "settings:debts")
+async def open_debt_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_debt_settings)
+
+
+@router.callback_query(F.data.startswith("settings:debt_strategy:"))
+async def change_debt_strategy(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    strategy = {
+        "avalanche": "Лавина",
+        "snowball": "Снежный ком",
+        "manual": "Ручной выбор",
+    }.get(callback.data.rsplit(":", 1)[1])
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or strategy is None:
+        return
+    allocator.settings.debt_strategy = strategy
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_debt_settings(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data == "settings:interest_savings")
+async def toggle_interest_savings(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        return
+    allocator.settings.calculate_interest_savings = not (
+        allocator.settings.calculate_interest_savings
+    )
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_debt_settings(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data == "settings:minimum_payment_balance")
+async def edit_minimum_payment_balance(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    maximum = allocator.settings.minimum_payment_total
+    await state.set_state(EditSettingsStates.minimum_payment_balance)
+    await callback.message.answer(
+        "<b>РЕЗЕРВ МИНИМАЛЬНЫХ ПЛАТЕЖЕЙ</b>\n\n"
+        f"Сейчас отложено — <b>{rub(allocator.state.accumulated_minimum_payments)}</b>\n"
+        f"Нужно на ближайшие платежи — <b>{rub(maximum)}</b>\n\n"
+        "Введите фактически отложенную сумму.",
+        reply_markup=keyboard([[("← Назад", "settings:debts")]]),
+    )
+
+
+@router.message(EditSettingsStates.minimum_payment_balance)
+async def save_minimum_payment_balance(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    allocator = db.load_allocator(message.from_user.id)
+    maximum = allocator.settings.minimum_payment_total
+    if value is None or value < 0 or value > maximum:
+        await message.answer(f"Введите сумму от 0 до {rub(maximum)}.")
+        return
+    allocator.state.accumulated_minimum_payments = value
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_debt_settings(message, message.from_user.id)
+
+
+@router.callback_query(F.data == "settings:critical_menu")
+async def open_critical_life_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_critical_life_settings)
+
+
+@router.callback_query(F.data == "settings:household_menu")
+async def open_household_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_household_settings)
+
+
+@router.callback_query(F.data == "settings:household_categories")
+async def open_household_categories(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_household_categories)
+
+
+@router.callback_query(F.data == "settings:reserves")
+async def open_reserves_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_reserves_settings)
+
+
+@router.callback_query(F.data.startswith("settings:reserve:"))
+async def open_reserve_settings(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await show_reserve_settings(
+        callback.message, callback.from_user.id, callback.data.rsplit(":", 1)[1],
+    )
+
+
+@router.callback_query(F.data == "settings:taxes")
+async def open_taxes_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_taxes_settings)
+
+
+@router.callback_query(F.data == "settings:tax_income")
+async def open_tax_income_settings(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await show_income_types_settings(
+        callback.message, callback.from_user.id, state,
+        return_to="settings:taxes",
+    )
+
+
+@router.callback_query(F.data == "settings:tax_plans")
+async def open_tax_plans_settings(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    from taxes import show_tax_obligations_edit
+    await show_tax_obligations_edit(
+        callback.message, callback.from_user.id,
+        back_callback="settings:taxes",
+    )
+
+
+@router.callback_query(F.data == "settings:system")
+async def open_system_settings(callback: CallbackQuery, state: FSMContext):
+    await open_settings_screen(callback, state, show_system_settings)
 
 
 @router.callback_query(F.data == "settings:details")
@@ -503,13 +1240,15 @@ async def edit_force_months(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
     s = allocator.settings
-    minimum = Decimal("4") if s.income_rhythm == "irregular" else Decimal("3")
-    if s.income_rhythm == "cyclic" and s.income_gap_months > 1:
-        minimum = Decimal("6")
+    minimum = s.recommended_force_majeure_minimum
     await state.set_state(EditSettingsStates.force_majeure_months)
-    await state.update_data(force_minimum=str(minimum))
+    await state.update_data(
+        force_minimum=str(minimum),
+        reserve_settings_return="pillow",
+    )
     await callback.message.answer(
-        f"<b>ФОРС-МАЖОРНАЯ ПОДУШКА</b>\n\nВведите количество месяцев от {minimum} до 12."
+        f"<b>ФОРС-МАЖОРНАЯ ПОДУШКА</b>\n\nВведите количество месяцев от {minimum} до 12.",
+        reply_markup=keyboard([[('← Назад', 'settings:reserve:pillow')]]),
     )
 
 
@@ -525,7 +1264,35 @@ async def save_force_months_setting(message: Message, state: FSMContext):
     allocator.settings.force_majeure_months = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_actions(message, message.from_user.id)
+    await show_reserve_settings(message, message.from_user.id, "pillow")
+
+
+@router.callback_query(F.data == "settings:minimum_reserve_months")
+async def edit_minimum_reserve_months(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    await state.set_state(EditSettingsStates.minimum_reserve_months)
+    await callback.message.answer(
+        "<b>МИНИМАЛЬНАЯ ПОДУШКА</b>\n\n"
+        f"Сейчас — <b>{allocator.settings.minimum_reserve_months} мес. Критического минимума</b>.\n\n"
+        "Введите новый размер от 1 до 12 месяцев.",
+        reply_markup=keyboard([[("← Назад", "settings:reserve:pillow")]]),
+    )
+
+
+@router.message(EditSettingsStates.minimum_reserve_months)
+async def save_minimum_reserve_months(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 12:
+        await message.answer("Введите количество месяцев от 1 до 12.")
+        return
+    allocator = db.load_allocator(message.from_user.id)
+    total = allocator.state.pillow_balance
+    allocator.settings.minimum_reserve_months = value
+    distribute_existing_pillow(allocator, total)
+    db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_reserve_settings(message, message.from_user.id, "pillow")
 
 
 @router.callback_query(F.data == "settings:stabilizer_months")
@@ -533,10 +1300,14 @@ async def edit_stabilizer_months(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
     if not allocator.settings.needs_stabilizer:
-        await callback.message.answer("Для Стабильного профиля Стабилизатор не используется.")
+        await callback.message.answer("Этот резерв недоступен для вашего профиля.")
         return
     await state.set_state(EditSettingsStates.stabilizer_months)
-    await callback.message.answer("<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\nВведите количество месяцев от 1 до 12.")
+    await state.update_data(reserve_settings_return="stabilizer")
+    await callback.message.answer(
+        "<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\nВведите количество месяцев от 1 до 12.",
+        reply_markup=keyboard([[('← Назад', 'settings:reserve:stabilizer')]]),
+    )
 
 
 @router.message(EditSettingsStates.stabilizer_months)
@@ -549,17 +1320,19 @@ async def save_stabilizer_months_setting(message: Message, state: FSMContext):
     allocator.settings.stabilizer_target_months = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_actions(message, message.from_user.id)
+    await show_reserve_settings(message, message.from_user.id, "stabilizer")
 
 
 @router.callback_query(F.data == "settings:stabilizer_balance")
 async def edit_stabilizer_balance(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    await state.update_data(reserve_balance_context=data.get("reserve_balance_context", "settings"))
+    await state.update_data(
+        reserve_balance_context=data.get("reserve_balance_context", "settings_stabilizer")
+    )
     allocator = db.load_allocator(callback.from_user.id)
     if not allocator.settings.needs_stabilizer:
-        await callback.message.answer("Для Стабильного профиля Стабилизатор не используется.")
+        await callback.message.answer("Этот резерв недоступен для вашего профиля.")
         return
     await state.set_state(EditSettingsStates.stabilizer_balance)
     await callback.message.answer(
@@ -594,7 +1367,9 @@ async def save_stabilizer_balance(message: Message, state: FSMContext):
 async def edit_intercontract_balance(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    await state.update_data(reserve_balance_context=data.get("reserve_balance_context", "settings"))
+    await state.update_data(
+        reserve_balance_context=data.get("reserve_balance_context", "settings_salary_fund")
+    )
     allocator = db.load_allocator(callback.from_user.id)
     if allocator.settings.income_rhythm != "cyclic":
         await callback.message.answer("Фонд Зарплаты используется только в Цикличном (контрактном) профиле.")
@@ -796,7 +1571,7 @@ async def edit_income_rhythm(callback: CallbackQuery, state: FSMContext):
         reply_markup=keyboard([
             [("Стабильный", "settingsrhythm:monthly"), ("Сдельный", "settingsrhythm:irregular")],
             [("Цикличный (контрактный)", "settingsrhythm:cyclic")],
-            [("Отмена", "settings:open")],
+            [("← Назад", "settings:profile_income")],
         ]),
     )
 
@@ -821,8 +1596,15 @@ async def save_income_rhythm_setting(callback: CallbackQuery, state: FSMContext)
     allocator.settings.income_work_months = Decimal("1")
     allocator.settings.reliable_gap_income = Decimal("0")
     allocator.settings.stabilizer_target_months = Decimal("1")
+    allocator.settings.minimum_reserve_months = Decimal(
+        "1" if rhythm == "monthly" else "2"
+    )
+    force_minimum = Decimal("3" if rhythm == "monthly" else "4")
+    allocator.settings.force_majeure_months = max(
+        force_minimum, allocator.settings.force_majeure_months,
+    )
     db.save_allocator(callback.from_user.id, allocator)
-    await show_settings_actions(callback.message, callback.from_user.id)
+    await show_profile_income_settings(callback.message, callback.from_user.id)
 
 
 @router.message(EditSettingsStates.income_gap_months)
@@ -842,19 +1624,140 @@ async def save_income_work_setting(message: Message, state: FSMContext):
     if value is None or value < 1 or value > 24 or value != value.to_integral_value():
         await message.answer("Введите целое количество месяцев от 1 до 24.")
         return
-    await state.update_data(settings_work_months=str(value))
+    await state.update_data(
+        settings_work_months=str(value),
+        settings_cycle_profile_pending=True,
+    )
+    await ask_cycle_phase_setting(message, state)
+
+
+async def ask_cycle_phase_setting(message: Message, state: FSMContext) -> None:
+    await message.answer(
+        "<b>ТЕКУЩАЯ ФАЗА ЦИКЛА</b>\n\nГде вы находитесь сейчас?",
+        reply_markup=keyboard([
+            [("Рабочая часть", "settingscyclephase:work")],
+            [("Перерыв", "settingscyclephase:break")],
+            [("← Назад", "settings:profile_income")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "settings:cycle_phase")
+async def edit_cycle_phase_setting(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await ask_cycle_phase_setting(callback.message, state)
+
+
+@router.callback_query(F.data.startswith("settingscyclephase:"))
+async def choose_cycle_phase_setting(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    phase = callback.data.rsplit(":", 1)[1]
+    if phase not in {"work", "break"}:
+        return
+    await state.update_data(settings_cycle_phase=phase)
+    await state.set_state(EditSettingsStates.current_phase_months_remaining)
+    label = "до конца рабочей части" if phase == "work" else "до следующей рабочей части"
+    await callback.message.answer(
+        f"Сколько полных месяцев осталось {label}? Введите число от 1 до 24."
+    )
+
+
+@router.message(EditSettingsStates.current_phase_months_remaining)
+async def save_cycle_phase_setting(message: Message, state: FSMContext):
+    value = parse_decimal(message.text)
+    if value is None or value < 1 or value > 24 or value != value.to_integral_value():
+        await message.answer("Введите целое количество месяцев от 1 до 24.")
+        return
     data = await state.get_data()
+    phase = data.get("settings_cycle_phase")
     allocator = db.load_allocator(message.from_user.id)
-    allocator.settings.income_rhythm = "cyclic"
-    allocator.settings.profile_type = "cyclic"
-    allocator.settings.employment_type = "Фрилансер"
-    allocator.settings.income_gap_months = Decimal(data["settings_gap_months"])
-    allocator.settings.income_work_months = Decimal(data["settings_work_months"])
-    allocator.settings.reliable_gap_income = Decimal("0")
-    allocator.settings.stabilizer_target_months = max(Decimal("2"), allocator.settings.stabilizer_target_months)
+    if allocator is None or phase not in {"work", "break"}:
+        await state.clear()
+        return
+    if data.get("settings_cycle_profile_pending"):
+        await state.update_data(settings_cycle_phase_remaining=str(value))
+        await ask_cycle_predictability_setting(message)
+        return
+    allocator.state.current_cycle_phase = str(phase)
+    allocator.state.current_phase_months_remaining = value
+    allocator.state.intercontract_break_active = phase == "break"
+    allocator.state.intercontract_months_remaining = (
+        value if phase == "break" else Decimal("0")
+    )
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await show_settings_actions(message, message.from_user.id)
+    await show_profile_income_settings(message, message.from_user.id)
+
+
+async def ask_cycle_predictability_setting(message: Message) -> None:
+    await message.answer(
+        "<b>НАСКОЛЬКО ПРЕДСКАЗУЕМЫ СРОКИ ЦИКЛА?</b>\n\n"
+        "Если даты рабочей части заранее известны, рекомендуемая Подушка — 6–12 месяцев.\n"
+        "Если контракт, рейс или проект может сдвинуться, рекомендуемая Подушка — 9–12 месяцев.",
+        reply_markup=keyboard([
+            [("Сроки заранее известны", "settingscyclepredictability:known")],
+            [("Сроки могут измениться", "settingscyclepredictability:uncertain")],
+            [("← Назад", "settings:profile_income")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "settings:cycle_predictability")
+async def edit_cycle_predictability(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await ask_cycle_predictability_setting(callback.message)
+
+
+@router.callback_query(F.data.startswith("settingscyclepredictability:"))
+async def save_cycle_predictability_setting(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    uncertain = callback.data.rsplit(":", 1)[1] == "uncertain"
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await state.clear()
+        return
+    data = await state.get_data()
+    if data.get("settings_cycle_profile_pending"):
+        phase = str(data["settings_cycle_phase"])
+        remaining = Decimal(data["settings_cycle_phase_remaining"])
+        allocator.settings.income_rhythm = "cyclic"
+        allocator.settings.profile_type = "cyclic"
+        allocator.settings.employment_type = "Фрилансер"
+        allocator.settings.income_gap_months = Decimal(data["settings_gap_months"])
+        allocator.settings.income_work_months = Decimal(data["settings_work_months"])
+        allocator.settings.reliable_gap_income = Decimal("0")
+        allocator.settings.minimum_reserve_months = Decimal("2")
+        allocator.state.current_cycle_phase = phase
+        allocator.state.current_phase_months_remaining = remaining
+        allocator.state.intercontract_break_active = phase == "break"
+        allocator.state.intercontract_months_remaining = (
+            remaining if phase == "break" else Decimal("0")
+        )
+    allocator.settings.cyclic_income_uncertain = uncertain
+    minimum = allocator.settings.recommended_force_majeure_minimum
+    if data.get("settings_cycle_profile_pending"):
+        allocator.settings.force_majeure_months = max(
+            minimum, allocator.settings.force_majeure_months,
+        )
+    db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    below_recommendation = allocator.settings.force_majeure_months < minimum
+    await callback.message.answer(
+        "Сроки цикла сохранены. "
+        f"Рекомендуемый размер Подушки — <b>{minimum}–12 месяцев Критического минимума</b>."
+        + (
+            f"\n\nСейчас указано {allocator.settings.force_majeure_months} мес. "
+            "Аллокатор не изменил сумму без вашего решения."
+            if below_recommendation else ""
+        ),
+        reply_markup=(
+            keyboard([[("Настроить Подушку", "settings:force_months")]])
+            if below_recommendation else None
+        ),
+    )
+    await show_profile_income_settings(callback.message, callback.from_user.id)
 
 @router.callback_query(
     F.data.in_(
@@ -913,10 +1816,10 @@ async def toggle_developer(
     )
 
     await callback.message.answer(
-        f"✅ Режим разработчика {status}."
+        f"Режим разработчика {status}."
     )
 
-    await show_settings_actions(
+    await show_system_settings(
         callback.message,
         callback.from_user.id,
     )
@@ -933,7 +1836,7 @@ async def ask_full_reset(
     await state.clear()
 
     await callback.message.answer(
-        "⚠️ <b>ПОЛНЫЙ СБРОС УЧЁТА</b>\n\n"
+        "⚠️ <b>СБРОСИТЬ ВСЕ УЧЁТНЫЕ ДАННЫЕ?</b>\n\n"
         "Будут обнулены:\n"
         "🔄 Баланс жизни\n"
         "🛡️ Подушка\n"
@@ -951,7 +1854,7 @@ async def ask_full_reset(
         "тип занятости и данные кредитов останутся без изменений.",
         reply_markup=keyboard([
             [("Да, обнулить учёт", "settings:full_reset_confirm")],
-            [("Отмена", "settings:full_reset_cancel")],
+            [("← Назад", "settings:full_reset_cancel")],
         ]),
     )
 
@@ -966,7 +1869,7 @@ async def cancel_full_reset(
     await callback.answer("Сброс отменён")
     await state.clear()
 
-    await show_settings_actions(
+    await show_system_settings(
         callback.message,
         callback.from_user.id,
     )
@@ -1066,7 +1969,7 @@ async def confirm_full_reset(
             "Не удалось полностью обнулить учёт. Все данные сохранены без изменений.",
             reply_markup=keyboard([
                 [("← Главное меню", "menu:back")],
-                [("← Назад", "settings:developer")],
+                [("← Назад", "settings:system")],
             ]),
         )
         return
@@ -1162,7 +2065,9 @@ async def save_full_reset_period_start(
 async def edit_pillow(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    await state.update_data(reserve_balance_context=data.get("reserve_balance_context", "settings"))
+    await state.update_data(
+        reserve_balance_context=data.get("reserve_balance_context", "settings_pillow")
+    )
     allocator = db.load_allocator(callback.from_user.id)
     has_active_debt = any(credit.active for credit in allocator.settings.credits)
     target = (
@@ -1205,14 +2110,9 @@ async def save_pillow(message: Message, state: FSMContext):
 @router.callback_query(F.data == "settings:critical")
 async def edit_critical(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    allocator = db.load_allocator(callback.from_user.id)
-    await state.set_state(EditSettingsStates.critical_life)
-    await callback.message.answer(
-        "🔴 <b>ОБЯЗАТЕЛЬНАЯ ЖИЗНЬ</b>\n\n"
-        f"Сейчас: <b>{rub(allocator.settings.base_critical_life)}</b>\n\n"
-        "Введите новую месячную сумму обязательных расходов.\n"
-        "Налоги, плановые платежи и минимальные платежи по долгам сюда "
-        "не добавляйте — Аллокатор учитывает их отдельно."
+    from onboarding import start_saved_life_editor
+    await start_saved_life_editor(
+        callback.message, state, callback.from_user.id,
     )
 
 @router.message(EditSettingsStates.critical_life)
@@ -1241,19 +2141,16 @@ async def save_critical(message: Message, state: FSMContext):
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
     await message.answer(
-        f"✅ Критический минимум обновлён: <b>{rub(actual)}</b>",
-        reply_markup=main_menu_keyboard(message.from_user.id),
+        f"Критический минимум обновлён: <b>{rub(actual)}</b>",
     )
+    await show_critical_life_settings(message, message.from_user.id)
 
 @router.callback_query(F.data == "settings:household")
 async def edit_household(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    allocator = db.load_allocator(callback.from_user.id)
-    await state.set_state(EditSettingsStates.household_reserve)
-    await callback.message.answer(
-        "💚 <b>БЫТОВОЙ РЕЗЕРВ</b>\n\n"
-        f"Сейчас: <b>{rub(allocator.settings.household_reserve)}</b>\n\n"
-        "Введите новую месячную сумму нерегулярных бытовых расходов."
+    from onboarding import start_saved_life_editor
+    await start_saved_life_editor(
+        callback.message, state, callback.from_user.id,
     )
 
 @router.message(EditSettingsStates.household_reserve)
@@ -1266,7 +2163,8 @@ async def save_household(message: Message, state: FSMContext):
     allocator.settings.household_reserve = value
     db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer(f"✅ Бытовой резерв обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
+    await message.answer(f"Бытовой резерв обновлён: <b>{rub(value)}</b>")
+    await show_household_settings(message, message.from_user.id)
 
 @router.callback_query(F.data == "settings:income")
 async def edit_average_income(callback: CallbackQuery, state: FSMContext):
@@ -1276,7 +2174,8 @@ async def edit_average_income(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "💰 <b>СРЕДНЕМЕСЯЧНЫЙ ДОХОД</b>\n\n"
         f"Сейчас: <b>{rub(allocator.settings.average_income)}</b>\n\n"
-        "Введите новую среднюю сумму."
+        "Введите новую среднюю сумму.",
+        reply_markup=keyboard([[('← Назад', 'settings:profile_income')]]),
     )
 
 @router.message(EditSettingsStates.average_income)
@@ -1288,8 +2187,17 @@ async def save_average_income(message: Message, state: FSMContext):
     allocator = db.load_allocator(message.from_user.id)
     allocator.settings.average_income = value
     db.save_allocator(message.from_user.id, allocator)
+    if allocator.profile_id == "stable" or (
+        allocator.profile_id == "cyclic"
+        and allocator.settings.cyclic_income_uncertain
+    ):
+        db.mark_stable_income_reviewed(
+            message.from_user.id,
+            moscow_now().date().isoformat(),
+        )
     await state.clear()
-    await message.answer(f"✅ Средний доход обновлён: <b>{rub(value)}</b>", reply_markup=main_menu_keyboard(message.from_user.id))
+    await message.answer(f"Средний доход обновлён: <b>{rub(value)}</b>")
+    await show_profile_income_settings(message, message.from_user.id)
 
 async def show_income_types_settings(
     message: Message,
@@ -1328,7 +2236,7 @@ async def show_income_types_settings(
     ]
     rows.append([("＋ Добавить тип дохода", "incomesettings:add_custom")])
     rows.append([("＋ Настроить патент (ПСН)", "taxes:patent:start")])
-    rows.append([("← Главное меню", "menu:back"), ("← Назад", return_to)])
+    rows.append([("← Назад", return_to), ("← Главное меню", "menu:back")])
     await message.answer(
         "<b>ТИПЫ ДОХОДОВ</b>\n\n"
         "Здесь можно настроить, какой налог обычно откладывать с каждого "
@@ -1351,7 +2259,7 @@ async def income_types_settings(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await show_income_types_settings(
         callback.message, callback.from_user.id, state,
-        return_to="settings:open",
+        return_to="settings:profile_income",
     )
 
 
@@ -1393,8 +2301,8 @@ async def income_type_add_custom(callback: CallbackQuery, state: FSMContext):
         "• Халтура\n"
         "• Частные уроки",
         reply_markup=keyboard([[
-            ("← Главное меню", "menu:back"),
             ("← Назад", "incomesettings:cancel"),
+            ("← Главное меню", "menu:back"),
         ]]),
     )
 
@@ -1460,7 +2368,7 @@ async def income_type_add_name(message: Message, state: FSMContext):
         "Нужно ли самостоятельно откладывать налог с таких поступлений?",
         reply_markup=keyboard([
             [("Да, откладывать", "incomesettings:tax:yes"), ("Нет, без налога", "incomesettings:tax:no")],
-            [("← Главное меню", "menu:back"), ("← Назад", "incomesettings:add_custom")],
+            [("← Назад", "incomesettings:add_custom"), ("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1491,7 +2399,7 @@ async def show_income_tax_rule_menu(message: Message, state: FSMContext) -> None
     ]
     if target == "edit":
         rows.append([("Без налога", "incomesettings:rerule:none")])
-    rows.append([("← Главное меню", "menu:back"), ("← Назад", "incomesettings:cancel")])
+    rows.append([("← Назад", "incomesettings:cancel"), ("← Главное меню", "menu:back")])
     await message.answer(
         "<b>КАКОЙ НАЛОГ ОТКЛАДЫВАТЬ?</b>\n\n"
         f"Выберите правило, которое обычно будет подставляться для «{escape(str(name))}».\n\n"
@@ -1541,7 +2449,7 @@ async def income_tax_rule_subject(callback: CallbackQuery, state: FSMContext):
             [("УСН · 6%", f"incomesettings:{prefix}:ip_usn_6"), ("УСН · Своя ставка", f"incomesettings:{prefix}:custom_ip_usn")],
             [("Патент (ПСН)", "incomesettings:rule:psn")],
         ]
-    rows.append([("← Главное меню", "menu:back"), ("← Назад", "incomesettings:rule:top")])
+    rows.append([("← Назад", "incomesettings:rule:top"), ("← Главное меню", "menu:back")])
     await callback.message.answer(text, reply_markup=keyboard(rows))
 
 
@@ -1569,7 +2477,7 @@ async def income_tax_rule_patent(callback: CallbackQuery, state: FSMContext):
     rows = [[("＋ Настроить патент", "taxes:patent:from_income")]]
     if patent_names:
         rows.insert(0, [("Выбрать добавленный патент", "incomesettings:psn_existing")])
-    rows.append([("← Главное меню", "menu:back"), ("← Назад", "incomesettings:rule_subject:ip")])
+    rows.append([("← Назад", "incomesettings:rule_subject:ip"), ("← Главное меню", "menu:back")])
     await callback.message.answer(
         "<b>ПАТЕНТ (ПСН)</b>\n\n"
         "С патентом мы не будем рассчитывать налог с каждого поступления.\n\n"
@@ -1595,7 +2503,7 @@ async def income_tax_rule_existing_patent(callback: CallbackQuery, state: FSMCon
         "<b>К КАКОМУ ПАТЕНТУ ОТНОСИТСЯ ДОХОД?</b>",
         reply_markup=keyboard([
             *[[(name, f"incomesettings:psn_select:{index}")] for index, name in enumerate(names)],
-            [("← Главное меню", "menu:back"), ("← Назад", "incomesettings:rule:psn")],
+            [("← Назад", "incomesettings:rule:psn"), ("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1670,7 +2578,7 @@ async def income_type_add_named_rule(callback: CallbackQuery, state: FSMContext)
         await state.update_data(income_custom_rule_prefix=custom_prefix)
         await callback.message.answer(
             "<b>СВОЯ СТАВКА</b>\n\nВведите число без знака %.",
-            reply_markup=keyboard([[('← Главное меню', 'menu:back'), ('← Назад', 'incomesettings:rule:top')]]),
+            reply_markup=keyboard([[('← Назад', 'incomesettings:rule:top'), ('← Главное меню', 'menu:back')]]),
         )
         return
     rate, profile = selected
@@ -1688,7 +2596,7 @@ async def income_type_add_rate(message: Message, state: FSMContext):
     if rate is None or rate <= 0 or rate > 100:
         await message.answer(
             "Введите ставку больше 0 и не больше 100.",
-            reply_markup=keyboard([[('← Главное меню', 'menu:back'), ('← Назад', 'incomesettings:rule:top')]]),
+            reply_markup=keyboard([[('← Назад', 'incomesettings:rule:top'), ('← Главное меню', 'menu:back')]]),
         )
         return
     if data.get("income_type_action") == "add_profile":
@@ -1739,7 +2647,7 @@ async def show_income_type_confirmation(message: Message, state: FSMContext):
         + tax_line,
         reply_markup=keyboard([
             [("Исправить", fix_callback), ("✔️ Сохранить", "incomesettings:save")],
-            [("← Главное меню", "menu:back"), ("← Назад", "incomesettings:cancel")],
+            [("← Назад", "incomesettings:cancel"), ("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1861,7 +2769,7 @@ async def show_income_type_card(message: Message, telegram_id: int, name: str) -
         reply_markup=keyboard([
             [("✎ Название", "incomesettings:rename"), ("✎ Налог", "incomesettings:rerate")],
             [("✎ Цвет", "incomesettings:color"), ("🗑️ Удалить", "incomesettings:delete")],
-            [("← Главное меню", "menu:back"), ("← Назад", "incomesettings:list")],
+            [("← Назад", "incomesettings:list"), ("← Главное меню", "menu:back")],
         ]),
     )
 
@@ -1988,7 +2896,7 @@ async def income_type_named_rate_save(callback: CallbackQuery, state: FSMContext
         await callback.message.answer(
             "Введите новую ставку больше 0 и не больше 100. Для нулевой ставки "
             "выберите «Без налога».",
-            reply_markup=keyboard([[('← Главное меню', 'menu:back'), ('← Назад', 'incomesettings:rule:top')]]),
+            reply_markup=keyboard([[('← Назад', 'incomesettings:rule:top'), ('← Главное меню', 'menu:back')]]),
         )
         return
     selected = compact_tax_rule_choice(choice)
@@ -2146,7 +3054,7 @@ async def edit_life_categories(callback: CallbackQuery, state: FSMContext):
         f"{current}\n\n"
         "Выберите категорию, чтобы изменить её название или сумму.\n\n"
         "Не распределённая между категориями часть Критического минимума остаётся в конверте «Зарплата».",
-        reply_markup=keyboard(rows + [[("← Назад", "settings:open")]])
+        reply_markup=keyboard(rows + [[("← Назад", "settings:critical_menu")]])
     )
 
 
@@ -2475,69 +3383,13 @@ async def save_life_categories(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Отдельные конверты Критического минимума обновлены.", reply_markup=main_menu_keyboard(message.from_user.id))
 
-@router.callback_query(F.data == "settings:goals")
-async def edit_goal_percentages(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    allocator = db.load_allocator(callback.from_user.id)
-    if not allocator.settings.goals:
-        await callback.message.answer(
-            "У вас пока нет отдельных категорий целей. Чтобы создать их, проще пройти настройку заново.",
-            reply_markup=main_menu_keyboard(callback.from_user.id),
-        )
-        return
-
-    current = "\n".join(
-        f"• {'🧳' if goal.is_chest else '⭐️'} "
-        f"{escape(goal_display_name(goal.name, goal.is_chest))} = "
-        f"{format(goal.percentage.normalize(), 'f')}%"
-        for goal in allocator.settings.goals
-    )
-    await state.set_state(EditSettingsStates.goal_percentages)
-    await callback.message.answer(
-        "⭐️ <b>ПРОЦЕНТЫ ЦЕЛЕЙ</b>\n\n"
-        f"{current}\n\n"
-        "Отправьте новый список процентов для всех существующих целей:\n"
-        "<code>Отпуск=50, Техника=30, Подарки=20</code>\n\n"
-        "Сумма должна быть ровно 100%."
-    )
-
 @router.message(EditSettingsStates.goal_percentages)
 async def save_goal_percentages(message: Message, state: FSMContext):
-    allocator = db.load_allocator(message.from_user.id)
-    try:
-        entered = {}
-        for raw_item in message.text.split(","):
-            name, raw_value = raw_item.split("=", 1)
-            name = name.strip()
-            value = parse_decimal(raw_value)
-            if not name or value is None or value <= 0:
-                raise ValueError
-            entered[name.lower()] = value
-    except ValueError:
-        await message.answer(
-            "Не удалось разобрать проценты.\n"
-            "Пример: <code>Отпуск=50, Техника=30, Подарки=20</code>"
-        )
-        return
-
-    existing_names = {goal.name.lower() for goal in allocator.settings.goals}
-    if set(entered) != existing_names:
-        await message.answer(
-            "Нужно указать все существующие цели и не добавлять новые названия."
-        )
-        return
-
-    total = sum(entered.values(), Decimal("0"))
-    if abs(total - Decimal("100")) > Decimal("0.0001"):
-        await message.answer(f"Сейчас сумма процентов = {total}%. Нужно ровно 100%.")
-        return
-
-    for goal in allocator.settings.goals:
-        goal.percentage = entered[goal.name.lower()]
-
-    db.save_allocator(message.from_user.id, allocator)
     await state.clear()
-    await message.answer("✅ Проценты целей обновлены.", reply_markup=main_menu_keyboard(message.from_user.id))
+    await message.answer(
+        "Этот редактор больше не используется. Откройте единый экран долей.",
+        reply_markup=keyboard([[("Доли распределения", "goalmanage:allocation")]]),
+    )
 
 @router.callback_query(F.data == "settings:c_split")
 async def edit_c_split(callback: CallbackQuery, state: FSMContext):
@@ -2584,8 +3436,8 @@ async def ask_erase_all(callback: CallbackQuery, state: FSMContext):
         "После удаления отправьте /start, чтобы пройти настройку с нуля.\n"
         "Старые сообщения в Telegram останутся, но данные в боте будут удалены.",
         reply_markup=keyboard([
-            [("🗑️ Удалить всё и начать с нуля", "settings:erase_all_confirm")],
-            [("Отмена", "settings:full_reset_cancel")],
+            [("Удалить всё и начать с нуля", "settings:erase_all_confirm")],
+            [("← Назад", "settings:full_reset_cancel")],
         ]),
     )
 

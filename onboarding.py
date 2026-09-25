@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from copy import deepcopy
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING, ROUND_DOWN
 from html import escape
 from pathlib import Path
 
@@ -35,6 +35,7 @@ from financial_engine import (
     sequential_goal_percentages,
     vacation_budget,
 )
+from allocation_table import allocation_table
 from currency_rates import CurrencyRateService, CurrencyRateUnavailable, currency_symbol
 
 from storage import db
@@ -93,6 +94,7 @@ class SetupStates(StatesGroup):
     phase_rate_choice = State()
     phase_rate_manual = State()
     fund_salary_intro = State()
+    cyclic_predictability = State()
     stabilizer_target_months = State()
     contract_obligations_menu = State()
     contract_obligations_storage = State()
@@ -327,6 +329,25 @@ def parse_decimal(
         return None
 
     return result
+
+
+def parse_percentage(text: str | None) -> Decimal | None:
+    if not text:
+        return None
+    value = text.strip().replace("\u00a0", "").replace(" ", "")
+    if value.endswith("%"):
+        value = value[:-1]
+    if "%" in value:
+        return None
+    if "," in value and "." not in value:
+        value = value.replace(",", ".")
+    if value.count(".") > 1 or len(value.partition(".")[2]) > 2:
+        return None
+    try:
+        result = Decimal(value)
+        return result if result.is_finite() else None
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def rub(value) -> str:
@@ -867,6 +888,17 @@ def km_active_monthly(item: dict) -> Decimal:
     return km_effective_monthly(item)
 
 
+def active_km_breakdown(items: list[dict]) -> list[dict]:
+    """Строки, которые действительно образуют текущий Критический минимум."""
+    result: list[dict] = []
+    for item in items:
+        monthly = km_active_monthly(item)
+        if monthly <= 0:
+            continue
+        result.append({**item, "monthly": str(monthly)})
+    return result
+
+
 def km_item_display_name(item: dict) -> str:
     """Показывает назначение налога, сохраняя внутри чистое имя объекта."""
     name = (item.get("name") or "Расход").strip()
@@ -1111,6 +1143,31 @@ def build_default_km_storage(items: list[dict]) -> list[dict]:
     return result
 
 
+def rebuild_km_storage(items: list[dict], previous: list[dict] | None) -> list[dict]:
+    """Сохраняет выбранные конверты при повторном расчёте списка расходов."""
+    defaults = build_default_km_storage(items)
+    unused = [dict(item) for item in (previous or []) if isinstance(item, dict)]
+    result: list[dict] = []
+    for default in defaults:
+        match_index = next((
+            index for index, old in enumerate(unused)
+            if str(old.get("item_name", "")).strip().casefold()
+            == str(default.get("item_name", "")).strip().casefold()
+            and old.get("category") == default.get("category")
+            and old.get("subcategory") == default.get("subcategory")
+        ), None)
+        if match_index is None:
+            result.append(default)
+            continue
+        old = unused.pop(match_index)
+        result.append({
+            **default,
+            "storage": old.get("storage", default.get("storage")),
+            "envelope_name": old.get("envelope_name", default.get("envelope_name")),
+        })
+    return result
+
+
 def life_categories_from_storage(storage_items: list[dict]) -> dict[str, Decimal]:
     result: dict[str, Decimal] = {}
     for item in storage_items:
@@ -1300,6 +1357,55 @@ def br_group_totals(items: list[dict]) -> dict[str, Decimal]:
         label = item["category_label"]
         result[label] = money2(result.get(label, Decimal("0")) + Decimal(item["monthly"]))
     return result
+
+
+def active_br_breakdown(items: list[dict]) -> list[dict]:
+    """Строки, которые действительно входят в Бытовой резерв."""
+    return [dict(item) for item in items if not is_deferred_life_expense(item)]
+
+
+def editable_life_item(item: dict) -> dict:
+    """Нормализует сохранённую строку для повторного открытия калькулятора."""
+    result = dict(item)
+    monthly = Decimal(str(result.get("monthly", "0")))
+    result.setdefault("amount", str(monthly))
+    result.setdefault("months", "1")
+    result.setdefault("name", result.get("item_name") or "Расход")
+    result.setdefault("category", "other")
+    result.setdefault("category_label", "Другое")
+    return result
+
+
+def legacy_life_placeholder(name: str, amount: Decimal, *, reserve: bool) -> dict:
+    """Не даёт старому профилю потерять сумму, если исходные строки не сохранились."""
+    return {
+        "category": "other",
+        "source_category": "other",
+        "category_label": "Другое",
+        "name": name,
+        "amount": str(amount),
+        "months": "1",
+        "monthly": str(amount),
+        "classification_part": "flexible" if reserve else "essential",
+    }
+
+
+def life_editor_items(settings) -> tuple[list[dict], list[dict]]:
+    km_items = [editable_life_item(item) for item in settings.critical_life_breakdown]
+    br_items = [editable_life_item(item) for item in settings.household_reserve_breakdown]
+    if not km_items and settings.base_critical_life > 0:
+        km_items = [legacy_life_placeholder(
+            "Обязательные расходы прежнего расчёта",
+            settings.base_critical_life,
+            reserve=False,
+        )]
+    if not br_items and settings.household_reserve > 0:
+        br_items = [legacy_life_placeholder(
+            "Бытовые расходы прежнего расчёта",
+            settings.household_reserve,
+            reserve=True,
+        )]
+    return km_items, br_items
 
 
 def life_result_breakdown_lines(
@@ -1523,6 +1629,7 @@ async def save_income_rhythm(callback: CallbackQuery, state: FSMContext):
             income_work_months="1",
             reliable_gap_income="0",
             stabilizer_target_months="1",
+            cyclic_income_uncertain=False,
         )
         await ask_income(callback.message, state)
         return
@@ -1684,10 +1791,35 @@ async def ask_phase_currency(message: Message, state: FSMContext):
 async def continue_after_phase_currency(message: Message, state: FSMContext):
     data = await state.get_data()
     if data.get("phase_life_edit_mode"):
+        previous_rate = data.get("phase_currency_change_from_rate")
+        if previous_rate is not None:
+            old_rate = Decimal(str(previous_rate))
+            new_rate = Decimal(str(data.get("phase_exchange_rate", "1")))
+
+            def preserve_ruble_equivalent(items: list[dict]) -> list[dict]:
+                if new_rate <= 0:
+                    return [dict(item) for item in items]
+                factor = old_rate / new_rate
+                return [
+                    {
+                        **item,
+                        "amount": str(money2(Decimal(str(item.get("amount", "0"))) * factor)),
+                        "monthly": str(money2(Decimal(str(item.get("monthly", "0"))) * factor)),
+                    }
+                    for item in items
+                ]
+
+            await state.update_data(
+                km_items=preserve_ruble_equivalent(list(data.get("km_items", []))),
+                br_items=preserve_ruble_equivalent(list(data.get("br_items", []))),
+                km_storage_items=preserve_ruble_equivalent(
+                    list(data.get("km_storage_items", []))
+                ),
+                phase_currency_change_from_rate=None,
+            )
         await start_critical_minimum(message, state, reset_items=False)
     else:
         # Три дополнительных вопроса циклического маршрута уже пройдены.
-        # Размер Стабилизатора объясним позднее — рядом с текущими резервами.
         await state.update_data(progress_offset=3)
         await ask_income(message, state)
 
@@ -1792,47 +1924,23 @@ async def continue_after_fund_salary_intro(callback: CallbackQuery, state: FSMCo
 
 async def ask_stabilizer_target(message: Message, state: FSMContext):
     data = await state.get_data()
-    rhythm = data.get("income_rhythm")
     await state.set_state(SetupStates.stabilizer_target_months)
-    if rhythm == "cyclic":
-        text = (
-            "<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\n"
-            "ℹ️ Даже если рабочий цикл обычно предсказуем, следующая рабочая часть может "
-            "начаться позже запланированного:\n\n"
-            "• Контракт задержался\n"
-            "• Дату выезда перенесли\n"
-            "• Рейс или проект отменили\n"
-            "• Между рабочими частями возник дополнительный перерыв\n\n"
-            "Для таких ситуаций нужен <b>Стабилизатор дохода</b>. Он продлевает финансовую "
-            "защиту, если Фонд Зарплаты уже рассчитан на запланированный перерыв, а новая работа "
-            "вовремя не началась.\n\n"
-            "Это не форс-мажорная Подушка и не деньги на обычный перерыв между рабочими частями.\n\n"
-            "Для вашего профиля рекомендуется сформировать Стабилизатор на <b>2 месяца "
-            "Устойчивой Жизни</b>. Этого резерва обычно достаточно, чтобы спокойно пережить "
-            "задержку следующей рабочей части.\n\n"
-            "——————\n<b>→ Выберите будущий размер Стабилизатора.</b>"
-        )
-        rows = [
-            [("1 месяц", "stabilizermonths:1"), ("✔️ 2 месяца", "stabilizermonths:2")],
-            [("3 месяца", "stabilizermonths:3"), ("Свой вариант", "stabilizermonths:custom")],
-        ]
-    else:
-        text = (
-            "<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\n"
-            "ℹ️ При сдельной работе заработок может снижаться по совершенно обычным причинам:\n\n"
-            "• сезонный спад\n"
-            "• болезнь\n"
-            "• отпуск\n"
-            "• клиент перенёс или задержал оплату\n\n"
-            "Это не форс-мажор. <b>Нестабильность дохода — нормальная часть сдельной работы.</b>\n\n"
-            "Поэтому помимо Подушки мы сформируем <b>Стабилизатор дохода</b> — резерв на обычные "
-            "периоды снижения заработка. Он помогает сохранить привычный уровень жизни, не "
-            "трогать Подушку и не залезать в долги.\n\n"
-            "Для вашего профиля рекомендуемый размер Стабилизатора — <b>1 месяц Устойчивой "
-            "Жизни</b>. Этого резерва хватит, чтобы сгладить обычную просадку дохода.\n\n"
-            "——————\n<b>→ Выберите будущий размер Стабилизатора.</b>"
-        )
-        rows = [[("✔️ 1 месяц", "stabilizermonths:1"), ("2 месяца", "stabilizermonths:2")]]
+    text = (
+        "<b>СТАБИЛИЗАТОР ДОХОДА</b>\n\n"
+        "ℹ️ При сдельной работе заработок может снижаться по совершенно обычным причинам:\n\n"
+        "• сезонный спад\n"
+        "• болезнь\n"
+        "• отпуск\n"
+        "• клиент перенёс или задержал оплату\n\n"
+        "Это не форс-мажор. <b>Нестабильность дохода — нормальная часть сдельной работы.</b>\n\n"
+        "Поэтому помимо Подушки мы сформируем <b>Стабилизатор дохода</b> — резерв на обычные "
+        "периоды снижения заработка. Он помогает сохранить привычный уровень жизни, не "
+        "трогать Подушку и не залезать в долги.\n\n"
+        "Для вашего профиля рекомендуемый размер Стабилизатора — <b>1 месяц Устойчивой "
+        "Жизни</b>. Этого резерва хватит, чтобы сгладить обычную просадку дохода.\n\n"
+        "——————\n<b>→ Выберите будущий размер Стабилизатора.</b>"
+    )
+    rows = [[("✔️ 1 месяц", "stabilizermonths:1"), ("2 месяца", "stabilizermonths:2")]]
     await message.answer(
         f"{setup_progress(data, 9 if data.get('has_debts') else 8)}\n\n{text}",
         reply_markup=keyboard(rows),
@@ -1842,6 +1950,11 @@ async def ask_stabilizer_target(message: Message, state: FSMContext):
 @router.callback_query(SetupStates.stabilizer_target_months, F.data.startswith("stabilizermonths:"))
 async def save_stabilizer_target_button(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    data = await state.get_data()
+    if data.get("income_rhythm") == "cyclic":
+        await state.update_data(current_stabilizer="0")
+        await continue_after_current_reserves(callback.message, state)
+        return
     value = callback.data.split(":", 1)[1]
     if value == "custom":
         await callback.message.answer("Введите количество месяцев от 1 до 12.")
@@ -1852,16 +1965,16 @@ async def save_stabilizer_target_button(callback: CallbackQuery, state: FSMConte
 
 @router.message(SetupStates.stabilizer_target_months)
 async def save_stabilizer_target_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("income_rhythm") == "cyclic":
+        await state.update_data(current_stabilizer="0")
+        await continue_after_current_reserves(message, state)
+        return
     value = parse_decimal(message.text)
     if value is None or value < 1 or value > 12:
         await message.answer("Введите количество месяцев от 1 до 12.")
         return
-    data = await state.get_data()
-    if data.get("income_rhythm") != "cyclic":
-        await message.answer("Выберите 1 или 2 месяца с помощью кнопок.")
-        return
-    await state.update_data(stabilizer_target_months=str(value))
-    await ask_current_stabilizer(message, state)
+    await message.answer("Выберите 1 или 2 месяца с помощью кнопок.")
 
 
 async def ask_tax(message: Message, state: FSMContext):
@@ -2234,6 +2347,8 @@ async def show_km_menu(
         rows.append([("✎ Редактировать", "lifeedit:list"), ("✔️ Готово", "km:finish")])
     else:
         rows.append([("✔️ Готово", "km:finish")])
+    if data.get("settings_life_edit_mode") or data.get("phase_life_edit_mode"):
+        rows.append([("✖️ Закрыть без сохранения", "settings:life_editor_cancel")])
 
     text = (
         f"{setup_progress(data, 5)}\n\n"
@@ -4472,7 +4587,9 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
         return
 
     rounded = round_up_thousand(exact)
-    storage_items = build_default_km_storage(items)
+    storage_items = rebuild_km_storage(
+        items, list(data.get("km_storage_items", []))
+    )
     br_items = data.get("br_items", [])
     br_groups = br_group_totals(br_items)
     br_exact = money2(sum(br_groups.values(), Decimal("0")))
@@ -4492,6 +4609,9 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
             "household_reserve": str(br_rounded),
             "life_categories": {name: str(value) for name, value in groups.items()},
             "household_reserve_categories": {name: str(value) for name, value in br_groups.items()},
+            "critical_life_breakdown": active_km_breakdown(items),
+            "household_reserve_breakdown": active_br_breakdown(br_items),
+            "critical_life_storage_items": storage_items,
             "historical_gifts_monthly": str(historical_gifts_monthly),
             "currency_code": data.get("phase_currency_code", "RUB"),
             "currency_symbol": data.get("phase_currency_symbol", "₽"),
@@ -4521,12 +4641,21 @@ async def finish_km(callback: CallbackQuery, state: FSMContext):
             Decimal(str(data.get("income_work_months", "1"))),
             Decimal(str(data.get("income_gap_months", "1"))),
         )
-        storage_items = build_default_km_storage(items)
+        storage_items = rebuild_km_storage(
+            items, list(data.get("km_storage_items", []))
+        )
 
     await state.update_data(
         critical_life=str(rounded),
         critical_life_exact=str(exact),
         km_storage_items=storage_items,
+        km_storage_changed=(
+            bool(data.get("km_storage_changed"))
+            or (
+                bool(data.get("settings_life_edit_mode"))
+                and storage_items != data.get("life_editor_original_storage_items", [])
+            )
+        ),
         household_reserve=str(br_rounded),
         household_reserve_exact=str(br_exact),
         household_reserve_categories={name: str(value) for name, value in br_groups.items()},
@@ -5116,12 +5245,22 @@ async def show_km_storage_help(callback: CallbackQuery, state: FSMContext):
 async def accept_km_storage(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    categories = life_categories_from_storage(data.get("km_storage_items", []))
+    categories = (
+        {
+            str(name): Decimal(str(amount))
+            for name, amount in data.get("life_editor_original_categories", {}).items()
+        }
+        if data.get("settings_life_edit_mode") and not data.get("km_storage_changed")
+        else life_categories_from_storage(data.get("km_storage_items", []))
+    )
     await state.update_data(
         life_categories={name: str(value) for name, value in categories.items()}
     )
     if data.get("phase_life_edit_mode"):
         await save_edited_phase_life(callback.message, state, callback.from_user.id)
+        return
+    if data.get("settings_life_edit_mode"):
+        await save_edited_life(callback.message, state, callback.from_user.id)
         return
     if data.get("combined_life_onboarding"):
         if data.get("income_rhythm") == "cyclic":
@@ -5131,6 +5270,99 @@ async def accept_km_storage(callback: CallbackQuery, state: FSMContext):
             await ask_pillow_policy(callback.message, state)
         return
     await start_household_reserve(callback.message, state)
+
+
+async def save_edited_life(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+) -> None:
+    """Сохраняет точечное редактирование Жизни, не затрагивая историю профиля."""
+    data = await state.get_data()
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await state.clear()
+        await message.answer("Профиль не найден. Запустите /start.")
+        return
+
+    settings = allocator.settings
+    old_categories = set(settings.life_categories)
+    new_categories = {
+        str(name): Decimal(str(amount))
+        for name, amount in data.get("life_categories", {}).items()
+        if Decimal(str(amount)) > 0
+    }
+    # Активные налоговые обязательства остаются каноническими в налоговом
+    # реестре и при следующей загрузке снова добавят конверт «Налоги».
+    if "Налоги" in settings.life_categories and "Налоги" not in new_categories:
+        new_categories["Налоги"] = settings.life_categories["Налоги"]
+
+    for name in old_categories - set(new_categories):
+        if name == "Налоги":
+            continue
+        moved = Decimal(str(allocator.state.period_life_topups.pop(name, Decimal("0"))))
+        if moved:
+            allocator.state.period_life_topups["Зарплата"] = (
+                Decimal(str(allocator.state.period_life_topups.get("Зарплата", 0)))
+                + moved
+            )
+        source_key = f"КЖ:{name}"
+        allocated = Decimal(str(allocator.state.period_allocations.pop(source_key, Decimal("0"))))
+        if allocated:
+            allocator.state.period_allocations["КЖ:Зарплата"] = (
+                Decimal(str(allocator.state.period_allocations.get("КЖ:Зарплата", 0)))
+                + allocated
+            )
+
+    automatic_in_editor = Decimal(str(data.get("life_editor_automatic_amount", "0")))
+    edited_total = Decimal(str(data.get("critical_life", "0")))
+    settings.base_critical_life = max(Decimal("0"), edited_total - automatic_in_editor)
+    settings.household_reserve = Decimal(str(data.get("household_reserve", "0")))
+    settings.life_categories = new_categories
+    settings.life_category_ids = {
+        name: settings.life_category_ids.get(name, "")
+        for name in new_categories
+        if settings.life_category_ids.get(name)
+    }
+    for name in new_categories:
+        settings.ensure_life_category_id(name)
+
+    br_groups = br_group_totals(list(data.get("br_items", [])))
+    settings.household_reserve_categories = (
+        {"Дети": br_groups["Дети"]} if br_groups.get("Дети", Decimal("0")) > 0 else {}
+    )
+    settings.household_reserve_category_ids = {
+        name: settings.household_reserve_category_ids.get(name, "")
+        for name in settings.household_reserve_categories
+        if settings.household_reserve_category_ids.get(name)
+    }
+    for name in settings.household_reserve_categories:
+        settings.ensure_household_reserve_category_id(name)
+
+    settings.critical_life_breakdown = active_km_breakdown(
+        list(data.get("km_items", []))
+    )
+    settings.household_reserve_breakdown = active_br_breakdown(
+        list(data.get("br_items", []))
+    )
+    settings.critical_life_storage_items = [
+        dict(item) for item in data.get("km_storage_items", [])
+        if isinstance(item, dict)
+    ]
+    settings.historical_gifts_monthly = Decimal(str(
+        data.get("historical_gifts_monthly", settings.historical_gifts_monthly)
+    ))
+    settings.recalculate_critical_life()
+    allocator._ensure_life_categories()
+    db.save_allocator(telegram_id, allocator)
+    await state.clear()
+    await message.answer(
+        "✅ <b>СТОИМОСТЬ ЖИЗНИ ОБНОВЛЕНА</b>\n\n"
+        f"Критический минимум — <b>{rub(settings.critical_life)}</b>\n"
+        f"Бытовой резерв — <b>{rub(settings.household_reserve)}</b>\n"
+        f"Устойчивая жизнь — <b>{rub(settings.household_life)}</b>.",
+        reply_markup=main_menu_keyboard(telegram_id),
+    )
 
 
 async def save_edited_phase_life(
@@ -5149,11 +5381,34 @@ async def save_edited_phase_life(
     if phase not in {"work", "break"} or not raw:
         await message.answer("Не удалось сохранить жизнь этой части цикла. Попробуйте ещё раз.")
         return
+    raw = dict(raw)
+    rate = Decimal(str(raw.get("exchange_rate_to_rub", "1")))
+    current_storage = [
+        dict(item) for item in data.get("km_storage_items", [])
+        if isinstance(item, dict)
+    ]
+    if rate > 0 and rate != Decimal("1"):
+        current_storage = [
+            {
+                **item,
+                "amount": str(money2(Decimal(str(item.get("amount", "0"))) / rate)),
+                "monthly": str(money2(Decimal(str(item.get("monthly", "0"))) / rate)),
+            }
+            for item in current_storage
+        ]
+    raw["critical_life_storage_items"] = current_storage
+    raw["life_categories"] = {
+        name: str(amount)
+        for name, amount in life_categories_from_storage(current_storage).items()
+    }
     budget = PhaseLifeBudget(
         critical_life=raw["critical_life"],
         household_reserve=raw["household_reserve"],
         life_categories=raw.get("life_categories", {}),
         household_reserve_categories=raw.get("household_reserve_categories", {}),
+        critical_life_breakdown=raw.get("critical_life_breakdown", []),
+        household_reserve_breakdown=raw.get("household_reserve_breakdown", []),
+        critical_life_storage_items=raw.get("critical_life_storage_items", []),
         historical_gifts_monthly=raw.get("historical_gifts_monthly", "0"),
         currency_code=raw.get("currency_code", "RUB"),
         currency_symbol=raw.get("currency_symbol", "₽"),
@@ -5177,6 +5432,7 @@ async def save_edited_phase_life(
         money2(weighted_gifts / weighted_months) if weighted_months > 0 else Decimal("0")
     )
     if phase == "break":
+        allocator.settings.base_critical_life = budget.critical_life_rub
         allocator.settings.critical_life = budget.critical_life_rub
         allocator.settings.household_reserve = budget.household_reserve_rub
         allocator.settings.life_categories = {
@@ -5187,6 +5443,30 @@ async def save_edited_phase_life(
             name: money2(amount * budget.exchange_rate_to_rub)
             for name, amount in budget.household_reserve_categories.items()
         }
+        allocator.settings.critical_life_breakdown = [
+            {
+                **item,
+                "amount": str(money2(Decimal(str(item.get("amount", "0"))) * budget.exchange_rate_to_rub)),
+                "monthly": str(money2(Decimal(str(item.get("monthly", "0"))) * budget.exchange_rate_to_rub)),
+            }
+            for item in budget.critical_life_breakdown
+        ]
+        allocator.settings.household_reserve_breakdown = [
+            {
+                **item,
+                "amount": str(money2(Decimal(str(item.get("amount", "0"))) * budget.exchange_rate_to_rub)),
+                "monthly": str(money2(Decimal(str(item.get("monthly", "0"))) * budget.exchange_rate_to_rub)),
+            }
+            for item in budget.household_reserve_breakdown
+        ]
+        allocator.settings.critical_life_storage_items = [
+            {
+                **item,
+                "amount": str(money2(Decimal(str(item.get("amount", "0"))) * budget.exchange_rate_to_rub)),
+                "monthly": str(money2(Decimal(str(item.get("monthly", "0"))) * budget.exchange_rate_to_rub)),
+            }
+            for item in budget.critical_life_storage_items
+        ]
         allocator.settings.__post_init__()
     db.save_allocator(telegram_id, allocator)
     await state.clear()
@@ -5194,21 +5474,168 @@ async def save_edited_phase_life(
     await message.answer(
         f"<b>{phase_label.upper()} СОХРАНЕНА</b>\n\n"
         f"Валюта — <b>{escape(budget.currency_code)}</b>. "
-        "Теперь Аллокатор различает расходы двух частей финансового цикла.",
-        reply_markup=main_menu_keyboard(telegram_id),
+        "Теперь Аллокатор различает расходы двух частей финансового цикла.\n\n"
+        "Если изменились домашние расходы, проверьте, какие из них продолжаются во время работы.",
+        reply_markup=keyboard([
+            [("Проверить рабочие обязательства", "phaselife:obligations")],
+            [("← К двум жизням", "phaselife:menu")],
+            [("← Главное меню", "menu:back")],
+        ]),
     )
 
 
-@router.callback_query(F.data.startswith("phaselife:fill:"))
+async def start_saved_life_editor(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+) -> None:
+    """Открывает калькулятор Жизни поверх существующего профиля без сброса."""
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await message.answer("Профиль не найден. Запустите /start.")
+        return
+    settings = allocator.settings
+    km_items, br_items = life_editor_items(settings)
+    saved_storage = [
+        dict(item) for item in settings.critical_life_storage_items
+        if isinstance(item, dict)
+    ]
+    storage_items = (
+        saved_storage
+        if len(saved_storage) == len(km_items)
+        else build_default_km_storage(km_items)
+    )
+    represented_automatic = money2(sum(
+        (
+            km_active_monthly(item)
+            for item in km_items
+            if item.get("subcategory") in ANNUAL_TAX_SUBCATEGORIES
+            or item.get("one_time")
+        ),
+        Decimal("0"),
+    ))
+    await state.clear()
+    await state.update_data(
+        settings_life_edit_mode=True,
+        combined_life_onboarding=True,
+        income_rhythm=settings.income_rhythm,
+        profile_type=settings.profile_type,
+        has_debts=settings.has_debts,
+        km_items=km_items,
+        br_items=br_items,
+        deferred_br_items=[],
+        km_storage_items=storage_items,
+        life_editor_original_storage_items=[dict(item) for item in storage_items],
+        critical_life=str(settings.base_critical_life + represented_automatic),
+        critical_life_exact=str(sum(
+            (km_active_monthly(item) for item in km_items), Decimal("0")
+        )),
+        household_reserve=str(settings.household_reserve),
+        household_reserve_exact=str(sum(
+            (Decimal(str(item.get("monthly", "0"))) for item in br_items),
+            Decimal("0"),
+        )),
+        life_categories={
+            name: str(amount) for name, amount in settings.life_categories.items()
+        },
+        life_editor_original_categories={
+            name: str(amount) for name, amount in settings.life_categories.items()
+        },
+        km_storage_changed=False,
+        household_reserve_categories={
+            name: str(amount)
+            for name, amount in settings.household_reserve_categories.items()
+        },
+        historical_gifts_monthly=str(settings.historical_gifts_monthly),
+        life_editor_automatic_amount=str(represented_automatic),
+        progress_offset=0,
+    )
+    await state.set_state(SetupStates.km_menu)
+    await show_km_menu(
+        message,
+        state,
+        notice=(
+            "Изменения сохранятся только после кнопок «Готово» и «Всё устраивает». "
+            "Можно добавлять, удалять, переименовывать и переносить расходы между КМ и БР."
+        ),
+    )
+
+
+@router.callback_query(F.data == "settings:life_editor")
+async def open_saved_life_editor(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None:
+        await callback.message.answer("Профиль не найден. Запустите /start.")
+        return
+    if allocator.settings.income_rhythm == "cyclic":
+        await state.clear()
+        await callback.message.answer(
+            "<b>КАКУЮ СТОИМОСТЬ ЖИЗНИ ИЗМЕНИТЬ?</b>\n\n"
+            "У циклического профиля расходы рабочей части и перерыва настраиваются отдельно.",
+            reply_markup=keyboard([
+                [("Рабочая часть", "phaselife:fill:work")],
+                [("Перерыв", "phaselife:fill:break")],
+                [("✖️ Отмена", "settings:life_editor_cancel")],
+            ]),
+        )
+        return
+    await start_saved_life_editor(
+        callback.message, state, callback.from_user.id,
+    )
+
+
+@router.callback_query(F.data == "settings:life_editor_cancel")
+async def cancel_saved_life_editor(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Изменения не сохранены")
+    await state.clear()
+    await callback.message.answer(
+        "Редактирование стоимости жизни закрыто без сохранения.",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^phaselife:(fill|currency):(work|break)$"))
 async def start_phase_life_from_profile(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     allocator = db.load_allocator(callback.from_user.id)
     if allocator is None or allocator.settings.income_rhythm != "cyclic":
         await callback.message.answer("Эта настройка доступна только циклическому профилю.")
         return
+    action = callback.data.split(":", 2)[1]
     phase = callback.data.rsplit(":", 1)[1]
     if phase not in {"work", "break"}:
         return
+    budget = allocator.settings.phase_life_budgets.get(phase)
+    km_items = (
+        [editable_life_item(item) for item in budget.critical_life_breakdown]
+        if budget else []
+    )
+    br_items = (
+        [editable_life_item(item) for item in budget.household_reserve_breakdown]
+        if budget else []
+    )
+    if budget and budget.completed and not km_items and budget.critical_life > 0:
+        km_items = [legacy_life_placeholder(
+            "Обязательные расходы прежнего расчёта",
+            budget.critical_life,
+            reserve=False,
+        )]
+    if budget and budget.completed and not br_items and budget.household_reserve > 0:
+        br_items = [legacy_life_placeholder(
+            "Бытовые расходы прежнего расчёта",
+            budget.household_reserve,
+            reserve=True,
+        )]
+    saved_storage = (
+        [dict(item) for item in budget.critical_life_storage_items]
+        if budget else []
+    )
+    storage_items = (
+        saved_storage
+        if len(saved_storage) == len(km_items)
+        else build_default_km_storage(km_items)
+    )
     await state.clear()
     await state.update_data(
         income_rhythm="cyclic",
@@ -5216,7 +5643,16 @@ async def start_phase_life_from_profile(callback: CallbackQuery, state: FSMConte
         life_phase=phase,
         phase_life_edit_mode=True,
         combined_life_onboarding=True,
-        km_items=[], br_items=[], deferred_br_items=[],
+        km_items=km_items, br_items=br_items, deferred_br_items=[],
+        km_storage_items=storage_items,
+        critical_life=str(budget.critical_life if budget else Decimal("0")),
+        critical_life_exact=str(sum(
+            (km_active_monthly(item) for item in km_items), Decimal("0")
+        )),
+        household_reserve=str(budget.household_reserve if budget else Decimal("0")),
+        household_reserve_exact=str(sum(
+            (Decimal(str(item.get("monthly", "0"))) for item in br_items), Decimal("0")
+        )),
         has_debts=allocator.settings.has_debts,
         phase_life_budgets={
             key: {
@@ -5226,6 +5662,9 @@ async def start_phase_life_from_profile(callback: CallbackQuery, state: FSMConte
                 "household_reserve_categories": {
                     name: str(amount) for name, amount in value.household_reserve_categories.items()
                 },
+                "critical_life_breakdown": list(value.critical_life_breakdown),
+                "household_reserve_breakdown": list(value.household_reserve_breakdown),
+                "critical_life_storage_items": list(value.critical_life_storage_items),
                 "currency_code": value.currency_code,
                 "currency_symbol": value.currency_symbol,
                 "exchange_rate_to_rub": str(value.exchange_rate_to_rub),
@@ -5236,7 +5675,126 @@ async def start_phase_life_from_profile(callback: CallbackQuery, state: FSMConte
             for key, value in allocator.settings.phase_life_budgets.items()
         },
     )
+    if budget and budget.completed and action != "currency":
+        await state.update_data(
+            phase_currency_code=budget.currency_code,
+            phase_currency_symbol=budget.currency_symbol,
+            phase_exchange_rate=str(budget.exchange_rate_to_rub),
+            phase_exchange_rate_mode=budget.exchange_rate_mode,
+            phase_exchange_rate_updated_at=budget.exchange_rate_updated_at,
+        )
+        await state.set_state(SetupStates.km_menu)
+        await show_km_menu(
+            callback.message,
+            state,
+            notice=(
+                "Открыты текущие расходы этой части цикла. Измените только нужную строку; "
+                "остальные данные уже заполнены."
+            ),
+        )
+        return
+    if budget and budget.completed and action == "currency":
+        await state.update_data(
+            phase_currency_change_from_rate=str(budget.exchange_rate_to_rub),
+        )
     await ask_phase_currency(callback.message, state)
+
+
+@router.callback_query(F.data == "phaselife:obligations")
+async def start_contract_obligations_editor(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Open the onboarding obligation picker over an existing cyclic profile."""
+    await callback.answer()
+    allocator = db.load_allocator(callback.from_user.id)
+    if allocator is None or allocator.settings.income_rhythm != "cyclic":
+        await callback.message.answer("Эта настройка доступна только циклическому профилю.")
+        return
+
+    settings = allocator.settings
+    source = settings.phase_life("break") or settings.phase_life("work")
+    if source and source.completed:
+        rate = source.exchange_rate_to_rub
+
+        def in_rubles(items: list[dict]) -> list[dict]:
+            result = []
+            for raw in items:
+                item = editable_life_item(raw)
+                item["amount"] = str(money2(Decimal(str(item.get("amount", "0"))) * rate))
+                item["monthly"] = str(money2(Decimal(str(item.get("monthly", "0"))) * rate))
+                result.append(item)
+            return result
+
+        km_items = in_rubles(list(source.critical_life_breakdown))
+        br_items = in_rubles(list(source.household_reserve_breakdown))
+        storage_items = in_rubles(list(source.critical_life_storage_items))
+    else:
+        km_items, br_items = life_editor_items(settings)
+        storage_items = [dict(item) for item in settings.critical_life_storage_items]
+
+    if len(storage_items) != len(km_items):
+        storage_items = build_default_km_storage(km_items)
+
+    selected_names = set(settings.contract_obligations)
+    selected_keys = [
+        key
+        for key, item in (
+            [(f"km:{index}", item) for index, item in enumerate(km_items)]
+            + [(f"br:{index}", item) for index, item in enumerate(br_items)]
+        )
+        if str(item.get("name", "")) in selected_names
+    ]
+    await state.clear()
+    await state.update_data(
+        contract_obligations_edit_mode=True,
+        income_rhythm="cyclic",
+        income_work_months=str(settings.income_work_months),
+        income_gap_months=str(settings.income_gap_months),
+        km_items=km_items,
+        br_items=br_items,
+        km_storage_items=storage_items,
+        contract_obligation_keys=selected_keys,
+        use_contract_obligations_fund=settings.use_contract_obligations_fund,
+        contract_obligation_storage=dict(settings.contract_obligation_storage),
+    )
+    await show_contract_obligations(callback.message, state)
+
+
+async def finish_contract_obligations_edit(
+    message: Message,
+    state: FSMContext,
+    telegram_id: int,
+) -> None:
+    data = await state.get_data()
+    allocator = db.load_allocator(telegram_id)
+    if allocator is None:
+        await state.clear()
+        await message.answer("Финансовый профиль не найден.")
+        return
+    obligations, _, total = build_contract_obligations(data)
+    storage = {
+        str(name): str(envelope)
+        for name, envelope in data.get("contract_obligation_storage", {}).items()
+        if name in obligations
+    }
+    allocator.settings.contract_obligations = {
+        name: Decimal(str(amount)) for name, amount in obligations.items()
+    }
+    allocator.settings.contract_obligation_storage = storage
+    allocator.settings.use_contract_obligations_fund = bool(
+        data.get("use_contract_obligations_fund", False)
+    )
+    db.save_allocator(telegram_id, allocator)
+    await state.clear()
+    await message.answer(
+        "✅ <b>ОБЯЗАТЕЛЬСТВА НА ВРЕМЯ РАБОТЫ ОБНОВЛЕНЫ</b>\n\n"
+        f"Нужно подготовить — <b>{rub(total)}</b>.",
+        reply_markup=keyboard([
+            [("← К двум жизням", "phaselife:menu")],
+            [("← Главное меню", "menu:back")],
+        ]),
+    )
 
 
 @router.callback_query(SetupStates.km_envelopes_menu, F.data == "kmstorage:edit")
@@ -5337,7 +5895,7 @@ async def km_storage_to_salary(callback: CallbackQuery, state: FSMContext):
         items[index] = dict(items[index])
         items[index]["storage"] = "salary"
         items[index]["envelope_name"] = None
-        await state.update_data(km_storage_items=items)
+        await state.update_data(km_storage_items=items, km_storage_changed=True)
     await show_km_storage_edit_menu(callback.message, state)
 
 
@@ -5361,7 +5919,7 @@ async def km_storage_to_separate(callback: CallbackQuery, state: FSMContext):
             }
             item["envelope_name"] = defaults.get(item.get("category"), item["item_name"])
         items[index] = item
-        await state.update_data(km_storage_items=items)
+        await state.update_data(km_storage_items=items, km_storage_changed=True)
     await show_km_storage_edit_menu(callback.message, state)
 
 
@@ -5415,6 +5973,7 @@ async def save_km_envelope_name(message: Message, state: FSMContext):
     await state.update_data(
         km_storage_items=items,
         pending_km_storage_index=None,
+        km_storage_changed=True,
     )
     await show_km_storage_edit_menu(message, state)
 
@@ -6031,6 +6590,9 @@ async def show_contract_obligations_confirmation(message: Message, state: FSMCon
             "household_reserve_categories": {
                 name: str(value) for name, value in br_groups.items()
             },
+            "critical_life_breakdown": active_km_breakdown(km_items),
+            "household_reserve_breakdown": active_br_breakdown(br_items),
+            "critical_life_storage_items": storage_items,
             "historical_gifts_monthly": str(historical_gifts_monthly),
         })
         phase_budgets[phase] = phase_budget
@@ -6101,6 +6663,9 @@ async def ask_contract_obligations_storage(message: Message, state: FSMContext):
                 + "\n".join(lines)
                 + "\n\nДополнительный счёт не нужен: расходов без собственного конверта меньше двух."
             )
+        if data.get("contract_obligations_edit_mode"):
+            await finish_contract_obligations_edit(message, state, message.chat.id)
+            return
         await ask_pillow_policy(message, state)
         return
 
@@ -6139,6 +6704,11 @@ async def save_contract_obligations_storage(callback: CallbackQuery, state: FSMC
         + ("\n".join(lines) if lines else "• Обязательства не выбраны")
         + "\n\nЭто места хранения частей уже учтённых расходов, а не новые расходы."
     )
+    if data.get("contract_obligations_edit_mode"):
+        await finish_contract_obligations_edit(
+            callback.message, state, callback.from_user.id,
+        )
+        return
     await ask_pillow_policy(callback.message, state)
 
 
@@ -6198,12 +6768,47 @@ async def br_override_save(message: Message, state: FSMContext):
 
 async def ask_pillow_policy(message: Message, state: FSMContext):
     data = await state.get_data()
+    if (
+        data.get("income_rhythm") == "cyclic"
+        and "cyclic_income_uncertain" not in data
+    ):
+        await ask_cyclic_predictability(message, state)
+        return
     # МП — нижний слой той же Подушки. Цель сохраняется в профиле даже у
     # недолжника, чтобы при появлении нового долга уровень пересчитался сразу.
     minimum_months = "1" if data.get("income_rhythm", "monthly") == "monthly" else "2"
     await state.update_data(minimum_reserve_months=minimum_months)
     await state.set_state(SetupStates.force_majeure_months)
     await show_force_majeure_question_new(message, state)
+
+
+async def ask_cyclic_predictability(message: Message, state: FSMContext):
+    await state.set_state(SetupStates.cyclic_predictability)
+    data = await state.get_data()
+    await message.answer(
+        f"{setup_progress(data, 7)}\n\n"
+        "<b>НАСКОЛЬКО ПРЕДСКАЗУЕМЫ СРОКИ ВАШЕГО ЦИКЛА?</b>\n\n"
+        "<b>Сроки заранее известны</b> — вы точно знаете, когда начнётся и закончится "
+        "следующая рабочая часть.\n\n"
+        "<b>Сроки могут измениться</b> — контракт, рейс, сезон или проект может начаться "
+        "позже, закончиться раньше либо неожиданно продлиться.\n\n"
+        "Ответ повлияет на рекомендуемый размер Подушки и на обновление среднего дохода.",
+        reply_markup=keyboard([
+            [("Сроки заранее известны", "cyclicpredictability:known")],
+            [("Сроки могут измениться", "cyclicpredictability:uncertain")],
+        ]),
+    )
+
+
+@router.callback_query(
+    SetupStates.cyclic_predictability,
+    F.data.startswith("cyclicpredictability:"),
+)
+async def save_cyclic_predictability(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    uncertain = callback.data.rsplit(":", 1)[1] == "uncertain"
+    await state.update_data(cyclic_income_uncertain=uncertain)
+    await ask_pillow_policy(callback.message, state)
 
 
 @router.callback_query(SetupStates.minimum_reserve_months, F.data.startswith("minmonths:"))
@@ -6217,9 +6822,15 @@ async def save_minimum_months(callback: CallbackQuery, state: FSMContext):
 async def show_force_majeure_question_new(message: Message, state: FSMContext):
     data = await state.get_data()
     rhythm = data.get("income_rhythm", "monthly")
-    minimum = force_majeure_minimum_for_rhythm(rhythm)
+    minimum = force_majeure_minimum_for_rhythm(
+        rhythm,
+        cyclic_income_uncertain=bool(data.get("cyclic_income_uncertain", False)),
+    )
     if rhythm == "cyclic":
-        buttons = [[("6 месяцев", "fmmonths:6"), ("9 месяцев", "fmmonths:9")], [("12 месяцев", "fmmonths:12"), ("Свой вариант", "fmmonths:custom")]]
+        if minimum == 9:
+            buttons = [[("9 месяцев", "fmmonths:9"), ("12 месяцев", "fmmonths:12")], [("Свой вариант", "fmmonths:custom")]]
+        else:
+            buttons = [[("6 месяцев", "fmmonths:6"), ("9 месяцев", "fmmonths:9")], [("12 месяцев", "fmmonths:12"), ("Свой вариант", "fmmonths:custom")]]
     elif rhythm == "irregular":
         buttons = [[("4 месяца", "fmmonths:4"), ("6 месяцев", "fmmonths:6")], [("9 месяцев", "fmmonths:9"), ("12 месяцев", "fmmonths:12")], [("Свой вариант", "fmmonths:custom")]]
     else:
@@ -6243,9 +6854,13 @@ async def show_force_majeure_question_new(message: Message, state: FSMContext):
     )
 
 
-def force_majeure_minimum_for_rhythm(rhythm: str) -> int:
+def force_majeure_minimum_for_rhythm(
+    rhythm: str,
+    *,
+    cyclic_income_uncertain: bool = False,
+) -> int:
     if rhythm == "cyclic":
-        return 6
+        return 9 if cyclic_income_uncertain else 6
     if rhythm == "irregular":
         return 4
     return 3
@@ -6254,6 +6869,13 @@ def force_majeure_minimum_for_rhythm(rhythm: str) -> int:
 @router.callback_query(SetupStates.force_majeure_months, F.data.startswith("fmmonths:"))
 async def save_force_months_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    existing = await state.get_data()
+    if (
+        existing.get("income_rhythm") == "cyclic"
+        and "cyclic_income_uncertain" not in existing
+    ):
+        await ask_cyclic_predictability(callback.message, state)
+        return
     value = callback.data.split(":", 1)[1]
     if value == "custom":
         data = await state.get_data()
@@ -6273,8 +6895,14 @@ async def save_force_months_callback(callback: CallbackQuery, state: FSMContext)
 
 @router.message(SetupStates.force_majeure_months)
 async def save_force_months_text(message: Message, state: FSMContext):
-    value = parse_decimal(message.text)
     data = await state.get_data()
+    if (
+        data.get("income_rhythm") == "cyclic"
+        and "cyclic_income_uncertain" not in data
+    ):
+        await ask_cyclic_predictability(message, state)
+        return
+    value = parse_decimal(message.text)
     minimum = Decimal(str(data.get("force_majeure_minimum", "3")))
     if value is None or value < minimum or value > 12:
         await message.answer(f"Введите количество месяцев от {minimum} до 12.")
@@ -6882,7 +7510,7 @@ async def save_current_pillow(
     )
 
     data = await state.get_data()
-    if data.get("profile_type") in {"piecework", "cyclic"}:
+    if data.get("profile_type") == "piecework":
         await ask_stabilizer_target(message, state)
         return
 
@@ -6893,20 +7521,11 @@ async def ask_current_stabilizer(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.set_state(SetupStates.current_stabilizer)
     step = 9 if data.get("has_debts") else 8
-    if data.get("income_rhythm") == "cyclic":
-        text = (
-            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ?</b>\n\n"
-            "Укажите сумму, которую вы уже отложили именно на случай задержки или отмены "
-            "следующей рабочей части.\n\n"
-            "Если Стабилизатора пока нет — отправьте <b>0</b>.\n\n"
-            "——————\n<b>→ Введите сумму.</b>"
-        )
-    else:
-        text = (
-            "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ?</b>\n\n"
-            "——————\n<b>→ Введите сумму.</b>\n"
-            "Если Стабилизатора пока нет — отправьте <b>0</b>."
-        )
+    text = (
+        "<b>СКОЛЬКО УЖЕ НАКОПЛЕНО В СТАБИЛИЗАТОРЕ?</b>\n\n"
+        "——————\n<b>→ Введите сумму.</b>\n"
+        "Если Стабилизатора пока нет — отправьте <b>0</b>."
+    )
     await message.answer(f"{setup_progress(data, step)}\n\n{text}")
 
 
@@ -7337,6 +7956,9 @@ def build_settings_from_data(
             household_reserve=raw.get("household_reserve", "0"),
             life_categories=raw.get("life_categories", {}),
             household_reserve_categories=raw.get("household_reserve_categories", {}),
+            critical_life_breakdown=raw.get("critical_life_breakdown", []),
+            household_reserve_breakdown=raw.get("household_reserve_breakdown", []),
+            critical_life_storage_items=raw.get("critical_life_storage_items", []),
             historical_gifts_monthly=raw.get("historical_gifts_monthly", "0"),
             currency_code=raw.get("currency_code", "RUB"),
             currency_symbol=raw.get("currency_symbol", "₽"),
@@ -7371,6 +7993,19 @@ def build_settings_from_data(
             data["household_reserve"]
         ),
 
+        critical_life_breakdown=active_km_breakdown(
+            list(data.get("km_items", []))
+        ),
+
+        household_reserve_breakdown=active_br_breakdown(
+            list(data.get("br_items", []))
+        ),
+
+        critical_life_storage_items=[
+            dict(item) for item in data.get("km_storage_items", [])
+            if isinstance(item, dict)
+        ],
+
         household_reserve_categories={
             "Дети": Decimal(str(data.get("household_reserve_categories", {}).get("Дети", "0")))
         } if Decimal(str(data.get("household_reserve_categories", {}).get("Дети", "0"))) > 0 else {},
@@ -7388,6 +8023,7 @@ def build_settings_from_data(
         income_work_months=Decimal(str(data.get("income_work_months", "1"))),
         reliable_gap_income=Decimal(str(data.get("reliable_gap_income", "0"))),
         stabilizer_target_months=Decimal(str(data.get("stabilizer_target_months", "1"))),
+        cyclic_income_uncertain=bool(data.get("cyclic_income_uncertain", True)),
         contract_obligations={
             name: Decimal(str(amount))
             for name, amount in data.get("contract_obligations", {}).items()
@@ -7593,7 +8229,7 @@ def goals_available_in_onboarding(allocator: FinancialAllocator) -> bool:
 INVESTMENT_UNLOCK_LEVELS = {
     "stable": 4,
     "piecework": 5,
-    "cyclic": 7,
+    "cyclic": 6,
 }
 
 GOAL_UNLOCK_LEVELS = {
@@ -7752,6 +8388,103 @@ def goal_draft_display_name(item: dict) -> str:
     )
 
 
+def goal_position_count_phrase(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} цель или сундук"
+    if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}:
+        return f"{count} цели и сундука"
+    return f"{count} целей и сундуков"
+
+
+def goal_active_position_phrase(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} активная позиция"
+    if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}:
+        return f"{count} активные позиции"
+    return f"{count} активных позиций"
+
+
+def goal_percent_text(value: Decimal) -> str:
+    return format(Decimal(value).quantize(Decimal("0.01")).normalize(), "f")
+
+
+def goal_allocation_variability_note(profile_id: str) -> str:
+    if profile_id == "piecework":
+        return (
+            "Это ориентир для обычного месяца. В «голодные» месяцы сумма может быть меньше, "
+            "а при сверхдоходе — больше."
+        )
+    if profile_id == "cyclic":
+        return (
+            "Это среднемесячный ориентир за финансовый цикл. В отдельных месяцах сумма может "
+            "быть меньше, а при сверхдоходе — больше."
+        )
+    return "Это ориентир для обычного месяца. При сверхдоходе сумма может быть больше."
+
+
+def goal_money_range(minimum: Decimal, maximum: Decimal, *, approximate: bool = False) -> str:
+    prefix = "≈ " if approximate else ""
+    if minimum == maximum:
+        return prefix + rub_rounded(minimum)
+    return (
+        prefix
+        + rub_rounded(minimum).removesuffix(" ₽")
+        + "–"
+        + rub_rounded(maximum)
+    )
+
+
+def goal_money_range_floor_hundreds(minimum: Decimal, maximum: Decimal) -> str:
+    low = _goal_plain_amount(minimum)
+    high = _goal_plain_amount(maximum)
+    return f"{low} ₽" if low == high else f"{low}–{high} ₽"
+
+
+def _goal_floor_hundreds(value: Decimal) -> Decimal:
+    return (max(Decimal("0"), Decimal(value)) / Decimal("100")).quantize(
+        Decimal("1"), rounding=ROUND_DOWN
+    ) * Decimal("100")
+
+
+def _goal_plain_amount(value: Decimal) -> str:
+    return f"{int(_goal_floor_hundreds(value)):,}".replace(",", " ")
+
+
+def _goal_visible_length(value: str) -> int:
+    return len(value.replace("\ufe0f", ""))
+
+
+def _goal_pad_visible(value: str, width: int) -> str:
+    return value + " " * max(0, width - _goal_visible_length(value))
+
+
+def goal_allocation_progress_table(
+    drafts: list[dict],
+    values: list[Decimal],
+    minimum: Decimal,
+    maximum: Decimal,
+) -> str:
+    labels = [f"{goal_icon(item)} {str(item.get('name', '')).strip()}" for item in drafts]
+    label_width = max((_goal_visible_length(label) for label in labels), default=0)
+    percent_texts = [goal_percent_text(value) for value in values]
+    percent_width = max((len(value) for value in percent_texts), default=1)
+    lows = [
+        _goal_plain_amount(minimum * value / Decimal("100")) for value in values
+    ]
+    low_width = max((len(value) for value in lows), default=1)
+    rows = []
+    for index, label in enumerate(labels):
+        padded_label = _goal_pad_visible(label, label_width)
+        if index >= len(values):
+            rows.append(padded_label.rstrip())
+            continue
+        percentage = percent_texts[index].rjust(percent_width)
+        low = lows[index].rjust(low_width)
+        high = _goal_plain_amount(maximum * values[index] / Decimal("100"))
+        rows.append(f"{padded_label} — {percentage}% ≈ {low}—{high}")
+    return "<pre>" + escape("\n".join(rows)) + "</pre>"
+
+
 def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
     if not drafts:
         return "<b>Пока список пуст.</b>"
@@ -7761,7 +8494,7 @@ def goal_draft_summary(drafts: list[dict], *, percentages: bool = False) -> str:
         if percentages and item.get("percentage") is not None:
             suffix = f" — <b>{item['percentage']}%</b>"
         if item.get("status", "active") == "paused":
-            suffix += " · <i>в ожидании</i>"
+            suffix += " · <i>заморожена</i>"
         lines.append(
             f"• {goal_icon(item)} <b>{escape(goal_draft_display_name(item))}</b>{suffix}"
         )
@@ -7775,7 +8508,7 @@ def goal_percentage_progress(drafts: list[dict]) -> str:
         name = escape(goal_draft_display_name(item))
         percentage = item.get("percentage")
         if item.get("status", "active") == "paused":
-            lines.append(f"• {goal_icon(item)} <b>{name}</b> · <i>в ожидании</i>")
+            lines.append(f"• {goal_icon(item)} <b>{name}</b> · <i>заморожена</i>")
             continue
         if percentage is None:
             lines.append(f"• {goal_icon(item)} <b>{name}</b>")
@@ -7836,30 +8569,37 @@ def goals_capacity_profile_text(data: dict) -> str:
 async def show_goals_menu(message: Message, state: FSMContext):
     data = await state.get_data()
     drafts = data.get("goal_drafts", [])
-    active_drafts = [
-        item for item in drafts if item.get("status", "active") == "active"
+    current_drafts = [
+        item for item in drafts
+        if item.get("status", "active") in {"active", "paused"}
     ]
-    active_goal_count = sum(
-        item.get("position_type", "goal") == "goal" for item in active_drafts
+    current_goal_count = sum(
+        item.get("position_type", "goal") == "goal" for item in current_drafts
     )
     selected = {str(item.get("name", "")).casefold() for item in drafts}
     rows: list[list[tuple[str, str]]] = []
-    # Creation is unlimited. Positions beyond the funding limits remain in
-    # the profile as PAUSED and may be activated after a slot opens.
-    can_add = True
+    can_add = len(current_drafts) < MAX_ACTIVE_POSITIONS
+    can_add_goal = can_add and current_goal_count < MAX_ACTIVE_GOALS
     if can_add and "подарки" not in selected:
         rows.append([("🧳 Сундук Подарков", "goals:gift:offer")])
     for index, item in enumerate(data.get("br_items", [])):
         name = str(item.get("name", "")).strip()
         if (
-            can_add
+            can_add_goal
             and is_future_goal_expense(item)
             and name
             and name.casefold() not in selected
         ):
             rows.append([(f"⭐️ {name}", f"goals:future:{index}")])
     for index, suggestion in enumerate(GOAL_SUGGESTIONS):
-        if can_add and suggestion["name"].casefold() not in selected:
+        suggestion_allowed = (
+            can_add
+            and (
+                suggestion.get("position_type") == "chest"
+                or current_goal_count < MAX_ACTIVE_GOALS
+            )
+        )
+        if suggestion_allowed and suggestion["name"].casefold() not in selected:
             rows.append([(
                 f"{goal_icon(suggestion)} {goal_draft_display_name(suggestion)}",
                 f"goals:suggest:{index}",
@@ -7880,9 +8620,8 @@ async def show_goals_menu(message: Message, state: FSMContext):
         "Сначала Аллокатор обеспечивает Критический Минимум, Бытовой Резерв и "
         "текущую финансовую защиту. Оставшиеся деньги можно направлять на Цели и в Сундуки.\n\n"
         f"{goals_capacity_profile_text(data)}\n\n"
-        f"Активно: <b>{len(active_drafts)} из {MAX_ACTIVE_POSITIONS}</b> · "
-        f"Целей: <b>{active_goal_count} из {MAX_ACTIVE_GOALS}</b>.\n"
-        "Остальные позиции сохранятся в ожидании и будут получать 0 ₽.\n\n"
+        f"Текущих позиций: <b>{len(current_drafts)} из {MAX_ACTIVE_POSITIONS}</b> · "
+        f"Целей: <b>{current_goal_count} из {MAX_ACTIVE_GOALS}</b>.\n\n"
         f"{goal_draft_summary(drafts)}\n\n"
         "Рекомендую познакомиться с вариантами, которые многие недооценивают. "
         "Нажмите на любой — я коротко расскажу, зачем он нужен. "
@@ -7921,17 +8660,20 @@ async def add_goal_draft(state: FSMContext, item: dict):
     ):
         raise ValueError("Позиция с таким названием уже есть в списке.")
     item = dict(item)
-    active = [draft for draft in drafts if draft.get("status", "active") == "active"]
-    active_goals = sum(draft.get("position_type", "goal") == "goal" for draft in active)
-    if (
-        item.get("position_type", "goal") == "goal"
-        and active_goals >= MAX_ACTIVE_GOALS
-    ) or len(active) >= MAX_ACTIVE_POSITIONS:
-        item["status"] = "paused"
-        item["percentage"] = "0"
-        item["is_auto_percentage"] = False
-    else:
-        item["status"] = "active"
+    current = [
+        draft for draft in drafts
+        if draft.get("status", "active") in {"active", "paused"}
+    ]
+    current_goals = sum(
+        draft.get("position_type", "goal") == "goal" for draft in current
+    )
+    if len(current) >= MAX_ACTIVE_POSITIONS:
+        raise ValueError(
+            f"Можно создать не больше {MAX_ACTIVE_POSITIONS} текущих Целей и Сундуков."
+        )
+    if item.get("position_type", "goal") == "goal" and current_goals >= MAX_ACTIVE_GOALS:
+        raise ValueError(f"Можно создать не больше {MAX_ACTIVE_GOALS} текущих Целей.")
+    item["status"] = "active"
     drafts.append(item)
     await state.update_data(goal_drafts=drafts)
 
@@ -8061,8 +8803,10 @@ async def start_onboarding_vacation(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SetupStates.goal_vacation_item)
     await state.update_data(vacation_index=0, vacation_amounts={})
     await callback.message.answer(
-        "<b>⭐️ КАЛЬКУЛЯТОР ОТПУСКА</b>\n\n"
-        "Посчитаем поездку по частям. Если статья не нужна или уже оплачена — отправьте <b>0</b>."
+        "🏖️ <b>КАЛЬКУЛЯТОР ОТПУСКА</b>\n\n"
+        "Посчитаем отпуск по частям: сколько понадобится всего и сколько нужно "
+        "откладывать каждый месяц.\n\n"
+        "Если какая-то статья расходов вам не нужна или уже оплачена — отправьте <b>0</b>."
     )
     await ask_onboarding_vacation_item(callback.message, state)
 
@@ -8074,9 +8818,10 @@ async def ask_onboarding_vacation_item(message: Message, state: FSMContext):
         await show_onboarding_vacation_review(message, state)
         return
     _, label = VACATION_BUDGET_ITEMS[index]
+    progress = "💎" * (index + 1) + "➖" * (len(VACATION_BUDGET_ITEMS) - index - 1)
     await state.set_state(SetupStates.goal_vacation_item)
     await message.answer(
-        f"<b>{escape(label.upper())}</b>\n\n"
+        f"{progress}\n<b>{escape(label.upper())}</b>\n\n"
         "——————\n<b>→ Введите предполагаемую сумму.</b>",
         reply_markup=keyboard([[("✖️ Отмена", "goals:cancel-add")]]),
     )
@@ -8113,7 +8858,7 @@ async def show_onboarding_vacation_review(message: Message, state: FSMContext):
     ]
     await state.set_state(SetupStates.goal_vacation_review)
     await message.answer(
-        "<b>⭐️ БЮДЖЕТ ОТПУСКА</b>\n\n"
+        "🏖️ <b>БЮДЖЕТ ОТПУСКА</b>\n\n"
         + "\n".join(lines)
         + f"\n\nРасходы — <b>{rub(result['subtotal'])}</b>"
         + f"\nЗапас 10% — <b>{rub(result['buffer'])}</b>"
@@ -8442,34 +9187,73 @@ async def ask_next_goal_percentage(message: Message, state: FSMContext):
         return
 
     minimum, maximum = goal_percentage_bounds(chosen, len(active_drafts) - index - 1)
-    capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
+    allocator = onboarding_goal_allocator(data)
+    capacity = allocator.allocation_setup_capacity_range()
     await state.set_state(SetupStates.goal_percentage)
-    capacity_text = (
-        f"<b>{rub_rounded(capacity['minimum'])[:-2]}–{rub_rounded(capacity['maximum'])} в месяц</b>"
+    capacity_min = Decimal(capacity["minimum"])
+    capacity_max = Decimal(capacity["maximum"])
+    ten_percent = goal_money_range(
+        capacity_min * Decimal("0.1"),
+        capacity_max * Decimal("0.1"),
+        approximate=True,
     )
-    prompt = (
-        f"<b>→ Введите процент от {minimum} до {maximum} </b>\n\n"
-        f"<b>на {goal_icon(active_drafts[index])} {escape(goal_draft_display_name(active_drafts[index]))}.</b>\n\n"
-        "Например: 20"
+    has_capacity = capacity_max > 0
+    zero_capacity_text = (
+        "При таком доходе деньги распределяются на обязательные расходы и Бытовой резерв. "
+        "После этого свободной суммы на Цели и Сундуки пока не остаётся. "
+        "Доли можно настроить заранее."
     )
+    active_list = "\n".join(
+        f"{goal_icon(item)} {escape(goal_draft_display_name(item))}"
+        for item in active_drafts
+    )
+    progress_table = goal_allocation_progress_table(
+        active_drafts, chosen, capacity_min, capacity_max
+    )
+    current_name = (
+        f"{goal_icon(active_drafts[index])} "
+        f"<b>{escape(goal_draft_display_name(active_drafts[index]))}</b>"
+    )
+    bounds = f"{goal_percent_text(minimum)}% до {goal_percent_text(maximum)}%"
     if index == 0:
+        basis = {
+            "stable": "При вашем минимальном гарантированном доходе",
+            "piecework": "При вашем среднем доходе",
+            "cyclic": "В среднем за ваш финансовый цикл",
+        }[allocator.profile_id]
+        capacity_explanation = (
+            f"{basis} Аллокатор сможет направлять на них примерно:\n\n"
+            f"<b>{goal_money_range_floor_hundreds(capacity_min, capacity_max)} в месяц</b>\n\n"
+            "Чтобы было проще выбирать проценты:\n\n"
+            f"<b>10% {ten_percent}</b>"
+            if has_capacity
+            else zero_capacity_text
+        )
         text = (
-            "<b>КАК РАСПРЕДЕЛИТЬ ДЕНЬГИ МЕЖДУ ЦЕЛЯМИ?</b>\n\n"
-            "Установите процент откладывания денег для каждой категории:\n\n"
-            f"{goal_draft_summary(drafts)}\n\n"
-            "При вашем среднем доходе Аллокатор сможет направлять на Цели и Сундуки примерно:\n"
-            f"{capacity_text}\n\n"
-            "Укажите, сколько процентов от этой суммы направлять на каждую категорию.\n\n"
-            f"——————\n{prompt}"
+            "<b>ДОЛИ РАСПРЕДЕЛЕНИЯ</b>\n\n"
+            f"У вас сейчас <b>{goal_active_position_phrase(len(active_drafts))}</b>:\n\n"
+            f"<pre>{active_list}</pre>\n\n"
+            f"{capacity_explanation}\n\n"
+            "Сейчас настраиваем:\n\n"
+            f"{current_name}\n"
+            "——————\n"
+            f"<b>→ Введите процент от {bounds}.</b>"
         )
     else:
+        capacity_explanation = (
+            "Чтобы было проще выбирать проценты:\n\n"
+            f"<b>10% {ten_percent}</b>"
+            if has_capacity
+            else zero_capacity_text
+        )
         text = (
-            "<b>ПРОЦЕНТЫ ЦЕЛЕЙ И СУНДУКОВ</b>\n\n"
-            f"{goal_percentage_progress(drafts)}\n\n"
-            "При вашем среднем доходе Аллокатор сможет направлять на Цели и Сундуки примерно:\n"
-            f"{capacity_text}\n\n"
-            "Укажите, сколько процентов от этой суммы направлять на каждую категорию.\n\n"
-            f"——————\n{prompt}"
+            "<b>ДОЛИ РАСПРЕДЕЛЕНИЯ</b>\n"
+            f"{progress_table}\n\n"
+            f"{capacity_explanation}\n\n"
+            "Сейчас настраиваем:\n\n"
+            f"{current_name}\n"
+            "——————\n"
+            f"<b>→ Введите процент от {bounds}.</b>"
         )
     await message.answer(
         text,
@@ -8479,7 +9263,7 @@ async def ask_next_goal_percentage(message: Message, state: FSMContext):
 
 @router.message(SetupStates.goal_percentage)
 async def save_goal_percentage(message: Message, state: FSMContext):
-    value = parse_decimal(message.text)
+    value = parse_percentage(message.text)
     data = await state.get_data()
     chosen = [Decimal(str(item)) for item in data.get("goal_percentages", [])]
     drafts = list(data.get("goal_drafts", []))
@@ -8492,10 +9276,13 @@ async def save_goal_percentage(message: Message, state: FSMContext):
     minimum, maximum = goal_percentage_bounds(chosen, len(active_indices) - index - 1)
     if (
         value is None
-        or value != value.to_integral_value()
+        or value != value.quantize(Decimal("0.01"))
         or not minimum <= value <= maximum
     ):
-        await message.answer(f"Введите целое число от {minimum} до {maximum}.")
+        await message.answer(
+            f"Введите процент от {goal_percent_text(minimum)}% до "
+            f"{goal_percent_text(maximum)}%. Можно использовать не больше двух знаков после запятой."
+        )
         return
     chosen.append(value)
     drafts[active_indices[index]]["percentage"] = str(value)
@@ -8506,7 +9293,7 @@ async def save_goal_percentage(message: Message, state: FSMContext):
 async def show_goal_percentages_review(message: Message, state: FSMContext):
     data = await state.get_data()
     drafts = list(data.get("goal_drafts", []))
-    capacity = onboarding_goal_allocator(data).estimated_goals_capacity_range()
+    capacity = onboarding_goal_allocator(data).allocation_setup_capacity_range()
     minimum = Decimal(str(capacity["minimum"]))
     maximum = Decimal(str(capacity["maximum"]))
     preview_allocator = onboarding_goal_allocator(data, drafts)
@@ -8517,28 +9304,28 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
         )
         if item.get("status", "active") == "active"
     ]
-    review_items.sort(key=lambda pair: Decimal(str(pair[1][0]["percentage"])), reverse=True)
+    active_drafts = [item for _, (item, _) in review_items]
+    active_percentages = [Decimal(str(item["percentage"])) for item in active_drafts]
+    summary_table = goal_allocation_progress_table(
+        active_drafts, active_percentages, minimum, maximum
+    )
     lines = []
     warning_indices = []
     for draft_index, (item, goal) in review_items:
-        share = Decimal(str(item["percentage"])) / Decimal("100")
-        line = (
-            f"{goal_icon(item)} <b>{escape(goal_review_name(item))} — {item['percentage']}%</b>\n"
-            f"&#160;&#160;&#160;&#160;&#160;&#160;≈ {rub_rounded(minimum * share)[:-2]}–"
-            f"{rub_rounded(maximum * share)[:-2]} <b>₽/мес.</b>"
-        )
+        line = ""
         if goal.is_goal:
             forecast = preview_allocator.goal_forecast(goal)
             status = str(forecast["status"])
+            label = f"{goal_icon(item)} <b>{escape(goal_review_name(item))}</b>"
             if status == "on_track":
-                line += "\n&#160;&#160;&#160;&#160;&#160;&#160;✔️ <i>При выбранной доле срок выглядит реалистично.</i>"
+                line = f"{label}\n✔️ <i>При выбранной доле срок выглядит реалистично.</i>"
             elif status == "depends_on_income":
                 warning_indices.append(draft_index)
-                line += "\n&#160;&#160;&#160;&#160;&#160;&#160;⚠️ <i>Срок достижим только в более доходные месяцы.</i>"
+                line = f"{label}\n⚠️ <i>Срок достижим только в более доходные месяцы.</i>"
             elif status == "unreachable":
                 warning_indices.append(draft_index)
-                line += (
-                    f"\n&#160;&#160;&#160;&#160;&#160;&#160;⚠️ <i>Нужно около "
+                line = (
+                    f"{label}\n⚠️ <i>Нужно около "
                     f"{rub_rounded(forecast['required_monthly'])} / мес. Увеличьте срок, "
                     "уменьшите сумму или выделите Цели большую долю.</i>"
                 )
@@ -8552,16 +9339,17 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
                         estimate = f"около {fast} мес."
                     else:
                         estimate = f"примерно {fast}–{slow} мес."
-                    line += f"\n&#160;&#160;&#160;&#160;&#160;&#160;ℹ️ <i>Ориентировочный срок — {estimate}.</i>"
-        lines.append(line)
+                    line = f"{label}\nℹ️ <i>Ориентировочный срок — {estimate}.</i>"
+        if line:
+            lines.append(line)
     waiting = [
         f"{goal_icon(item)} <b>{escape(goal_review_name(item))}</b> · "
-        "<i>в ожидании, 0 ₽</i>"
+        "<i>заморожена, 0 ₽</i>"
         for item in drafts
         if item.get("status", "active") == "paused"
     ]
     if waiting:
-        lines.append("<b>В ОЖИДАНИИ</b>\n" + "\n".join(waiting))
+        lines.append("<b>ЗАМОРОЖЕНЫ</b>\n" + "\n".join(waiting))
     await state.set_state(SetupStates.goal_percentages_review)
     action_rows = [
         [(f"✎ {goal_draft_display_name(drafts[index])}", f"goals:quick-edit:{index}")]
@@ -8573,9 +9361,12 @@ async def show_goal_percentages_review(message: Message, state: FSMContext):
         [("Изменить список", "goals:percent:list")],
     ])
     await message.answer(
-        "<b>РАСПРЕДЕЛЕНИЕ ЦЕЛЕЙ</b>\n\n"
-        + "\n\n".join(lines)
-        + "\n\nПоследняя позиция получила остаток автоматически. Сумма долей — 100%.",
+        "<b>ПРОВЕРЬТЕ ДОЛИ</b>\n\n"
+        + summary_table
+        + (("\n\n" + "\n\n".join(lines)) if lines else "")
+        + "\n\nПоследняя позиция получила остаток автоматически. Сумма долей — 100%."
+        + "\n\nСуммы ориентировочные. В слабые месяцы они могут быть меньше, "
+        "а при сверхдоходе — больше.",
         reply_markup=keyboard(action_rows),
     )
 
@@ -9199,14 +9990,18 @@ async def show_confirmation(
                 "осталось "
                 f"{format(state_object.current_phase_months_remaining.normalize(), 'f')} мес."
             )
+        cycle_predictability = (
+            "могут измениться" if settings.cyclic_income_uncertain
+            else "заранее известны"
+        )
         cycle_text = (
             f"➖ <b>Финансовый цикл</b> — {settings.income_work_months} / {settings.income_gap_months}\n"
             f"({settings.income_work_months} мес. работы · {settings.income_gap_months} мес. перерыва)\n\n"
+            f"➖ <b>Сроки цикла</b> — {cycle_predictability}\n\n"
             f"➖ <b>Текущая фаза</b> — {phase_name}\n"
             f"{phase_remaining}\n\n"
             f"➖ <b>Обязательства на время контракта</b> — {rub(settings.contract_obligations_total)}\n\n"
             f"➖ <b>Фонд Зарплаты сейчас</b> — {reserve_fraction(rub(state_object.intercontract_reserve), rub(allocator.intercontract_current_limit))}\n\n"
-            f"➖ <b>Стабилизатор</b> — {settings.stabilizer_target_months} мес.\n\n"
         )
 
     await state.set_state(SetupStates.confirmation)
@@ -9217,13 +10012,13 @@ async def show_confirmation(
             f"{rhythm_labels.get(settings.income_rhythm)}\n\n"
             f"{reserve_progress_block('Подушка', allocator.pillow_total_balance, settings.force_majeure_limit)}\n\n"
             f"{reserve_progress_block('Стабилизатор', state_object.pillow_stabilizer, settings.stabilizer_full_limit)}\n\n"
-            "<blockquote>"
-            f"{rub(settings.average_income)} — Средний доход\n\n"
-            f"{rub(settings.critical_life)} — Критический Минимум\n\n"
-            f"{rub(settings.household_reserve)} — Бытовой Резерв\n\n"
-            f"{rub(settings.household_life)} — Устойчивая Жизнь"
-            "</blockquote>"
-            f"{deficit_warning}\n\n"
+            + allocation_table([[
+                ("Средний доход", rub(settings.average_income)),
+                ("Критический Минимум", rub(settings.critical_life)),
+                ("Бытовой Резерв", rub(settings.household_reserve)),
+                ("Устойчивая Жизнь", rub(settings.household_life)),
+            ]])
+            + f"{deficit_warning}\n\n"
             f"<b><u>ТИПЫ ДОХОДА:</u></b>\n\n{tax_types}\n\n"
             f"{goals_text}"
             "<b><u>КОНВЕРТЫ:</u></b>\n\n"
@@ -9239,13 +10034,13 @@ async def show_confirmation(
             "<b>ФИНАНСОВЫЙ ПРОФИЛЬ ГОТОВ</b>\n\n"
             f"➖ <b>Профиль</b> — {rhythm_labels.get(settings.income_rhythm)}\n\n"
             f"{cycle_text}"
-            "<blockquote>"
-            f"➖ <b>Средний доход</b> — {rub(settings.average_income)}\n\n"
-            f"➖ <b>Критический Минимум</b> — {rub(settings.critical_life)}\n\n"
-            f"➖ <b>Бытовой Резерв</b> — {rub(settings.household_reserve)}\n\n"
-            f"➖ <b>Устойчивая Жизнь</b> — {rub(settings.household_life)}"
-            "</blockquote>"
-            f"{deficit_warning}\n\n"
+            + allocation_table([[
+                ("➖ Средний доход", rub(settings.average_income)),
+                ("➖ Критический Минимум", rub(settings.critical_life)),
+                ("➖ Бытовой Резерв", rub(settings.household_reserve)),
+                ("➖ Устойчивая Жизнь", rub(settings.household_life)),
+            ]])
+            + f"{deficit_warning}\n\n"
             f"<b><u>ТИПЫ ДОХОДОВ:</u></b>\n\n{tax_types}\n\n"
             f"{goals_text}"
             "<b><u>КОНВЕРТЫ:</u></b>\n\n"

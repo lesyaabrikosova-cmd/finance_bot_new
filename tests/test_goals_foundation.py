@@ -1,0 +1,288 @@
+import tempfile
+import unittest
+import sqlite3
+from decimal import Decimal
+from pathlib import Path
+
+from financial_engine import (
+    AllocatorState,
+    FinancialAllocator,
+    Goal,
+    UserSettings,
+    goal_display_name,
+)
+from storage import Database
+from onboarding import (
+    build_settings_from_data,
+    goal_draft_summary,
+    goal_percentage_progress,
+    goal_review_name,
+    rub_rounded,
+)
+
+
+def settings_with(goals):
+    return UserSettings(
+        has_debts=False,
+        employment_type="Фрилансер",
+        income_rhythm="irregular",
+        critical_life=Decimal("90000"),
+        household_reserve=Decimal("20000"),
+        average_income=Decimal("180000"),
+        goals=goals,
+    )
+
+
+class GoalFoundationTests(unittest.TestCase):
+    def test_chest_has_no_finish_line_or_buffer(self):
+        chest = Goal(
+            name="Хотелки",
+            percentage=Decimal("30"),
+            position_type="chest",
+            target_amount=Decimal("100000"),
+            deadline="2027-06-01",
+            buffer_enabled=True,
+            buffer_percent=Decimal("10"),
+        )
+
+        self.assertTrue(chest.is_chest)
+        self.assertIsNone(chest.target_amount)
+        self.assertIsNone(chest.deadline)
+        self.assertFalse(chest.buffer_enabled)
+        self.assertEqual(chest.buffer_percent, Decimal("0"))
+
+    def test_goal_target_includes_optional_buffer(self):
+        goal = Goal(
+            name="Отпуск",
+            percentage=Decimal("40"),
+            target_amount=Decimal("150000"),
+            buffer_enabled=True,
+            buffer_percent=Decimal("10"),
+        )
+
+        self.assertEqual(goal.full_target_amount, Decimal("165000"))
+
+    def test_database_round_trip_preserves_goal_and_chest_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "goals.db")
+            goals = [
+                Goal(
+                    name="Отпуск",
+                    percentage=Decimal("70"),
+                    position_type="goal",
+                    target_amount=Decimal("150000"),
+                    deadline="2027-08-01",
+                    buffer_enabled=True,
+                    buffer_percent=Decimal("10"),
+                    currency_code="EUR",
+                    status="active",
+                    color_index=3,
+                ),
+                Goal(
+                    name="Подарки",
+                    percentage=Decimal("30"),
+                    position_type="chest",
+                    is_auto_percentage=True,
+                    previous_percentage=Decimal("25"),
+                    color_index=6,
+                ),
+            ]
+            database.save_allocator(
+                991100,
+                FinancialAllocator(settings_with(goals), AllocatorState()),
+            )
+
+            restored = database.load_allocator(991100)
+            self.assertIsNotNone(restored)
+            vacation, gifts = restored.settings.goals
+            self.assertEqual(vacation.target_amount, Decimal("150000"))
+            self.assertEqual(vacation.full_target_amount, Decimal("165000"))
+            self.assertEqual(vacation.deadline, "2027-08-01")
+            self.assertEqual(vacation.currency_code, "EUR")
+            self.assertEqual(vacation.color_index, 3)
+            self.assertTrue(gifts.is_chest)
+            self.assertTrue(gifts.is_auto_percentage)
+            self.assertEqual(gifts.previous_percentage, Decimal("25"))
+            self.assertEqual(gifts.color_index, 6)
+            database.close()
+
+    def test_database_round_trip_preserves_allocation_review_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "allocation-review.db")
+            settings = settings_with([
+                Goal("Отпуск", 0, target_amount=100000),
+                Goal("Подарки", 100, position_type="chest", is_system_chest=True),
+            ])
+            settings.allocation_needs_review = True
+            database.save_allocator(
+                991102,
+                FinancialAllocator(settings, AllocatorState()),
+            )
+
+            restored = database.load_allocator(991102)
+
+            self.assertTrue(restored.settings.allocation_needs_review)
+            database.close()
+
+    def test_existing_settings_table_gets_safe_allocation_review_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings-migration.db"
+            database = Database(path)
+            database.connection.execute(
+                "ALTER TABLE settings DROP COLUMN allocation_needs_review"
+            )
+            database.connection.commit()
+            database.close()
+
+            migrated = Database(path)
+            columns = {
+                row["name"]: row
+                for row in migrated.connection.execute("PRAGMA table_info(settings)")
+            }
+
+            self.assertIn("allocation_needs_review", columns)
+            self.assertEqual(columns["allocation_needs_review"]["dflt_value"], "0")
+            migrated.close()
+
+    def test_legacy_goals_table_is_migrated_without_data_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.db"
+            connection = sqlite3.connect(path)
+            connection.execute(
+                """
+                CREATE TABLE goals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    percentage TEXT NOT NULL,
+                    balance TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO goals (telegram_id, name, percentage, balance) "
+                "VALUES (1, 'Старая цель', '100', '5000')"
+            )
+            connection.commit()
+            connection.close()
+
+            database = Database(path)
+            row = database.connection.execute(
+                "SELECT * FROM goals WHERE telegram_id = 1"
+            ).fetchone()
+            self.assertEqual(row["name"], "Старая цель")
+            self.assertEqual(row["position_type"], "chest")
+            self.assertEqual(row["currency_code"], "RUB")
+            self.assertEqual(row["status"], "active")
+            database.close()
+
+    def test_onboarding_builds_finite_goal_and_balance(self):
+        settings = build_settings_from_data({
+            "has_debts": False,
+            "employment_type": "Фрилансер",
+            "critical_life": "90000",
+            "household_reserve": "20000",
+            "average_income": "180000",
+            "tax_rate": "0",
+            "force_majeure_months": "4",
+            "goals": [{
+                "name": "Отпуск",
+                "position_type": "goal",
+                "percentage": "100",
+                "is_auto_percentage": True,
+                "target_amount": "150000",
+                "balance": "25000",
+                "deadline": "2027-08-01",
+                "buffer_enabled": True,
+                "buffer_percent": "10",
+            }],
+        })
+        goal = settings.goals[0]
+        self.assertEqual(goal.balance, Decimal("25000"))
+        self.assertEqual(goal.full_target_amount, Decimal("165000"))
+        self.assertTrue(goal.is_auto_percentage)
+
+    def test_onboarding_preserves_waiting_position_status(self):
+        settings = build_settings_from_data({
+            "has_debts": False,
+            "employment_type": "Фрилансер",
+            "critical_life": "90000",
+            "household_reserve": "20000",
+            "average_income": "180000",
+            "tax_rate": "0",
+            "force_majeure_months": "4",
+            "goals": [
+                {
+                    "name": "Подарки",
+                    "position_type": "chest",
+                    "percentage": "100",
+                    "status": "active",
+                },
+                {
+                    "name": "Позже",
+                    "position_type": "goal",
+                    "percentage": "0",
+                    "status": "paused",
+                    "target_amount": "100000",
+                },
+            ],
+        })
+        self.assertEqual(settings.goals[1].status, "paused")
+        self.assertEqual(settings.goals[1].percentage, Decimal("0"))
+
+    def test_onboarding_summary_distinguishes_goal_and_chest(self):
+        summary = goal_draft_summary([
+            {"name": "Отпуск", "position_type": "goal"},
+            {"name": "Подарки", "position_type": "chest"},
+        ])
+        self.assertIn("⭐️ <b>Отпуск</b>", summary)
+        self.assertIn("🧳 <b>Сундук Подарков</b>", summary)
+
+    def test_goal_percentage_progress_marks_only_completed_positions(self):
+        summary = goal_percentage_progress([
+            {"name": "Отпуск", "position_type": "goal", "percentage": "20"},
+            {"name": "Подарки", "position_type": "chest"},
+        ])
+        self.assertIn("<b>Отпуск — 20%</b>", summary)
+        self.assertIn("<b>Сундук Подарков</b>", summary)
+
+    def test_goal_review_uses_short_names_and_rounded_rubles(self):
+        self.assertEqual(
+            goal_review_name({"name": "Замена техники", "position_type": "chest"}),
+            "Техника",
+        )
+        self.assertEqual(rub_rounded(Decimal("4204.67")), "4 205 ₽")
+
+    def test_chest_display_names_are_consistent_and_grammatical(self):
+        self.assertEqual(goal_display_name("Подарки", True), "Сундук Подарков")
+        self.assertEqual(goal_display_name("Замена техники", True), "Сундук Техники")
+        self.assertEqual(goal_display_name("Мечты", True), "Сундук Мечты")
+        self.assertEqual(goal_display_name("Сундук Подарков", True), "Сундук Подарков")
+        self.assertEqual(goal_display_name("Отпуск", False), "Отпуск")
+
+    def test_goal_lifecycle_survives_storage_and_only_active_positions_allocate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "lifecycle.db")
+            goals = [
+                Goal("Отпуск", 40, target_amount=Decimal("165000"), status="completed"),
+                Goal("Подарки", 100, position_type="chest", status="active"),
+                Goal("Техника", 20, position_type="chest", status="paused"),
+            ]
+            database.save_allocator(
+                991101,
+                FinancialAllocator(settings_with(goals), AllocatorState()),
+            )
+            restored = database.load_allocator(991101)
+            self.assertEqual(
+                [goal.status for goal in restored.settings.goals],
+                ["completed", "active", "paused"],
+            )
+            self.assertEqual(
+                restored.split_goal_amount(Decimal("10000")),
+                {"Подарки": Decimal("10000")},
+            )
+            database.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

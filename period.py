@@ -243,7 +243,13 @@ async def show_phase_life_menu(callback: CallbackQuery):
         status = "✓" if budget and budget.completed else "⚠️"
         action = "Изменить" if budget and budget.completed else "Заполнить"
         rows.append([(f"{status} {action}: {label}", f"phaselife:fill:{phase}")])
+        if budget and budget.completed:
+            rows.append([(
+                f"Валюта {label.lower()}: {budget.currency_code}",
+                f"phaselife:currency:{phase}",
+            )])
     rows.extend([
+        [("Обязательства на время работы", "phaselife:obligations")],
         [("ℹ️ Как считать две жизни", "phaselife:help")],
         [("← Главное меню", "menu:back")],
     ])
@@ -306,8 +312,8 @@ async def start_intercontract_period(callback: CallbackQuery):
         "Счётчик дохода продолжает учитывать полный цикл: рабочую часть и перерыв.\n\n"
         "<b>РЕЗЕРВ НА СЛЕДУЮЩУЮ РАБОЧУЮ ЧАСТЬ</b>\n"
         f"Нужно подготовить: <b>{result['next_work_obligations']} ₽</b>.\n"
-        "Сейчас начинается накопление этого резерва. Он получает приоритет раньше Фонда Зарплаты, "
-        "Стабилизатора и Подушки. Если денег пока недостаточно, Аллокатор покажет дефицит и будет "
+        "Сейчас начинается накопление этого резерва. Он получает приоритет раньше Фонда Зарплаты "
+        "и Подушки. Если денег пока недостаточно, Аллокатор покажет дефицит и будет "
         "закрывать его из следующих поступлений.\n\n"
         "В начале каждого личного расчётного периода добавьте внешние "
         "поступления, если они уже пришли. Затем нажмите «Заплатить себе из Фонда Зарплаты».",
@@ -430,7 +436,6 @@ async def finish_salary_payment(message: Message, state: FSMContext, requested_r
             "Жизнь текущего периода": preview.state.life_balance,
             "Обязательства на время работы": preview.state.contract_obligations_reserve,
             "Подушка": preview.pillow_total_balance,
-            "Стабилизатор дохода": preview.state.pillow_stabilizer,
             "Фонд Зарплаты": preview.state.intercontract_reserve,
         }
         amount = preview.pay_intercontract_salary(requested_rub)
@@ -441,7 +446,6 @@ async def finish_salary_payment(message: Message, state: FSMContext, requested_r
         "Жизнь текущего периода": preview.state.life_balance,
         "Обязательства на время работы": preview.state.contract_obligations_reserve,
         "Подушка": preview.pillow_total_balance,
-        "Стабилизатор дохода": preview.state.pillow_stabilizer,
         "Фонд Зарплаты": preview.state.intercontract_reserve,
     }
     lines = []
@@ -552,7 +556,7 @@ async def ask_extend_intercontract_period(callback: CallbackQuery):
         "При дефиците Аллокатор ничего не забирает автоматически. После продления можно "
         "использовать доступную часть Фонда Зарплаты, добавить фактическое поступление или "
         "уменьшить план жизни. Если этого недостаточно, решение об использовании "
-        "Стабилизатора, Бытового резерва, Подушки, целей или инвестиций остаётся за вами.",
+        "Бытового резерва, Подушки, целей или инвестиций остаётся за вами.",
         reply_markup=keyboard([
             [("← Назад", "menu:back"), ("✔️ Продлить на период", "intercontract:extend:confirm")],
         ]),
@@ -828,7 +832,7 @@ async def period_remainder_amount_save(message: Message, state: FSMContext):
     investment_mode = {
         "stable": 4,
         "piecework": 5,
-        "cyclic": 7,
+        "cyclic": 6,
     }[allocator.profile_id]
     if active_mode >= investment_mode:
         rows.append([("Инвестиции", "period:target:investments")])
@@ -847,6 +851,11 @@ async def period_remainder_target(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split(":")
     target = ":".join(parts[2:])
     allocator = db.load_allocator(callback.from_user.id)
+    if target == "stabilizer" and not allocator.settings.needs_stabilizer:
+        await callback.message.answer(
+            "Это направление недоступно для вашего финансового профиля."
+        )
+        return
     goals_mode = {"stable": 3, "piecework": 3, "cyclic": 5}[allocator.profile_id]
     if (
         (target == "goals" or target.startswith("goal:"))
@@ -873,7 +882,7 @@ async def period_remainder_target(callback: CallbackQuery, state: FSMContext):
             await callback.message.answer("Цель больше не найдена. Выберите направление заново.")
             return
         if goal.status != "active":
-            await callback.message.answer("Эта позиция сейчас на паузе. Выберите другое направление.")
+            await callback.message.answer("Эта позиция сейчас заморожена. Выберите другое направление.")
             return
         goal_icon = "🧳" if goal.is_chest else "⭐️"
         display_name = goal_display_name(goal.name, goal.is_chest)

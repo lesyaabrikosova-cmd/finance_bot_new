@@ -289,9 +289,6 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
             ("Фонд Зарплаты", salary_fund_balance, salary_fund_critical_target,
              salary_fund_full_target, ("#393939", "#A9A9A9"), "jar"),
             ("Подушка", pillow_balance, None, pillow_target, (PILLOW_COLOR,), "shield"),
-            ("Стабилизатор", stabilizer_balance, stabilizer_critical_target,
-             stabilizer_full_target,
-             (STABILIZER_CRITICAL_COLOR, STABILIZER_SUSTAINABLE_COLOR), "flask"),
         ]
 
     image = Image.new("RGB", (1080, 1200), BACKGROUND)
@@ -333,10 +330,10 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
     legend_items = reserve_legend_items(
         stabilizer_balance=stabilizer_balance,
         stabilizer_critical_target=(
-            stabilizer_critical_target if profile_id in {"piecework", "cyclic"} else Decimal("0")
+            stabilizer_critical_target if profile_id == "piecework" else Decimal("0")
         ),
         stabilizer_full_target=(
-            stabilizer_full_target if profile_id in {"piecework", "cyclic"} else Decimal("0")
+            stabilizer_full_target if profile_id == "piecework" else Decimal("0")
         ),
         stabilizer_months=stabilizer_months,
         salary_fund_balance=salary_fund_balance,
@@ -345,7 +342,7 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
         salary_fund_months=salary_fund_months,
         pillow_balance=pillow_balance,
         pillow_target=(
-            pillow_target if profile_id in {"stable", "piecework", "debt_level_one"} else Decimal("0")
+            pillow_target if profile_id in {"stable", "piecework", "cyclic", "debt_level_one"} else Decimal("0")
         ),
         pillow_months=pillow_months,
         pillow_legend_label=("Минимальная подушка" if profile_id == "debt_level_one" else "Форс-мажор"),
@@ -359,13 +356,19 @@ def render_reserve_card(profile_id: str, *, pillow_balance: Decimal, pillow_targ
             "#A9A9A9": (0, 0), STABILIZER_SUSTAINABLE_COLOR: (1, 0),
             "#393939": (0, 1), STABILIZER_CRITICAL_COLOR: (1, 1),
         }
-        for color, text in legend_items:
-            column, row = legend_slots[color]
-            center_x = 540 if len(vessels) == 1 else 297 + column * 486
-            y = 1067 if len(vessels) == 1 else 1042 + row * 50
+        for index, (color, text) in enumerate(legend_items):
+            if profile_id == "cyclic":
+                center_x = 540
+                y = 1027 + index * 38
+                maximum_text_width = 760
+            else:
+                column, row = legend_slots[color]
+                center_x = 540 if len(vessels) == 1 else 297 + column * 486
+                y = 1067 if len(vessels) == 1 else 1042 + row * 50
+                maximum_text_width = 390
             legend_size = 22
             legend_font = font(legend_size)
-            while draw.textlength(text, font=legend_font) > 390 and legend_size > 14:
+            while draw.textlength(text, font=legend_font) > maximum_text_width and legend_size > 14:
                 legend_size -= 1
                 legend_font = font(legend_size)
             text_width = draw.textlength(text, font=legend_font)

@@ -153,7 +153,7 @@ def deserialize_json(value):
 
 def serialize_income_types(settings: UserSettings) -> str:
     return serialize_json({
-        "version": 15,
+        "version": 18,
         "rates": {
             name: decimal_to_string(rate)
             for name, rate in settings.income_type_tax_rates.items()
@@ -174,6 +174,7 @@ def serialize_income_types(settings: UserSettings) -> str:
         "work_months": decimal_to_string(settings.income_work_months),
         "reliable_gap_income": decimal_to_string(settings.reliable_gap_income),
         "stabilizer_months": decimal_to_string(settings.stabilizer_target_months),
+        "cyclic_income_uncertain": settings.cyclic_income_uncertain,
         "contract_obligations": {
             name: decimal_to_string(amount)
             for name, amount in settings.contract_obligations.items()
@@ -186,6 +187,9 @@ def serialize_income_types(settings: UserSettings) -> str:
         "household_reserve_category_ids": dict(
             settings.household_reserve_category_ids
         ),
+        "critical_life_breakdown": list(settings.critical_life_breakdown),
+        "household_reserve_breakdown": list(settings.household_reserve_breakdown),
+        "critical_life_storage_items": list(settings.critical_life_storage_items),
         "historical_gifts_monthly": decimal_to_string(settings.historical_gifts_monthly),
         "protective_stage_c_goals_share": decimal_to_string(
             settings.protective_stage_c_goals_share
@@ -205,6 +209,9 @@ def serialize_income_types(settings: UserSettings) -> str:
                     name: decimal_to_string(amount)
                     for name, amount in budget.household_reserve_categories.items()
                 },
+                "critical_life_breakdown": list(budget.critical_life_breakdown),
+                "household_reserve_breakdown": list(budget.household_reserve_breakdown),
+                "critical_life_storage_items": list(budget.critical_life_storage_items),
                 "historical_gifts_monthly": decimal_to_string(budget.historical_gifts_monthly),
                 "currency_code": budget.currency_code,
                 "currency_symbol": budget.currency_symbol,
@@ -220,7 +227,7 @@ def serialize_income_types(settings: UserSettings) -> str:
 
 def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], dict[str, Decimal]]:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}:
+    if isinstance(raw, dict) and raw.get("version") in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}:
         rates = {
             str(name): string_to_decimal(rate)
             for name, rate in raw.get("rates", {}).items()
@@ -232,7 +239,7 @@ def deserialize_income_types(value, legacy_rate: Decimal) -> tuple[list[str], di
 
 def deserialize_income_rhythm(value) -> dict:
     raw = deserialize_json(value)
-    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}:
+    if isinstance(raw, dict) and raw.get("version") in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}:
         rhythm = str(raw.get("rhythm", "monthly"))
         return {
             "income_rhythm": rhythm,
@@ -240,7 +247,13 @@ def deserialize_income_rhythm(value) -> dict:
             "income_gap_months": max(Decimal("1"), string_to_decimal(raw.get("gap_months", "1"))),
             "income_work_months": max(Decimal("1"), string_to_decimal(raw.get("work_months", "1"))),
             "reliable_gap_income": max(Decimal("0"), string_to_decimal(raw.get("reliable_gap_income", "0"))),
-            "stabilizer_target_months": max(Decimal("1"), string_to_decimal(raw.get("stabilizer_months", "1" if rhythm != "cyclic" else "2"))),
+            "stabilizer_target_months": max(Decimal("1"), string_to_decimal(raw.get("stabilizer_months", "1"))),
+            # Старые циклические профили не фиксировали предсказуемость сроков.
+            # Выбираем осторожный вариант: плавающий цикл и ручная проверка.
+            "cyclic_income_uncertain": bool(raw.get(
+                "cyclic_income_uncertain",
+                raw.get("cyclic_stabilizer_enabled", True),
+            )),
             "contract_obligations": {
                 str(name): string_to_decimal(amount)
                 for name, amount in raw.get("contract_obligations", {}).items()
@@ -260,6 +273,21 @@ def deserialize_income_rhythm(value) -> dict:
                 ).items()
                 if str(name).strip() and str(uid).strip()
             },
+            "critical_life_breakdown": [
+                dict(item)
+                for item in raw.get("critical_life_breakdown", [])
+                if isinstance(item, dict)
+            ],
+            "household_reserve_breakdown": [
+                dict(item)
+                for item in raw.get("household_reserve_breakdown", [])
+                if isinstance(item, dict)
+            ],
+            "critical_life_storage_items": [
+                dict(item)
+                for item in raw.get("critical_life_storage_items", [])
+                if isinstance(item, dict)
+            ],
             "income_type_ids": {
                 str(name): str(uid)
                 for name, uid in raw.get("income_type_ids", {}).items()
@@ -310,6 +338,15 @@ def deserialize_income_rhythm(value) -> dict:
                     life_categories=budget.get("life_categories", {}),
                     household_reserve_categories=budget.get(
                         "household_reserve_categories", {}
+                    ),
+                    critical_life_breakdown=budget.get(
+                        "critical_life_breakdown", []
+                    ),
+                    household_reserve_breakdown=budget.get(
+                        "household_reserve_breakdown", []
+                    ),
+                    critical_life_storage_items=budget.get(
+                        "critical_life_storage_items", []
                     ),
                     historical_gifts_monthly=budget.get("historical_gifts_monthly", "0"),
                     currency_code=budget.get("currency_code", "RUB"),
@@ -545,6 +582,7 @@ class Database:
 
                 calculate_interest_savings INTEGER NOT NULL,
                 developer_mode INTEGER NOT NULL,
+                allocation_needs_review INTEGER NOT NULL DEFAULT 0,
 
                 FOREIGN KEY (telegram_id)
                     REFERENCES users(telegram_id)
@@ -575,6 +613,33 @@ class Database:
             """
         )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS income_forecast_maintenance (
+                telegram_id INTEGER PRIMARY KEY,
+                piecework_updated_for TEXT,
+                cyclic_updated_for TEXT,
+                stable_last_reviewed_at TEXT,
+                stable_last_reminder_at TEXT,
+                FOREIGN KEY (telegram_id)
+                    REFERENCES users(telegram_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        maintenance_columns = {
+            row["name"]
+            for row in cursor.execute(
+                "PRAGMA table_info(income_forecast_maintenance)"
+            ).fetchall()
+        }
+        if "cyclic_updated_for" not in maintenance_columns:
+            cursor.execute(
+                "ALTER TABLE income_forecast_maintenance "
+                "ADD COLUMN cyclic_updated_for TEXT"
+            )
+
         # ----------------------------------------------------
         # Цели
         # ----------------------------------------------------
@@ -589,6 +654,7 @@ class Database:
                 name TEXT NOT NULL,
                 uid TEXT NOT NULL DEFAULT '',
                 is_system_chest INTEGER NOT NULL DEFAULT 0,
+                color_index INTEGER,
                 percentage TEXT NOT NULL,
                 balance TEXT NOT NULL,
                 position_type TEXT NOT NULL DEFAULT 'goal',
@@ -1057,6 +1123,11 @@ class Database:
                 "ALTER TABLE settings ADD COLUMN automatic_life_obligations "
                 "TEXT NOT NULL DEFAULT '{}'"
             )
+        if "allocation_needs_review" not in settings_columns:
+            cursor.execute(
+                "ALTER TABLE settings ADD COLUMN allocation_needs_review "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
 
         goal_columns = {
             row["name"]
@@ -1082,6 +1153,7 @@ class Database:
             "previous_percentage": "TEXT",
             "uid": "TEXT NOT NULL DEFAULT ''",
             "is_system_chest": "INTEGER NOT NULL DEFAULT 0",
+            "color_index": "INTEGER",
         }
         for column_name, column_sql in goal_migrations.items():
             if column_name not in goal_columns:
@@ -1164,6 +1236,110 @@ class Database:
         ).fetchone()
 
         return row is not None
+
+    def users_with_created_at(self) -> list[tuple[int, date]]:
+        rows = self.connection.execute(
+            "SELECT telegram_id, created_at FROM users ORDER BY telegram_id"
+        ).fetchall()
+        result: list[tuple[int, date]] = []
+        for row in rows:
+            try:
+                created = date.fromisoformat(str(row["created_at"])[:10])
+            except (TypeError, ValueError):
+                continue
+            result.append((int(row["telegram_id"]), created))
+        return result
+
+    def income_forecast_maintenance(self, telegram_id: int) -> dict:
+        row = self.connection.execute(
+            """
+            SELECT piecework_updated_for, cyclic_updated_for, stable_last_reviewed_at,
+                   stable_last_reminder_at
+            FROM income_forecast_maintenance
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "piecework_updated_for": None,
+                "cyclic_updated_for": None,
+                "stable_last_reviewed_at": None,
+                "stable_last_reminder_at": None,
+            }
+        return dict(row)
+
+    def mark_cyclic_average_updated(
+        self,
+        telegram_id: int,
+        completed_month: str,
+    ) -> None:
+        self.ensure_user(telegram_id)
+        self.connection.execute(
+            """
+            INSERT INTO income_forecast_maintenance (
+                telegram_id, cyclic_updated_for
+            ) VALUES (?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                cyclic_updated_for = excluded.cyclic_updated_for
+            """,
+            (telegram_id, completed_month),
+        )
+        self._commit()
+
+    def mark_piecework_average_updated(
+        self,
+        telegram_id: int,
+        completed_month: str,
+    ) -> None:
+        self.ensure_user(telegram_id)
+        self.connection.execute(
+            """
+            INSERT INTO income_forecast_maintenance (
+                telegram_id, piecework_updated_for
+            ) VALUES (?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                piecework_updated_for = excluded.piecework_updated_for
+            """,
+            (telegram_id, completed_month),
+        )
+        self._commit()
+
+    def mark_stable_income_reviewed(
+        self,
+        telegram_id: int,
+        reviewed_on: str,
+    ) -> None:
+        self.ensure_user(telegram_id)
+        self.connection.execute(
+            """
+            INSERT INTO income_forecast_maintenance (
+                telegram_id, stable_last_reviewed_at
+            ) VALUES (?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                stable_last_reviewed_at = excluded.stable_last_reviewed_at
+            """,
+            (telegram_id, reviewed_on),
+        )
+        self._commit()
+
+    def mark_stable_income_reminder_sent(
+        self,
+        telegram_id: int,
+        reminded_on: str,
+    ) -> None:
+        self.ensure_user(telegram_id)
+        self.connection.execute(
+            """
+            INSERT INTO income_forecast_maintenance (
+                telegram_id, stable_last_reminder_at
+            ) VALUES (?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                stable_last_reminder_at = excluded.stable_last_reminder_at
+            """,
+            (telegram_id, reminded_on),
+        )
+        self._commit()
 
     def get_financial_archetype(self, telegram_id: int) -> str | None:
         """Return the saved archetype slug, if the user has chosen one."""
@@ -1319,7 +1495,8 @@ class Database:
                 debt_strategy,
 
                 calculate_interest_savings,
-                developer_mode
+                developer_mode,
+                allocation_needs_review
             )
 
             VALUES (
@@ -1332,7 +1509,7 @@ class Database:
                 ?, ?,
                 ?,
                 ?,
-                ?, ?, ?
+                ?, ?, ?, ?
             )
 
             ON CONFLICT(telegram_id)
@@ -1411,7 +1588,10 @@ class Database:
                     excluded.calculate_interest_savings,
 
                 developer_mode =
-                    excluded.developer_mode
+                    excluded.developer_mode,
+
+                allocation_needs_review =
+                    excluded.allocation_needs_review
             """,
             (
                 telegram_id,
@@ -1498,6 +1678,8 @@ class Database:
                 int(
                     settings.developer_mode
                 ),
+
+                int(settings.allocation_needs_review),
             ),
         )
 
@@ -1522,6 +1704,7 @@ class Database:
                     name,
                     uid,
                     is_system_chest,
+                    color_index,
                     percentage,
                     balance,
                     position_type,
@@ -1540,7 +1723,7 @@ class Database:
                     previous_percentage
                 )
 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     telegram_id,
@@ -1550,6 +1733,8 @@ class Database:
                     goal.uid,
 
                     int(goal.is_system_chest),
+
+                    goal.color_index,
 
                     decimal_to_string(
                         goal.percentage
@@ -1708,6 +1893,8 @@ class Database:
                     uid=goal_row["uid"],
 
                     is_system_chest=bool(goal_row["is_system_chest"]),
+
+                    color_index=goal_row["color_index"],
 
                     percentage=
                         string_to_decimal(
@@ -1935,6 +2122,9 @@ class Database:
                 ),
 
             goals=goals,
+
+            allocation_needs_review=
+                bool(row["allocation_needs_review"]),
 
             credits=credits,
 
@@ -2751,6 +2941,20 @@ class Database:
             )
         return result
 
+    def load_income_distribution_payloads(self, telegram_id: int) -> list[dict]:
+        """Load canonical income payloads for rolling forecast statistics."""
+        rows = self.connection.execute(
+            """
+            SELECT payload
+            FROM operation_log
+            WHERE telegram_id = ?
+              AND operation_type = 'income_distribution'
+            ORDER BY id ASC
+            """,
+            (telegram_id,),
+        ).fetchall()
+        return [deserialize_json(row["payload"]) for row in rows]
+
     def update_income_note(
         self,
         telegram_id: int,
@@ -2992,6 +3196,10 @@ class Database:
             settings=settings,
             state=state,
         )
+
+        # Forecast statistics can then read the canonical SQL ledger without
+        # copying an unbounded operation history into every allocator state.
+        allocator.telegram_id = telegram_id
 
         self.normalize_envelope_names(telegram_id, allocator)
 
@@ -3616,6 +3824,62 @@ class Database:
             )
         self._commit()
 
+    def change_tax_obligation_type(
+        self,
+        telegram_id: int,
+        obligation_id: int,
+        old_type: str,
+        object_name: str,
+        new_type: str,
+    ) -> None:
+        """Move one active tax lifecycle to another type without losing history."""
+        old_key = f"{old_type} · {object_name}"
+        new_key = f"{new_type} · {object_name}"
+        selected = self.connection.execute(
+            """
+            SELECT tracking_started_operation_id, tracking_closed_operation_id
+            FROM tax_obligations
+            WHERE telegram_id = ? AND id = ? AND tax_type = ? AND object_name = ?
+            """,
+            (telegram_id, obligation_id, old_type, object_name),
+        ).fetchone()
+        if selected is None:
+            return
+        start_id = int(selected["tracking_started_operation_id"] or 0)
+        close_id = selected["tracking_closed_operation_id"]
+        rows = self.connection.execute(
+            "SELECT id, payload FROM operation_log WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchall()
+        for row in rows:
+            if int(row["id"]) <= start_id or (
+                close_id is not None and int(row["id"]) > int(close_id)
+            ):
+                continue
+            payload = deserialize_json(row["payload"])
+            details = payload.get("planned_tax_details")
+            if not isinstance(details, dict) or old_key not in details:
+                continue
+            old_value = string_to_decimal(details.pop(old_key))
+            new_value = string_to_decimal(details.get(new_key, "0"))
+            details[new_key] = decimal_to_string(old_value + new_value)
+            self.connection.execute(
+                "UPDATE operation_log SET payload = ? WHERE id = ? AND telegram_id = ?",
+                (serialize_json(payload), row["id"], telegram_id),
+            )
+        self.connection.execute(
+            "UPDATE tax_obligations SET tax_type = ? WHERE telegram_id = ? AND id = ?",
+            (new_type, telegram_id, obligation_id),
+        )
+        self.connection.execute(
+            """
+            UPDATE tax_payments SET tax_name = ?
+            WHERE telegram_id = ? AND obligation_id = ?
+            """,
+            (new_key, telegram_id, obligation_id),
+        )
+        self._commit()
+
     def update_tax_obligation_plan(
         self,
         telegram_id: int,
@@ -3626,13 +3890,15 @@ class Database:
         monthly_amount: Decimal,
         annual_monthly_amount: Decimal,
         monthly_period: str | None = None,
+        due_date: str | None = None,
     ) -> None:
         monthly_period = monthly_period or moscow_today().strftime("%Y-%m")
         self.connection.execute(
             """
             UPDATE tax_obligations
             SET target_amount = ?, months = ?, monthly_amount = ?,
-                annual_monthly_amount = ?, monthly_period = ?
+                annual_monthly_amount = ?, monthly_period = ?,
+                due_date = COALESCE(?, due_date)
             WHERE telegram_id = ? AND id = ? AND active = 1
             """,
             (
@@ -3641,6 +3907,7 @@ class Database:
                 decimal_to_string(monthly_amount),
                 decimal_to_string(annual_monthly_amount),
                 monthly_period,
+                due_date,
                 telegram_id,
                 obligation_id,
             ),

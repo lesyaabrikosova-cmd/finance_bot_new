@@ -30,8 +30,6 @@ def profile_route(profile: str, include_debt_stages: bool = True) -> tuple[str, 
             "Фонд Зарплаты-КМ",
             "Фонд Зарплаты-УЖ",
             "ФМ-подушка",
-            "Стабилизатор-КМ",
-            "Стабилизатор-УЖ",
             "Максимальный уровень",
         ),
     }
@@ -46,7 +44,6 @@ class CyclicIncomePlan:
     gap_months: int
     critical_life: Decimal
     sustainable_life: Decimal
-    delay_months: int = 2
     force_majeure_months: int = 6
 
     def __post_init__(self):
@@ -54,7 +51,7 @@ class CyclicIncomePlan:
             raise ValueError("Рабочая и межконтрактная части цикла должны быть положительными.")
         if self.critical_life <= ZERO or self.sustainable_life < self.critical_life:
             raise ValueError("Устойчивая жизнь не может быть меньше Критического минимума.")
-        if self.delay_months < 1 or not 3 <= self.force_majeure_months <= 6:
+        if not 6 <= self.force_majeure_months <= 12:
             raise ValueError("Некорректный горизонт защитных резервов.")
 
     @property
@@ -86,14 +83,6 @@ class CyclicIncomePlan:
     def force_majeure(self) -> Decimal:
         return self.critical_life * self.force_majeure_months
 
-    @property
-    def stabilizer_critical(self) -> Decimal:
-        return self.critical_life * self.delay_months
-
-    @property
-    def stabilizer_full(self) -> Decimal:
-        return self.sustainable_life * self.delay_months
-
     def remaining_intercontract_target(self, months_left: int) -> Decimal:
         if not 0 <= months_left <= self.gap_months:
             raise ValueError("Остаток месяцев находится за пределами цикла.")
@@ -109,8 +98,6 @@ class CyclicIncomePlan:
             ("Фонд Зарплаты-КМ", self.intercontract_critical),
             ("Фонд Зарплаты-УЖ", self.intercontract_full - self.intercontract_critical),
             ("ФМ-подушка", self.force_majeure),
-            ("Стабилизатор-КМ", self.stabilizer_critical),
-            ("Стабилизатор-УЖ", self.stabilizer_full - self.stabilizer_critical),
         )
         remaining = available
         for name, target in layers:

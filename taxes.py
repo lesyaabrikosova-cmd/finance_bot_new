@@ -187,6 +187,7 @@ class TaxStates(StatesGroup):
     next_obligation_amount = State()
     edit_obligation_name = State()
     edit_obligation_amount = State()
+    edit_obligation_due_date = State()
 
 
 _PAYMENT_CONFIRM_LOCKS: dict[int, asyncio.Lock] = {}
@@ -1076,8 +1077,8 @@ def tax_obligation_card_text(
 def tax_navigation(back_callback: str) -> list[tuple[str, str]]:
     """Standard navigation row for every nested tax screen."""
     return [
-        ("← Главное меню", "taxes:back"),
         ("← Назад", back_callback),
+        ("← Главное меню", "taxes:back"),
     ]
 
 
@@ -1183,7 +1184,7 @@ async def show_self_employed_rate_menu(message: Message) -> None:
             [("НПД · ФЛ · 4%", "taxincome:npd:physical:4"), ("НПД · ФЛ · 3%", "taxincome:npd:physical:3")],
             [("НПД · ЮЛ · 6%", "taxincome:npd:business:6"), ("НПД · ЮЛ · 4%", "taxincome:npd:business:4")],
             [("Своя ставка", "taxincome:subject:self_employed")],
-            [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")],
+            [("← Назад", "taxes:income"), ("← Главное меню", "taxes:back")],
         ]),
     )
 
@@ -1198,7 +1199,7 @@ async def show_ip_usn_rate_menu(message: Message) -> None:
         "Базовый вариант — 6%; если у вас действует другая ставка, укажите её вручную.",
         reply_markup=keyboard([
             [("ИП · УСН · 6%", "taxincome:usn:6"), ("Своя ставка", "taxincome:usn:custom")],
-            [("← Главное меню", "taxes:back"), ("← Назад", "taxes:income")],
+            [("← Назад", "taxes:income"), ("← Главное меню", "taxes:back")],
         ]),
     )
 
@@ -2221,12 +2222,12 @@ async def start_patent_setup(
         "• Репетиторство\n"
         "• Ремонт техники",
         reply_markup=keyboard([[
-            ("← Главное меню", "taxes:back"),
             (
                 "← Назад",
                 "incomesettings:rule_subject:ip"
                 if attach_income_type else "incomesettings:list",
             ),
+            ("← Главное меню", "taxes:back"),
         ]]),
     )
 
@@ -2309,7 +2310,7 @@ async def tax_obligation_name(message: Message, state: FSMContext):
             "Посмотрите точные суммы и даты в патенте или в личном кабинете ФНС.",
             reply_markup=keyboard([
                 [("Один платёж", "patent:payments:1"), ("Два платежа", "patent:payments:2")],
-                [("← Главное меню", "taxes:back"), ("← Назад", "taxes:patent:restart")],
+                [("← Назад", "taxes:patent:restart"), ("← Главное меню", "taxes:back")],
             ]),
         )
         return
@@ -2430,8 +2431,8 @@ async def patent_payment_count(callback: CallbackQuery, state: FSMContext):
         "<b>ПЕРВЫЙ ПЛАТЁЖ</b>\n\n"
         "Введите точную сумму из патента или личного кабинета ФНС.",
         reply_markup=keyboard([[
-            ("← Главное меню", "taxes:back"),
             ("← Назад", "taxes:patent:payment_count"),
+            ("← Главное меню", "taxes:back"),
         ]]),
     )
 
@@ -2447,7 +2448,7 @@ async def patent_payment_count_back(callback: CallbackQuery, state: FSMContext):
         "Посмотрите точные суммы и даты в патенте или в личном кабинете ФНС.",
         reply_markup=keyboard([
             [("Один платёж", "patent:payments:1"), ("Два платежа", "patent:payments:2")],
-            [("← Главное меню", "taxes:back"), ("← Назад", "taxes:patent:restart")],
+            [("← Назад", "taxes:patent:restart"), ("← Главное меню", "taxes:back")],
         ]),
     )
 
@@ -2458,7 +2459,7 @@ async def patent_first_amount(message: Message, state: FSMContext):
     if amount is None:
         await message.answer(
             "Введите положительную сумму, например <code>30000</code>.",
-            reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:payment_count')]]),
+            reply_markup=keyboard([[('← Назад', 'taxes:patent:payment_count'), ('← Главное меню', 'taxes:back')]]),
         )
         return
     await state.update_data(patent_first_amount=str(amount))
@@ -2467,7 +2468,7 @@ async def patent_first_amount(message: Message, state: FSMContext):
         "<b>ПЕРВЫЙ ПЛАТЁЖ</b>\n\n"
         "До какой даты его нужно оплатить?\n\n"
         "Введите дату в формате <code>ДД.ММ.ГГГГ</code>.",
-        reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:first_amount')]]),
+        reply_markup=keyboard([[('← Назад', 'taxes:patent:first_amount'), ('← Главное меню', 'taxes:back')]]),
     )
 
 
@@ -2477,7 +2478,7 @@ async def patent_first_amount_back(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TaxStates.patent_first_amount)
     await callback.message.answer(
         "<b>ПЕРВЫЙ ПЛАТЁЖ</b>\n\nВведите точную сумму.",
-        reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:payment_count')]]),
+        reply_markup=keyboard([[('← Назад', 'taxes:patent:payment_count'), ('← Главное меню', 'taxes:back')]]),
     )
 
 
@@ -2487,7 +2488,7 @@ async def patent_first_due_date(message: Message, state: FSMContext):
     if due is None:
         await message.answer(
             "Введите будущую дату в формате ДД.ММ.ГГГГ.",
-            reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:first_amount')]]),
+            reply_markup=keyboard([[('← Назад', 'taxes:patent:first_amount'), ('← Главное меню', 'taxes:back')]]),
         )
         return
     data = await state.get_data()
@@ -2499,7 +2500,7 @@ async def patent_first_due_date(message: Message, state: FSMContext):
     await message.answer(
         "<b>ВТОРОЙ ПЛАТЁЖ</b>\n\n"
         "Введите точную сумму из патента или личного кабинета ФНС.",
-        reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:first_amount')]]),
+        reply_markup=keyboard([[('← Назад', 'taxes:patent:first_amount'), ('← Главное меню', 'taxes:back')]]),
     )
 
 
@@ -2515,7 +2516,7 @@ async def patent_second_amount(message: Message, state: FSMContext):
         "<b>ВТОРОЙ ПЛАТЁЖ</b>\n\n"
         "До какой даты его нужно оплатить?\n\n"
         "Введите дату в формате <code>ДД.ММ.ГГГГ</code>.",
-        reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:second_amount')]]),
+        reply_markup=keyboard([[('← Назад', 'taxes:patent:second_amount'), ('← Главное меню', 'taxes:back')]]),
     )
 
 
@@ -2525,7 +2526,7 @@ async def patent_second_amount_back(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TaxStates.patent_second_amount)
     await callback.message.answer(
         "<b>ВТОРОЙ ПЛАТЁЖ</b>\n\nВведите точную сумму.",
-        reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:first_amount')]]),
+        reply_markup=keyboard([[('← Назад', 'taxes:patent:first_amount'), ('← Главное меню', 'taxes:back')]]),
     )
 
 
@@ -2535,7 +2536,7 @@ async def patent_second_due_date(message: Message, state: FSMContext):
     if due is None:
         await message.answer(
             "Введите будущую дату в формате ДД.ММ.ГГГГ.",
-            reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:second_amount')]]),
+            reply_markup=keyboard([[('← Назад', 'taxes:patent:second_amount'), ('← Главное меню', 'taxes:back')]]),
         )
         return
     data = await state.get_data()
@@ -2543,7 +2544,7 @@ async def patent_second_due_date(message: Message, state: FSMContext):
     if due <= first_due:
         await message.answer(
             "Второй платёж должен быть позже первого. Проверьте дату.",
-            reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:second_amount')]]),
+            reply_markup=keyboard([[('← Назад', 'taxes:patent:second_amount'), ('← Главное меню', 'taxes:back')]]),
         )
         return
     await state.update_data(patent_second_due_date=due.isoformat())
@@ -2610,7 +2611,7 @@ async def patent_save(callback: CallbackQuery, state: FSMContext):
     if duplicates:
         await callback.message.answer(
             "Такой платёж уже есть: " + ", ".join(escape(name) for name in duplicates) + ".",
-            reply_markup=keyboard([[('← Главное меню', 'taxes:back'), ('← Назад', 'taxes:patent:restart')]]),
+            reply_markup=keyboard([[('← Назад', 'taxes:patent:restart'), ('← Главное меню', 'taxes:back')]]),
         )
         return
     with db.transaction():
@@ -2849,7 +2850,13 @@ async def save_tax_obligation(
     )
 
 
-async def show_tax_obligations_edit(message: Message, telegram_id: int, notice: str = "") -> None:
+async def show_tax_obligations_edit(
+    message: Message,
+    telegram_id: int,
+    notice: str = "",
+    *,
+    back_callback: str = "menu:taxes",
+) -> None:
     obligations = db.load_tax_obligations(telegram_id)
     rows = [
         [(f"{item['tax_type']}: {item['object_name']}", f"taxgoal:view:{item['id']}")]
@@ -2857,8 +2864,8 @@ async def show_tax_obligations_edit(message: Message, telegram_id: int, notice: 
     ]
     rows.append([("＋ Добавить налог", "taxes:add")])
     rows.append([
+        ("← Назад", back_callback),
         ("← Главное меню", "taxes:back"),
-        ("← Назад", "menu:taxes"),
     ])
     body = "<b>ПЛАНОВЫЕ НАЛОГИ</b>"
     if notice:
@@ -2961,13 +2968,18 @@ async def show_tax_obligation(
     key = tax_obligation_key(item["tax_type"], item["object_name"])
     virtually_saved = virtual_tax_balance(telegram_id, key, obligation_id)
     allocator = db.load_allocator(telegram_id)
+    edit_rows = [[
+        ("✎ Название", f"taxgoal:edit_name:{obligation_id}"),
+        ("✎ Сумма", f"taxgoal:edit_amount:{obligation_id}"),
+    ]]
+    if item["tax_type"] != "Патент":
+        edit_rows.append([("✎ Тип налога", f"taxgoal:edit_type:{obligation_id}")])
+    if item.get("due_date") and item["tax_type"] not in ANNUAL_PROPERTY_TAXES:
+        edit_rows.append([("✎ Дата платежа", f"taxgoal:edit_date:{obligation_id}")])
     await message.answer(
         tax_obligation_card_text(item, virtually_saved, allocator),
         reply_markup=keyboard([
-            [
-                ("✎ Название", f"taxgoal:edit_name:{obligation_id}"),
-                ("✎ Сумма", f"taxgoal:edit_amount:{obligation_id}"),
-            ],
+            *edit_rows,
             [("🗑️ Удалить из плана", f"taxgoal:delete:{obligation_id}")],
             tax_completion_navigation("taxes:edit") if completed else tax_navigation("taxes:edit"),
         ]),
@@ -3056,6 +3068,173 @@ async def tax_obligation_save_name(message: Message, state: FSMContext):
             if catchup > ZERO:
                 allocator.settings.tax_catchups[new_key] = catchup
             db.save_allocator(message.from_user.id, allocator)
+    await state.clear()
+    await show_tax_obligation(message, message.from_user.id, obligation_id, completed=True)
+
+
+@router.callback_query(F.data.regexp(r"^taxgoal:edit_type:\d+$"))
+async def tax_obligation_edit_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    obligation_id = int(callback.data.rsplit(":", 1)[1])
+    item = next(
+        (item for item in db.load_tax_obligations(callback.from_user.id) if item["id"] == obligation_id),
+        None,
+    )
+    if item is None or item["tax_type"] == "Патент":
+        await show_tax_obligations_edit(callback.message, callback.from_user.id, "Налог не найден.")
+        return
+    await callback.message.answer(
+        "Выберите новый тип налога.",
+        reply_markup=keyboard([
+            [("Налог на имущество", f"taxgoal:set_type:property:{obligation_id}")],
+            [("Транспортный налог", f"taxgoal:set_type:transport:{obligation_id}")],
+            [("Земельный налог", f"taxgoal:set_type:land:{obligation_id}")],
+            [("Другой налог", f"taxgoal:set_type:other:{obligation_id}")],
+            tax_navigation(f"taxgoal:view:{obligation_id}"),
+        ]),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^taxgoal:set_type:[a-z_]+:\d+$"))
+async def tax_obligation_save_type(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    _, _, code, raw_id = callback.data.split(":", 3)
+    obligation_id = int(raw_id)
+    labels = {
+        "property": "Налог на имущество",
+        "transport": "Транспортный налог",
+        "land": "Земельный налог",
+        "other": "Другой налог",
+    }
+    new_type = labels.get(code)
+    item = next(
+        (item for item in db.load_tax_obligations(callback.from_user.id) if item["id"] == obligation_id),
+        None,
+    )
+    if item is None or new_type is None:
+        await show_tax_obligations_edit(callback.message, callback.from_user.id, "Налог не найден.")
+        return
+    if item["tax_type"] == new_type:
+        await show_tax_obligation(callback.message, callback.from_user.id, obligation_id)
+        return
+    duplicate = next(
+        (
+            row for row in db.load_tax_obligations(callback.from_user.id)
+            if row["id"] != obligation_id
+            and row["tax_type"] == new_type
+            and row["object_name"].casefold() == item["object_name"].casefold()
+        ),
+        None,
+    )
+    if duplicate is not None:
+        await callback.message.answer("Налог такого типа с этим названием уже существует.")
+        return
+    today = moscow_today()
+    due = (
+        annual_tax_due_date(today)
+        if new_type in ANNUAL_PROPERTY_TAXES
+        else date.fromisoformat(item["due_date"])
+    )
+    months = tax_months_remaining(new_type, due, today)
+    remaining = max(ZERO, item["target_amount"] - item["saved_before"])
+    monthly = (
+        (remaining / Decimal(months)).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+        if remaining > ZERO else ZERO
+    )
+    annual_monthly = (
+        (item["target_amount"] / Decimal("12")).quantize(
+            Decimal("0.01"), rounding=ROUND_CEILING,
+        )
+        if new_type in ANNUAL_PROPERTY_TAXES else ZERO
+    )
+    old_key = tax_obligation_key(item["tax_type"], item["object_name"])
+    new_key = tax_obligation_key(new_type, item["object_name"])
+    with db.transaction():
+        db.change_tax_obligation_type(
+            callback.from_user.id,
+            obligation_id,
+            item["tax_type"],
+            item["object_name"],
+            new_type,
+        )
+        db.update_tax_obligation_plan(
+            callback.from_user.id,
+            obligation_id,
+            target_amount=item["target_amount"],
+            months=months,
+            monthly_amount=monthly,
+            annual_monthly_amount=annual_monthly,
+            due_date=due.isoformat(),
+        )
+        allocator = db.load_allocator(callback.from_user.id)
+        if allocator is not None:
+            allocator.settings.tax_catchups.pop(old_key, None)
+            if monthly > ZERO:
+                allocator.settings.tax_catchups[new_key] = monthly
+            set_tax_monthly_target(allocator, old_key, ZERO)
+            db.save_allocator(callback.from_user.id, allocator)
+    await state.clear()
+    await show_tax_obligation(callback.message, callback.from_user.id, obligation_id, completed=True)
+
+
+@router.callback_query(F.data.regexp(r"^taxgoal:edit_date:\d+$"))
+async def tax_obligation_edit_date(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    obligation_id = int(callback.data.rsplit(":", 1)[1])
+    item = next(
+        (item for item in db.load_tax_obligations(callback.from_user.id) if item["id"] == obligation_id),
+        None,
+    )
+    if item is None or item["tax_type"] in ANNUAL_PROPERTY_TAXES:
+        await show_tax_obligations_edit(callback.message, callback.from_user.id, "Налог не найден.")
+        return
+    await state.update_data(tax_edit_obligation_id=obligation_id)
+    await state.set_state(TaxStates.edit_obligation_due_date)
+    await callback.message.answer(
+        "Введите новую будущую дату в формате <code>ДД.ММ.ГГГГ</code>.",
+        reply_markup=keyboard([tax_navigation(f"taxgoal:view:{obligation_id}")]),
+    )
+
+
+@router.message(TaxStates.edit_obligation_due_date, F.text & ~F.text.startswith("/"))
+async def tax_obligation_save_date(message: Message, state: FSMContext):
+    due = parse_future_date(message.text)
+    if due is None:
+        await message.answer("Введите будущую дату в формате ДД.ММ.ГГГГ.")
+        return
+    data = await state.get_data()
+    obligation_id = int(data.get("tax_edit_obligation_id", 0))
+    item = next(
+        (item for item in db.load_tax_obligations(message.from_user.id) if item["id"] == obligation_id),
+        None,
+    )
+    if item is None:
+        await state.clear()
+        await show_tax_obligations_edit(message, message.from_user.id, "Налог не найден.")
+        return
+    months = tax_months_remaining(item["tax_type"], due, moscow_today())
+    remaining = max(ZERO, item["target_amount"] - item["saved_before"])
+    monthly = (
+        (remaining / Decimal(months)).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+        if remaining > ZERO else ZERO
+    )
+    db.update_tax_obligation_plan(
+        message.from_user.id,
+        obligation_id,
+        target_amount=item["target_amount"],
+        months=months,
+        monthly_amount=monthly,
+        annual_monthly_amount=item["annual_monthly_amount"],
+        due_date=due.isoformat(),
+    )
+    allocator = db.load_allocator(message.from_user.id)
+    if allocator is not None:
+        key = tax_obligation_key(item["tax_type"], item["object_name"])
+        if monthly > ZERO:
+            allocator.settings.tax_catchups[key] = monthly
+        else:
+            allocator.settings.tax_catchups.pop(key, None)
+        db.save_allocator(message.from_user.id, allocator)
     await state.clear()
     await show_tax_obligation(message, message.from_user.id, obligation_id, completed=True)
 

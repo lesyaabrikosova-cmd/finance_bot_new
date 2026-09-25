@@ -6,6 +6,7 @@ import asyncio
 from aiogram.types import BufferedInputFile
 
 PALETTE = ('#9675E5', '#55B5DB', '#E5B65B', '#69BE98', '#E68091', '#98A8EF', '#CE91D1', '#B6BA65')
+CHART_BACKGROUND = '#191321'
 
 
 def chart_items(values, preserve_order=False):
@@ -72,6 +73,7 @@ def make_chart(
     center_label='Доход за период',
     center_suffix='₽ до налогов',
     legend_labels=None,
+    legend_amounts=None,
 ):
     from PIL import Image, ImageDraw, ImageFont
     items = chart_items(values, preserve_order)
@@ -85,26 +87,45 @@ def make_chart(
     def font(size, bold=False):
         return ImageFont.truetype(str(font_dir / ('PTSans-Bold.ttf' if bold else 'PTSans-Regular.ttf')), size)
     label_font = font(36)
-    measure_image = Image.new('RGB', (1, 1), '#191321')
+    metric_font = font(34, True)
+    measure_image = Image.new('RGB', (1, 1), CHART_BACKGROUND)
     measure_draw = ImageDraw.Draw(measure_image)
-    legend_lines = [
-        wrap_legend_label(
-            (legend_labels or {}).get(label, label), 940 if legend_columns == 1 else 440,
-            lambda value: measure_draw.textlength(value, font=label_font),
+    denominator = (
+        center_amount
+        if isinstance(center_amount, (int, float, Decimal)) and center_amount > 0
+        else total
+    )
+    legend_percentages = []
+    legend_lines = []
+    for label, value in items:
+        percent = value / denominator * 100
+        percent_text = (
+            '<0,1' if percent < Decimal('0.1')
+            else f'{percent:.2f}'.rstrip('0').rstrip('.').replace('.', ',')
         )
-        for label, _ in items
-    ]
+        legend_percentages.append(percent_text)
+        base_width = 940 if legend_columns == 1 else 440
+        suffix_width = (
+            measure_draw.textlength(f' — {percent_text}%', font=metric_font)
+            if (legend_amounts or {}).get(label) else 0
+        )
+        legend_lines.append(wrap_legend_label(
+            (legend_labels or {}).get(label, label),
+            max(80, base_width - suffix_width),
+            lambda text: measure_draw.textlength(text, font=label_font),
+        ))
     row_heights = []
     for row in range(legend_rows):
         row_indexes = tuple(row + column * legend_rows for column in range(legend_columns))
         line_counts = [len(legend_lines[index]) for index in row_indexes if index < len(items)]
-        row_heights.append(max(line_counts) * 42 + 63)
+        has_amount = any((legend_amounts or {}).get(items[index][0]) for index in row_indexes if index < len(items))
+        row_heights.append(max(line_counts) * 42 + 63 + (42 if has_amount else 0))
     row_tops = []
     next_top = 830
     for row_height in row_heights:
         row_tops.append(next_top)
         next_top += row_height
-    im = Image.new('RGB', (1080, next_top + 10), '#191321')
+    im = Image.new('RGB', (1080, next_top + 10), CHART_BACKGROUND)
     draw = ImageDraw.Draw(im)
     draw.text((45, 30), title, font=font(54, True), fill='#F1CD83')
     draw.text((45, 110), subtitle, font=font(30), fill='#D0C2D8')
@@ -116,13 +137,19 @@ def make_chart(
         end = start + float(value / total * 360)
         draw.pieslice((240, 190, 840, 790), start, end, fill=color)
         start = end
-    draw.ellipse((395, 345, 685, 635), fill='#191321')
+    draw.ellipse((395, 345, 685, 635), fill=CHART_BACKGROUND)
     if center_amount is None:
         draw.text((540, 465), '100%', anchor='mm', font=font(58, True), fill='#F9F4ED')
     else:
-        center = f'{center_amount:,.2f}'.replace(',', ' ').replace('.', ',')
-        if center.endswith(',00'):
-            center = center[:-3]
+        if isinstance(center_amount, (tuple, list)):
+            low, high = (Decimal(str(value)) for value in center_amount)
+            def rounded(value):
+                return f'{int(max(Decimal(0), value) // Decimal(100) * 100):,}'.replace(',', ' ')
+            center = rounded(low) if low == high else f'{rounded(low)}—{rounded(high)}'
+        else:
+            center = f'{center_amount:,.2f}'.replace(',', ' ').replace('.', ',')
+            if center.endswith(',00'):
+                center = center[:-3]
         size = 44
         while draw.textlength(center, font=font(size, True)) > 258 and size > 14:
             size -= 1
@@ -136,13 +163,29 @@ def make_chart(
         draw.rounded_rectangle((x, y+8, x+30, y+38), 6, fill=used[i])
         for line_number, line in enumerate(legend_lines[i]):
             draw.text((x+52, y + line_number * 42), line, font=label_font, fill='#F9F4ED')
-        percent = value / (center_amount if center_amount is not None and center_amount > 0 else total) * 100
-        percent_text = '<0,1' if percent < Decimal('0.1') else f'{percent:.1f}'.replace('.', ',')
+        percent_text = legend_percentages[i]
         amount = f'{value:,.2f}'.replace(',', ' ').replace('.', ',')
         if amount.endswith(',00'):
             amount = amount[:-3]
         amount_y = y + len(legend_lines[i]) * 42 + 4
-        draw.text((x+52, amount_y), f'{percent_text}%' if percentages_only else f'{amount} ₽  ·  {percent_text}%', font=font(34, True), fill='#F1CD83')
+        legend_amount = (legend_amounts or {}).get(label)
+        if percentages_only and legend_amount:
+            last_label_line = legend_lines[i][-1]
+            suffix_x = x + 52 + draw.textlength(last_label_line, font=label_font)
+            suffix_y = y + (len(legend_lines[i]) - 1) * 42
+            draw.text(
+                (suffix_x, suffix_y), f' — {percent_text}%',
+                font=metric_font, fill='#F1CD83',
+            )
+            draw.text((x+52, amount_y), legend_amount,
+                      font=metric_font, fill='#F1CD83')
+        else:
+            legend_text = (
+                f'{percent_text}%' if percentages_only
+                else f'{amount} ₽  ·  {percent_text}%'
+            )
+            draw.text((x+52, amount_y), legend_text,
+                      font=metric_font, fill='#F1CD83')
     out = BytesIO()
     im.save(out, 'PNG', optimize=True)
     return out.getvalue()
@@ -160,7 +203,7 @@ async def send_chart_report(message, values, title, text, reply_markup=None, sub
         return
     try:
         await message.answer_photo(photo=BufferedInputFile(data, filename='report.png'),
-                                   caption=text if len(text) <= 1024 else title,
+                                   caption=(text or None) if len(text) <= 1024 else title,
                                    reply_markup=reply_markup if len(text) <= 1024 else None)
     except Exception:
         await message.answer(report_fallback_text(title, text, fallback_text), reply_markup=reply_markup)

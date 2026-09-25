@@ -30,9 +30,7 @@ PROFILE_MODE_ASSETS = {
         3: "salary_fund_critical",
         4: "salary_fund_sustainable",
         5: "force_majeure",
-        6: "contract_delay",
-        7: "stabilizer_sustainable",
-        8: "maximum",
+        6: "maximum",
     },
 }
 

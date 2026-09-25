@@ -29,6 +29,7 @@ from financial_engine import (
     fmt_money,
     goal_display_name,
 )
+from allocation_table import allocation_table_from_text
 
 from storage import db
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
@@ -38,6 +39,7 @@ from taxes import (
     compact_income_tax_profile,
     is_income_tax_profile_label,
     is_psn_plan_rule,
+    psn_plan_name,
     refresh_planned_tax_targets,
 )
 from planned_payments import apply_planned_payment_allocation, refresh_planned_payment_targets
@@ -165,9 +167,10 @@ async def income_navigation(
     back_callback: str | None = None,
 ) -> InlineKeyboardMarkup:
     flow_id = await current_flow_id(state)
-    rows = [[("← Главное меню", "menu:back")]]
+    rows = [[]]
     if back_callback:
         rows[0].append(("← Назад", flow_callback(back_callback, flow_id)))
+    rows[0].append(("← Главное меню", "menu:back"))
     return keyboard(rows)
 
 
@@ -303,6 +306,25 @@ def tax_display_line(tax, percent=None) -> str:
             rate_text = format(rate.normalize(), "f").replace(".", ",")
             return f"🏛️ Налог • {rate_text}% — {fmt_money(tax)}"
     return f"🏛️ Налог — {fmt_money(tax)}"
+
+
+def has_active_patent_for_income_type(telegram_id: int, tax_profile: str | None) -> bool:
+    """A saved PSN rule is relevant only while its patent payment is active."""
+    if not is_psn_plan_rule(tax_profile):
+        return False
+    patent_name = psn_plan_name(tax_profile)
+    patents = [
+        item
+        for item in db.load_tax_obligations(telegram_id)
+        if item.get("tax_type") == "Патент"
+    ]
+    if patent_name is None:
+        return bool(patents)
+    return any(
+        str(item.get("object_name") or "") == patent_name
+        or str(item.get("object_name") or "").startswith(f"{patent_name} — ")
+        for item in patents
+    )
 
 
 # ============================================================
@@ -472,8 +494,8 @@ async def show_income_types(message: Message, state: FSMContext, settings=None) 
     rows.extend([
         [("+ Новый тип", flow_callback("incometype:custom", flow_id))],
         [
-            ("← Главное меню", "menu:back"),
             ("← Назад", flow_callback("income:back_amount", flow_id)),
+            ("← Главное меню", "menu:back"),
         ],
     ])
     await message.answer(
@@ -546,8 +568,8 @@ async def income_back_to_tax_choice(callback: CallbackQuery, state: FSMContext):
                 ("Без налога", flow_callback("newincome:tax:no", flow_id)),
             ],
             [
-                ("← Главное меню", "menu:back"),
                 ("← Назад", flow_callback("income:back_custom_type", flow_id)),
+                ("← Главное меню", "menu:back"),
             ],
         ]),
     )
@@ -683,8 +705,8 @@ async def custom_income_type(
                 ("Без налога", flow_callback("newincome:tax:no", flow_id)),
             ],
             [
-                ("← Главное меню", "menu:back"),
                 ("← Назад", flow_callback("income:back_custom_type", flow_id)),
+                ("← Главное меню", "menu:back"),
             ],
         ]),
     )
@@ -707,7 +729,7 @@ async def custom_income_tax_choice(callback: CallbackQuery, state: FSMContext):
                 [("НПД · ЮЛ · 6%", flow_callback("newincome:tax:npd_ul_6", flow_id)), ("НПД · ЮЛ · 4%", flow_callback("newincome:tax:npd_ul_4", flow_id))],
                 [("ИП · УСН · 6%", flow_callback("newincome:tax:ip_usn_6", flow_id))],
                 [("Своя ставка", flow_callback("newincome:tax:custom", flow_id)), ("Без налога", flow_callback("newincome:tax:no", flow_id))],
-                [("← Главное меню", "menu:back"), ("← Назад", flow_callback("income:back_tax_choice", flow_id))],
+                [("← Назад", flow_callback("income:back_tax_choice", flow_id)), ("← Главное меню", "menu:back")],
             ]),
         )
         return
@@ -778,8 +800,8 @@ async def show_custom_income_color_choice(message: Message, state: FSMContext):
     rows.extend([
         [("Автоматический цвет", flow_callback("newincome:color:auto", flow_id))],
         [
-            ("← Главное меню", "menu:back"),
             ("← Назад", flow_callback("income:back_tax_choice", flow_id)),
+            ("← Главное меню", "menu:back"),
         ],
     ])
     await message.answer(
@@ -929,8 +951,8 @@ async def ask_date(
         reply_markup=keyboard([
             [("Сегодня", flow_callback("incomedate:today", flow_id))],
             [
-                ("← Главное меню", "menu:back"),
                 ("← Назад", flow_callback("income:back_types", flow_id)),
+                ("← Главное меню", "menu:back"),
             ],
         ]),
     )
@@ -1090,9 +1112,9 @@ async def show_income_confirmation(
     flow_id = data.get("income_flow_id")
 
     tax_text = tax_display_line(tax, tax_percent)
-    if is_psn_plan_rule(tax_profile) and tax == Decimal("0"):
+    if tax == Decimal("0") and has_active_patent_for_income_type(telegram_id, tax_profile):
         tax_text = (
-            "🏛️ Налог с этого поступления — <b>не удерживается</b>\n"
+            "🏛️ Налог с этого поступления — <b>не удерживается.</b>\n"
             "Патент копится отдельно по плану."
         )
 
@@ -1128,8 +1150,8 @@ async def show_income_confirmation(
                 ),
             ],
             [
-                ("← Главное меню", "menu:back"),
                 ("← Назад", flow_callback("income:back_confirmation", flow_id)),
+                ("← Главное меню", "menu:back"),
             ],
         ]),
     )
@@ -1308,8 +1330,8 @@ async def show_income_tax_edit_menu(
                 )
             ],
             [
-                ("← Главное меню", "menu:back"),
                 ("← Назад", flow_callback("taxedit:back", flow_id)),
+                ("← Главное меню", "menu:back"),
             ],
         ]),
     )
@@ -1365,8 +1387,8 @@ async def tax_edit_subject(callback: CallbackQuery, state: FSMContext):
         await show_income_tax_edit_menu(callback.message, state, callback.from_user.id)
         return
     rows.append([
-        ("← Главное меню", "menu:back"),
         ("← Назад", flow_callback("taxedit:menu", flow_id)),
+        ("← Главное меню", "menu:back"),
     ])
     await callback.message.answer(text, reply_markup=keyboard(rows))
 
@@ -1848,13 +1870,30 @@ async def _confirm_income_locked(
     )
 
     chosen_strategy = data.get("income_strategy")
+    strategy_selected_by_user = (
+        bool(allocator.settings.goals)
+        and chosen_strategy in {"balanced", "protection"}
+    )
     if not allocator.settings.goals:
         chosen_strategy = "protection"
     if chosen_strategy not in {"balanced", "protection"}:
         try:
             variants = {}
+            preview_base = deepcopy(allocator)
+            refresh_planned_payment_targets(
+                telegram_id,
+                preview_base,
+                income_date,
+                persist=False,
+            )
+            refresh_planned_tax_targets(
+                telegram_id,
+                preview_base,
+                income_date,
+                persist=False,
+            )
             for strategy in ("balanced", "protection"):
-                simulated = deepcopy(allocator)
+                simulated = deepcopy(preview_base)
                 simulated.settings.protective_stage_c_strategy = strategy
                 variants[strategy] = simulated.process_income(
                     income=income,
@@ -1912,8 +1951,8 @@ async def _confirm_income_locked(
                         ("Без части на цели", flow_callback("income:strategy:protection", data.get("income_flow_id"))),
                     ],
                     [
-                        ("← Главное меню", "menu:back"),
                         ("← Назад", flow_callback("income:strategy:back", data.get("income_flow_id"))),
+                        ("← Главное меню", "menu:back"),
                     ],
                 ]),
             )
@@ -1951,6 +1990,9 @@ async def _confirm_income_locked(
                 raise _IncomeChecksumError(result.checks["difference"])
             if allocator.state.operation_log:
                 operation = allocator.state.operation_log[-1]
+                operation["distribution_strategy_selected"] = (
+                    strategy_selected_by_user
+                )
                 operation["tax_profile"] = (
                     data.get("tax_override_profile")
                     or allocator.settings.income_type_tax_profiles.get(income_type)
@@ -2077,9 +2119,10 @@ async def income_waits_for_button(message: Message, state: FSMContext):
         IncomeStates.tax_edit.state: "taxedit:back",
         IncomeStates.strategy_choice.state: "income:strategy:back",
     }
-    rows = [[("← Главное меню", "menu:back")]]
+    rows = [[]]
     if current in back_by_state:
         rows[0].append(("← Назад", flow_callback(back_by_state[current], flow_id)))
+    rows[0].append(("← Главное меню", "menu:back"))
     await message.answer(
         "На этом экране нужно нажать одну из кнопок ниже.",
         reply_markup=keyboard(rows),
@@ -2161,8 +2204,7 @@ async def send_distribution_report(
         if developer_mode or amount > ZERO:
 
             distribution_groups[group].append(
-                f"{emoji} <b>{escape(name)}</b> — "
-                f"{money_plain(amount)}"
+                f"{emoji} {escape(name)} — {money_plain(amount)}"
             )
 
     # Налог с дохода и плановые налоги физически хранятся на одном
@@ -2255,13 +2297,12 @@ async def send_distribution_report(
         )
 
 
-    # В Telegram блок цитаты.
     lines.append("<b>РАСПРЕДЕЛЕНИЕ</b>")
 
     lines.append(
-        "<blockquote>"
-        + "\n\n".join("\n".join(group) for group in distribution_groups if group)
-        + "</blockquote>"
+        allocation_table_from_text(
+            "\n\n".join("\n".join(group) for group in distribution_groups if group)
+        )
     )
 
     lines.extend([
@@ -2349,21 +2390,23 @@ async def send_distribution_report(
                 f"{escape(str(step))}"
             )
 
-    menu = main_menu_keyboard(message.from_user.id)
-
     await send_photo_with_sections(
         message,
         (INCOME_DISTRIBUTION_IMAGE_PATH.with_name("super_income_distribution.png")
          if result.super_stage_allocated > 0 else INCOME_DISTRIBUTION_IMAGE_PATH),
         main_sections,
-        reply_markup=(None if developer_mode else menu),
+        reply_markup=(
+            None
+            if developer_mode
+            else keyboard([[('Главное меню', 'menu:back')]])
+        ),
     )
 
     if developer_mode:
         await send_long_message(
             message,
             "\n".join(developer_lines),
-            reply_markup=menu,
+            reply_markup=keyboard([[("Главное меню", "menu:back")]]),
         )
 
 

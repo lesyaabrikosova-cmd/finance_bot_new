@@ -56,7 +56,8 @@ def main_menu_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
         [("Новый доход", "menu:income")],
         [("Балансы", "menu:analytics"), ("Анализ доходов", "menu:income_analysis")],
         [("Налоги", "menu:taxes"), ("Долги", "menu:credits")],
-        [("Прогноз", "menu:forecast"), ("Цели", "menu:goals")],
+        [("Прогноз", "menu:forecast"), ("Цели и Сундуки", "menu:goals")],
+        [("Калькуляторы", "menu:calculators")],
         [("Уровень", "menu:state"), ("Резервы", "menu:reserves")],
         [("⚙️ Настройки", "settings:open")],
     ]

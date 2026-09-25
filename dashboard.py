@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime
 from decimal import Decimal
-from hashlib import sha256
 from html import escape
 from pathlib import Path
 import re
@@ -12,7 +11,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message, FSInputFile
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 from archetypes import ARCHETYPES
 from financial_engine import (
@@ -21,11 +20,20 @@ from financial_engine import (
     fmt_money,
     goal_display_name,
 )
+from allocation_table import allocation_table_from_text
 from storage import db
 from ui import keyboard, main_menu_keyboard, reserve_fraction
 from mode_presentation import FIRE_EFFECT_ID, mode_image_path
-from charts import send_chart_report
+from charts import make_chart, report_fallback_text, send_chart_report
+from semantic_chart_colors import (
+    BALANCE_CHEST_COLORS,
+    BALANCE_GOAL_COLORS,
+    position_palette_color as _position_palette_color,
+    stable_palette_color as _stable_palette_color,
+    stable_palette_index as _stable_palette_index,
+)
 from reserve_card import render_reserve_card
+from settings_editor import RESERVE_BALANCES_TEXT, reserve_balances_rows
 from taxes import (
     compact_income_tax_profile,
     is_income_tax_profile_label,
@@ -692,16 +700,35 @@ async def explain_resilience_mode(callback: CallbackQuery):
         levels = ""
     else:
         level_lines = []
-        for reached_mode, target, name in allocator.resilience_transition_targets():
-            mark = "✔️" if capital >= target else "▫️"
-            level_lines.append(
-                f"{mark} {reached_mode} кубков — {escape(name)}: <b>{rub(target)}</b>"
+        if allocator.profile_id == "cyclic":
+            checkpoints = (
+                (4, allocator.intercontract_current_life_limit,
+                 allocator.state.intercontract_reserve, "Фонд зарплаты: минимальный слой"),
+                (5, allocator.intercontract_current_limit,
+                 allocator.state.intercontract_reserve, "Фонд зарплаты: полный размер"),
+                (6, allocator.settings.force_majeure_limit,
+                 allocator.pillow_total_balance, "Подушка"),
+            )
+            for reached_mode, target, balance, name in checkpoints:
+                mark = "✔️" if balance >= target else "▫️"
+                level_lines.append(
+                    f"{mark} {reached_mode} кубков — {escape(name)}: <b>{rub(target)}</b>"
+                )
+            explanation = (
+                "В циклическом профиле каждый кубок связан со своим резервом. "
+                "Фонд зарплаты и Подушка не заменяют друг друга."
+            )
+        else:
+            for reached_mode, target, name in allocator.resilience_transition_targets():
+                mark = "✔️" if capital >= target else "▫️"
+                level_lines.append(
+                    f"{mark} {reached_mode} кубков — {escape(name)}: <b>{rub(target)}</b>"
+                )
+            explanation = (
+                "Аллокатор складывает деньги защитных резервов в один виртуальный сосуд. "
+                "Кубки отражают общий объём защиты, а не то, на каком именно банковском счёте лежат деньги."
             )
         levels = "\n\n" + "\n".join(level_lines)
-        explanation = (
-            "Аллокатор складывает деньги защитных резервов в один виртуальный сосуд. "
-            "Кубки отражают общий объём защиты, а не то, на каком именно банковском счёте лежат деньги."
-        )
 
     priority = allocator.current_protection_priority()
     priority_text = (
@@ -835,29 +862,6 @@ BALANCE_CRITICAL_MINIMUM_COLORS = (
 )
 BALANCE_CRITICAL_SALARY_COLOR = "#8e2832"
 BALANCE_HOUSEHOLD_RESERVE_COLOR = "#45A86B"
-BALANCE_CHEST_COLORS = (
-    "#6a432f", "#a66f45", "#7b523a", "#be8760",
-    "#5c392B", "#915c47", "#b47452", "#845744",
-)
-BALANCE_GOAL_COLORS = ("#FDE047", "#F7C948", "#F0A929", "#E08B00", "#C77D00")
-
-
-def _stable_palette_index(identity: str, ordered_ids=()) -> int:
-    """Return a saved position, with a deterministic index for archived data."""
-    identity = str(identity)
-    ordered = [str(item) for item in ordered_ids if str(item)]
-    try:
-        return ordered.index(identity)
-    except ValueError:
-        # Old archived operations may outlive their settings entry. Their
-        # immutable identity still produces the same shade on every render.
-        return len(ordered) + int.from_bytes(sha256(identity.encode("utf-8")).digest()[:8], "big")
-
-
-def _stable_palette_color(identity: str, palette: tuple[str, ...], ordered_ids=()) -> str:
-    """Assign a fixed family shade by saved position, with a stable legacy fallback."""
-    return palette[_stable_palette_index(identity, ordered_ids) % len(palette)]
-
 def period_balance_chart(allocator, allocations):
     """Return every positive flow of the current period in UI order.
 
@@ -898,6 +902,7 @@ def period_balance_chart(allocator, allocations):
             colors[label] = color
 
     consumed: set[str] = set()
+    settings = getattr(allocator, 'settings', None)
     planned_tax = D(allocations.get('КЖ:Налоги', 0))
     direct_tax = D(allocations.get('Налог', 0))
     ledger_tax = getattr(allocations, 'period_tax', None)
@@ -915,14 +920,14 @@ def period_balance_chart(allocator, allocations):
     # first (КМ) grey; the second shade remains fixed for a future УЖ split.
     add('Фонд Зарплаты', allocations.get('Фонд Зарплаты', 0), BALANCE_SALARY_FUND_COLORS[0])
     add('Подушка', allocations.get('Подушка', 0), BALANCE_PROTECTION_COLORS['pillow'])
-    add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), BALANCE_PROTECTION_COLORS['stabilizer'])
+    if settings is None or getattr(settings, 'needs_stabilizer', True):
+        add('Стабилизатор', allocations.get('Стабилизатор дохода', 0), BALANCE_PROTECTION_COLORS['stabilizer'])
     add('Инвестиции', allocations.get('Инвестиции', 0), BALANCE_PROTECTION_COLORS['investments'])
     consumed.update({
         'Фонд Зарплаты', 'Подушка', 'Стабилизатор дохода',
         'Инвестиции', 'Мин. платеж', 'Досрочное',
     })
 
-    settings = getattr(allocator, 'settings', None)
     envelope_kinds = getattr(allocations, 'envelope_kinds', {}) or {}
     category_ids = getattr(settings, 'life_category_ids', {}) or {}
     life = {
@@ -971,6 +976,7 @@ def period_balance_chart(allocator, allocations):
         critical_rows.append(
             (
                 1 if is_salary else 0,
+                -value,
                 _stable_palette_index(stable_identity, critical_order),
                 name.casefold(),
                 f'КМ · {name}',
@@ -980,7 +986,7 @@ def period_balance_chart(allocator, allocations):
                 ),
             )
         )
-    for _, _, _, label, value, color in sorted(critical_rows):
+    for _, _, _, _, label, value, color in sorted(critical_rows):
         add(label, value, color)
 
     reserve_items = [
@@ -1068,7 +1074,12 @@ def period_balance_chart(allocator, allocations):
                 goal_sort_key((raw_name, value, recorded_kind)),
                 f'Цели и Сундуки · {display}',
                 value,
-                _stable_palette_color(identity, palette, ordered_ids),
+                _position_palette_color(
+                    identity,
+                    palette,
+                    color_index=getattr(goal, "color_index", None),
+                    ordered_ids=ordered_ids,
+                ),
             )
         )
     # Chests and Goals are separate adjacent groups. Within each group the
@@ -1174,13 +1185,17 @@ def period_balance_fallback_text(
             '➤ До следующего уровня — <b>максимальный уровень достигнут</b>'
         )
     if allocator.settings.developer_mode:
-        lines.extend([
+        reserve_debug = [
             '',
             '<b>ЗАЩИТНЫЕ РЕЗЕРВЫ — РЕЖИМ РАЗРАБОТЧИКА</b>',
             f"МП: {reserve_fraction(rub(allocator.state.pillow_minimum), rub(allocator.settings.minimum_reserve_limit))}",
             f"ФМ: {reserve_fraction(rub(allocator.state.pillow_force_majeure), rub(allocator.settings.force_majeure_limit))}",
-            f"Стабилизатор дохода: {reserve_fraction(rub(allocator.state.pillow_stabilizer), rub(allocator.settings.stabilizer_full_limit))}",
-        ])
+        ]
+        if allocator.settings.needs_stabilizer:
+            reserve_debug.append(
+                f"Стабилизатор дохода: {reserve_fraction(rub(allocator.state.pillow_stabilizer), rub(allocator.settings.stabilizer_full_limit))}"
+            )
+        lines.extend(reserve_debug)
     return '\n'.join(lines)
 
 
@@ -1569,8 +1584,8 @@ def current_period_income_ids(telegram_id: int) -> set[int]:
 def income_history_navigation():
     return keyboard([
         [
-            ("← Главное меню", "menu:back"),
             ("← Назад", "incomehistory:open"),
+            ("← Главное меню", "menu:back"),
         ],
     ])
 
@@ -1631,13 +1646,13 @@ def income_note_edit_keyboard(
         ])
     rows.extend([
         [
-            ("← Главное меню", "menu:back"),
             (
                 "← Назад",
                 income_history_operation_callback(
                     "note_back", operation_id, year, month,
                 ),
             ),
+            ("← Главное меню", "menu:back"),
         ],
     ])
     return keyboard(rows)
@@ -1679,8 +1694,8 @@ async def send_income_history(
             ),
             reply_markup=keyboard([
                 [
-                    ("← Главное меню", "menu:back"),
                     ("← Назад", f"incomeanalysis:month:{year}:{month}" if is_month_history else "menu:income_analysis"),
+                    ("← Главное меню", "menu:back"),
                 ],
             ]),
         )
@@ -1699,14 +1714,14 @@ async def send_income_history(
     if last_page:
         navigation = []
         if page > 0:
-            navigation.append((("< К последним" if is_month_history else "К последним >"), f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
+            navigation.append(("<", f"incomehistory:monthpage:{year}:{month}:{page - 1}" if is_month_history else f"incomehistory:page:{page - 1}"))
         if page < last_page:
-            navigation.append((("Предыдущие >" if is_month_history else "< Предыдущие"), f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
+            navigation.append((">", f"incomehistory:monthpage:{year}:{month}:{page + 1}" if is_month_history else f"incomehistory:page:{page + 1}"))
         rows.append(navigation)
     rows.extend([
         [
-            ("← Главное меню", "menu:back"),
             ("← Назад", f"incomeanalysis:month:{year}:{month}" if is_month_history else "menu:income_analysis"),
+            ("← Главное меню", "menu:back"),
         ],
     ])
     await message.answer(
@@ -1742,6 +1757,80 @@ def income_operation_card_text(operation: dict) -> str:
     )
 
 
+def income_history_detail_operations(
+    telegram_id: int,
+    year: int | None = None,
+    month: int | None = None,
+) -> list[dict]:
+    operations = income_history_operations(telegram_id)
+    if year is not None and month is not None:
+        return income_operations_for_period(operations, "month", year, month)
+    current_income_ids = current_period_income_ids(telegram_id)
+    return [
+        operation for operation in operations
+        if operation.get("id") in current_income_ids
+    ]
+
+
+def income_history_detail_keyboard(
+    operation_id: int,
+    operations: list[dict],
+    current_period: bool,
+    has_note: bool,
+    year: int | None = None,
+    month: int | None = None,
+):
+    rows = []
+    operation_ids = [operation.get("id") for operation in operations]
+    try:
+        position = operation_ids.index(operation_id)
+    except ValueError:
+        position = -1
+    navigation = []
+    if position >= 0 and position < len(operations) - 1:
+        navigation.append((
+            "<",
+            income_history_operation_callback(
+                "detailnav", operations[position + 1]["id"], year, month,
+            ),
+        ))
+    if position > 0:
+        navigation.append((
+            ">",
+            income_history_operation_callback(
+                "detailnav", operations[position - 1]["id"], year, month,
+            ),
+        ))
+    if navigation:
+        rows.append(navigation)
+
+    edit_row = [(
+        "✎ Заметка" if has_note else "+ Заметка",
+        income_history_operation_callback("note", operation_id, year, month),
+    )]
+    if current_period:
+        edit_row.append((
+            "🗑️ Удалить доход",
+            income_history_operation_callback("delete", operation_id, year, month),
+        ))
+    rows.append(edit_row)
+    rows.append([
+        ("← Назад", income_history_scope_callback(year, month)),
+        ("← Главное меню", "menu:back"),
+    ])
+    return keyboard(rows)
+
+
+def income_history_detail_text(operation: dict, allocator) -> str:
+    distribution = income_distribution_table(operation, allocator)
+    return (
+        f"{income_operation_card_text(operation)}\n"
+        "————————————\n\n"
+        "<b>РАСПРЕДЕЛЕНИЕ ДОХОДА</b>\n\n"
+        f"{distribution}"
+    )
+
+
 async def send_income_history_detail(
     message: Message,
     telegram_id: int,
@@ -1756,46 +1845,47 @@ async def send_income_history_detail(
             reply_markup=income_history_navigation(),
         )
         return False
+    allocator = db.load_allocator(telegram_id)
     has_note = bool((operation.get("payload") or {}).get("note"))
     current_period = operation_id in current_period_income_ids(telegram_id)
-    edit_row = [
-        (
-            "✎ Заметка" if has_note else "+ Заметка",
-            income_history_operation_callback(
-                "note", operation_id, year, month,
-            ),
-        ),
-    ]
-    if current_period:
-        edit_row.append(
-            (
-                "🗑️ Удалить доход",
-                income_history_operation_callback(
-                    "delete", operation_id, year, month,
-                ),
-            )
-        )
-    back_callback = income_history_scope_callback(year, month)
+    operations = income_history_detail_operations(telegram_id, year, month)
     await message.answer(
-        income_operation_card_text(operation),
-        reply_markup=keyboard([
-            [(
-                "Показать распределение",
-                income_history_operation_callback(
-                    "distribution", operation_id, year, month,
-                ),
-            )],
-            edit_row,
-            [
-                ("← Главное меню", "menu:back"),
-                ("← Назад", back_callback),
-            ],
-        ]),
+        income_history_detail_text(operation, allocator),
+        reply_markup=income_history_detail_keyboard(
+            operation_id, operations, current_period, has_note, year, month,
+        ),
     )
     return True
 
 
-def income_distribution_text(operation: dict, allocator) -> str:
+async def edit_income_history_detail(
+    message: Message,
+    telegram_id: int,
+    operation_id: int,
+    year: int | None = None,
+    month: int | None = None,
+) -> bool:
+    operation = find_income_history_operation(telegram_id, operation_id)
+    if operation is None:
+        await message.edit_text(
+            "Это поступление уже недоступно в истории.",
+            reply_markup=income_history_navigation(),
+        )
+        return False
+    allocator = db.load_allocator(telegram_id)
+    has_note = bool((operation.get("payload") or {}).get("note"))
+    current_period = operation_id in current_period_income_ids(telegram_id)
+    operations = income_history_detail_operations(telegram_id, year, month)
+    await message.edit_text(
+        income_history_detail_text(operation, allocator),
+        reply_markup=income_history_detail_keyboard(
+            operation_id, operations, current_period, has_note, year, month,
+        ),
+    )
+    return True
+
+
+def income_distribution_table(operation: dict, allocator) -> str:
     payload = operation.get("payload") or {}
     allocations = {
         str(key): D(value)
@@ -1810,7 +1900,7 @@ def income_distribution_text(operation: dict, allocator) -> str:
     def add(group: int, emoji: str, name: str, amount) -> None:
         amount = D(amount)
         if amount > 0:
-            groups[group].append(f"{emoji} <b>{escape(name)}</b> — {rub_plain(amount)}")
+            groups[group].append(f"{emoji} {escape(name)} — {rub_plain(amount)}")
 
     # Налог с самого дохода и накопления на имущественные/прочие налоги
     # физически лежат в одном банковском конверте. Показываем пользователю
@@ -1823,7 +1913,17 @@ def income_distribution_text(operation: dict, allocator) -> str:
     add(0, "🏛️", "Налоги", tax_total)
     add(1, "🏦", "Фонд Зарплаты", allocations.get("Фонд Зарплаты", 0))
     add(1, "🛡️", "Подушка", allocations.get("Подушка", 0))
-    add(1, "🛟", "Стабилизатор", allocations.get("Стабилизатор дохода", 0))
+    # История может быть доступна даже после удаления профиля или во время
+    # восстановления данных, когда загрузить allocator уже нельзя. Сохранённое
+    # распределение всё равно должно открываться и показывать стабилизатор,
+    # если на него действительно были направлены деньги.
+    show_stabilizer = (
+        D(allocations.get("Стабилизатор дохода", 0)) > 0
+        if allocator is None
+        else getattr(allocator.settings, "needs_stabilizer", False)
+    )
+    if show_stabilizer:
+        add(1, "🛟", "Стабилизатор", allocations.get("Стабилизатор дохода", 0))
     add(1, "📈", "Инвестиции", allocations.get("Инвестиции", 0))
     add(2, "💳", "Минимальные платежи", allocations.get("Мин. платеж", 0))
     add(2, "💳", "Досрочное погашение", allocations.get("Досрочное", 0))
@@ -1853,7 +1953,8 @@ def income_distribution_text(operation: dict, allocator) -> str:
     ):
         add(4, "💚", name, amount)
     add(4, "💚", "Бытовой резерв", allocations.get("Бытовой резерв", 0))
-    goal_map = {goal.name: goal for goal in allocator.settings.goals}
+    goals = getattr(getattr(allocator, "settings", None), "goals", [])
+    goal_map = {goal.name: goal for goal in goals}
     goal_items = [
         (key, key[5:], amount)
         for key, amount in allocations.items()
@@ -1873,13 +1974,16 @@ def income_distribution_text(operation: dict, allocator) -> str:
         add(5, "🧳" if is_chest else "⭐️", display_name, amount)
 
     quote = "\n\n".join("\n".join(group) for group in groups if group)
+    return allocation_table_from_text(quote) if quote else "<pre>Распределений не найдено.</pre>"
+
+
+def income_distribution_text(operation: dict, allocator) -> str:
+    payload = operation.get("payload") or {}
     return (
         "<b>РАСПРЕДЕЛЕНИЕ ДОХОДА</b>\n\n"
         f"{income_history_date(operation)}\n"
         f"{escape(str(payload.get('income_type', 'Без типа')))} — {rub_plain(payload.get('income', 0))}\n\n"
-        "<blockquote>"
-        f"{quote or 'Распределений не найдено.'}"
-        "</blockquote>"
+        f"{income_distribution_table(operation, allocator)}"
     )
 
 
@@ -1934,7 +2038,27 @@ async def income_history_detail(callback: CallbackQuery, state: FSMContext):
         operation_id = 0
         year = month = None
     await state.clear()
-    await send_income_history_detail(
+    await edit_income_history_detail(
+        callback.message,
+        callback.from_user.id,
+        operation_id,
+        year,
+        month,
+    )
+
+
+@router.callback_query(F.data.startswith("incomehistory:detailnav:"))
+async def income_history_detail_navigation(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    try:
+        operation_id, year, month = parse_income_history_operation_callback(
+            callback.data,
+        )
+    except (AttributeError, ValueError):
+        operation_id = 0
+        year = month = None
+    await state.clear()
+    await edit_income_history_detail(
         callback.message,
         callback.from_user.id,
         operation_id,
@@ -2423,12 +2547,73 @@ async def send_income_months(message: Message, year: int) -> None:
     await message.answer(f"<b>{year}</b>", reply_markup=income_months_keyboard(year))
 
 
+def income_month_analysis_keyboard(year: int, month: int) -> object:
+    current_month = moscow_today().replace(day=1)
+    selected_month = date(year, month, 1)
+    navigation = []
+    if month == 1:
+        previous_year, previous_month = year - 1, 12
+    else:
+        previous_year, previous_month = year, month - 1
+    navigation.append(("<", f"incomeanalysis:monthnav:{previous_year}:{previous_month}"))
+    if selected_month < current_month:
+        if month == 12:
+            next_year, next_month = year + 1, 1
+        else:
+            next_year, next_month = year, month + 1
+        navigation.append((">", f"incomeanalysis:monthnav:{next_year}:{next_month}"))
+    return keyboard([
+        navigation,
+        [("Другой месяц", f"incomeanalysis:months:{year}")],
+        [(f"Весь {year} год", f"incomeanalysis:year:{year}")],
+        [("← Назад", f"incomeanalysis:months:{year}")],
+    ])
+
+
+async def edit_income_month_chart(
+    message: Message,
+    values: dict[str, Decimal],
+    total_income: Decimal,
+    colors: dict[str, str],
+    period_label: str,
+    reply_markup,
+) -> None:
+    """Replace the current month chart instead of sending a new message."""
+    fallback_text = income_analysis_fallback_text(values, total_income)
+    try:
+        image = await asyncio.to_thread(
+            make_chart,
+            values,
+            "АНАЛИЗ ДОХОДОВ",
+            f"Источники дохода · {period_label}",
+            colors,
+            False,
+            center_amount=total_income if values else None,
+            preserve_order=True,
+        )
+        if not image:
+            raise ValueError("Диаграмма не создана")
+        await message.edit_media(
+            media=InputMediaPhoto(
+                media=BufferedInputFile(image, filename="report.png"),
+            ),
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        await message.edit_text(
+            report_fallback_text("АНАЛИЗ ДОХОДОВ", "", fallback_text),
+            reply_markup=reply_markup,
+        )
+
+
 async def send_income_period_analysis(
     message: Message,
     telegram_id: int,
     period_type: str,
     year: int,
     month: int | None = None,
+    *,
+    replace_message: bool = False,
 ) -> None:
     """Render the existing income chart for a selected calendar period."""
     allocator = db.load_allocator(telegram_id)
@@ -2452,19 +2637,15 @@ async def send_income_period_analysis(
     if period_type == "month":
         assert month is not None
         period_label = f"{MONTH_BUTTON_NAMES[month - 1]} {year}"
-        rows = [
-            [(f"Поступления {MONTH_NAMES[month - 1]}", f"incomehistory:month:{year}:{month}")],
-            [("Другой месяц", f"incomeanalysis:months:{year}")],
-            [(f"Весь {year} год", f"incomeanalysis:year:{year}")],
-            [("← Назад", f"incomeanalysis:months:{year}")],
-        ]
+        navigation = income_month_analysis_keyboard(year, month)
     else:
         period_label = str(year)
         year_navigation = [(f"< {year - 1}", f"incomeanalysis:year:{year - 1}")]
         if year < moscow_today().year:
             year_navigation.append((f"{year + 1} >", f"incomeanalysis:year:{year + 1}"))
         rows = [year_navigation, [("← Назад", "incomeanalysis:periods")]]
-    navigation = keyboard(rows)
+    if period_type != "month":
+        navigation = keyboard(rows)
     if total_income <= 0:
         if period_type == "month":
             assert month is not None
@@ -2479,9 +2660,15 @@ async def send_income_period_analysis(
         else:
             empty_message = "В этом году нет записанных доходов."
             heading = str(year)
-        await message.answer(
-            f"<b>{heading}</b>\n\n{empty_message}",
-            reply_markup=navigation,
+        response_text = f"<b>{heading}</b>\n\n{empty_message}"
+        if replace_message:
+            await message.edit_text(response_text, reply_markup=navigation)
+        else:
+            await message.answer(response_text, reply_markup=navigation)
+        return
+    if replace_message:
+        await edit_income_month_chart(
+            message, totals, total_income, colors, period_label, navigation,
         )
         return
     await send_chart_report(
@@ -2718,6 +2905,28 @@ async def income_analysis_month(callback: CallbackQuery, state: FSMContext):
     await send_income_period_analysis(callback.message, callback.from_user.id, "month", year, month)
 
 
+@router.callback_query(F.data.startswith("incomeanalysis:monthnav:"))
+async def income_analysis_month_navigation(callback: CallbackQuery, state: FSMContext):
+    try:
+        _, _, year, month = callback.data.split(":")
+        year, month = int(year), int(month)
+        if not 1 <= month <= 12 or date(year, month, 1) > moscow_today().replace(day=1):
+            raise ValueError
+    except (AttributeError, ValueError):
+        await callback.answer("Этот месяц недоступен.", show_alert=True)
+        return
+    await callback.answer()
+    await state.clear()
+    await send_income_period_analysis(
+        callback.message,
+        callback.from_user.id,
+        "month",
+        year,
+        month,
+        replace_message=True,
+    )
+
+
 @router.callback_query(F.data.startswith("incomeanalysis:year:"))
 async def income_analysis_year(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -2751,10 +2960,7 @@ async def menu_reserves(callback: CallbackQuery):
     rows.append([("✎ Баланс Подушки", f"{edit_prefix}:pillow")])
     if allocator.settings.needs_stabilizer:
         rows.append([("✎ Баланс Стабилизатора", f"{edit_prefix}:stabilizer")])
-    rows.append(
-        [("← Главное меню", "menu:back"), ("← Уровень", "menu:state")]
-        if from_level else [("← Главное меню", "menu:back")]
-    )
+    rows.extend(reserve_balances_rows(from_level))
     settings, state = allocator.settings, allocator.state
     debt_level_one = (
         any(credit.active for credit in settings.credits)
@@ -2767,28 +2973,23 @@ async def menu_reserves(callback: CallbackQuery):
             card_profile_id,
             pillow_balance=allocator.pillow_total_balance,
             pillow_target=(settings.minimum_reserve_limit if debt_level_one else settings.force_majeure_limit),
-            stabilizer_balance=state.pillow_stabilizer,
-            stabilizer_critical_target=settings.stabilizer_life_limit,
-            stabilizer_full_target=settings.stabilizer_full_limit,
+            stabilizer_balance=(state.pillow_stabilizer if settings.needs_stabilizer else Decimal("0")),
+            stabilizer_critical_target=(settings.stabilizer_life_limit if settings.needs_stabilizer else Decimal("0")),
+            stabilizer_full_target=(settings.stabilizer_full_limit if settings.needs_stabilizer else Decimal("0")),
             salary_fund_balance=state.intercontract_reserve,
             salary_fund_critical_target=allocator.intercontract_current_life_limit,
             salary_fund_full_target=allocator.intercontract_current_limit,
-            stabilizer_months=settings.stabilizer_months,
+            stabilizer_months=(settings.stabilizer_months if settings.needs_stabilizer else Decimal("0")),
             salary_fund_months=settings.income_gap_months,
             pillow_months=(settings.minimum_reserve_months if debt_level_one else settings.force_majeure_months),
         )
         await callback.message.answer_photo(
             BufferedInputFile(image, filename="reserves.png"),
-            caption=(
-                "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
-                "Выберите резерв, чтобы изменить его текущий баланс."
-            ),
+            caption=RESERVE_BALANCES_TEXT,
             reply_markup=keyboard(rows),
         )
     except Exception:
         await callback.message.answer(
-            "<b>БАЛАНСЫ РЕЗЕРВОВ</b>\n\n"
-            "Выберите резерв и укажите, сколько денег в нём сейчас. "
-            "Аллокатор учтёт новую сумму при определении вашего уровня.",
+            RESERVE_BALANCES_TEXT,
             reply_markup=keyboard(rows),
         )

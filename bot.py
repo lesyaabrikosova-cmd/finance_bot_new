@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from datetime import date
+from decimal import Decimal
 from html import escape
 
 from dotenv import load_dotenv
@@ -43,7 +44,6 @@ from financial_engine import (
     MODE_TITLES,
     FinancialAllocator,
     fmt_money,
-    goal_display_name,
 )
 
 from onboarding import (
@@ -78,6 +78,7 @@ from taxes import (
 )
 from debts import router as debts_router
 from goals_manager import router as goals_manager_router
+from calculators import router as calculators_router
 from health_server import start_health_server
 
 from ui import (
@@ -88,6 +89,11 @@ from ui import (
 
 from storage import db
 from time_utils import moscow_today
+from income_maintenance import (
+    completed_cyclic_average,
+    completed_piecework_average,
+    stable_review_is_due,
+)
 
 
 # ============================================================
@@ -340,7 +346,6 @@ async def send_state(
         )
 
     if settings.developer_mode:
-
         text += (
             "\n\n🛠 <b>ЗАЩИТНЫЕ РЕЗЕРВЫ</b>\n\n"
 
@@ -348,10 +353,16 @@ async def send_state(
 
             f"Фонд Зарплаты: {reserve_fraction(f'{fmt_money(state.intercontract_reserve)} ₽', f'{fmt_money(settings.intercontract_full_limit)} ₽')}\n"
 
-            f"Форс-мажорная: {reserve_fraction(f'{fmt_money(state.pillow_force_majeure)} ₽', f'{fmt_money(settings.force_majeure_limit)} ₽')}\n"
-
-            f"Стабилизатор дохода: {reserve_fraction(f'{fmt_money(state.pillow_stabilizer)} ₽', f'{fmt_money(settings.stabilizer_full_limit)} ₽')}"
+            f"Форс-мажорная: {reserve_fraction(f'{fmt_money(state.pillow_force_majeure)} ₽', f'{fmt_money(settings.force_majeure_limit)} ₽')}"
         )
+        if settings.needs_stabilizer:
+            text += (
+                "\nСтабилизатор дохода: "
+                + reserve_fraction(
+                    f"{fmt_money(state.pillow_stabilizer)} ₽",
+                    f"{fmt_money(settings.stabilizer_full_limit)} ₽",
+                )
+            )
 
     await message.answer(
         text,
@@ -518,70 +529,6 @@ async def menu_credits(
             [("Добавить долг", "debt:add")],
             [("← Назад", "menu:main")],
         ]),
-    )
-
-
-# ============================================================
-# ЦЕЛИ
-# ============================================================
-
-
-@router.callback_query(
-    F.data == "menu:goals"
-)
-async def menu_goals(
-    callback: CallbackQuery,
-):
-
-    await callback.answer()
-
-    allocator = db.load_allocator(
-        callback.from_user.id
-    )
-
-    if allocator is None:
-        return
-
-    goals = allocator.settings.goals
-
-    if not goals:
-
-        await callback.message.answer(
-            "⭐️ <b>ЦЕЛИ</b>\n\n"
-            "Отдельные категории целей пока "
-            "не настроены.\n\n"
-            "Когда алгоритм начнёт направлять "
-            "деньги на цели, они будут учитываться "
-            "в общей категории «Цели (всего)».",
-            reply_markup=main_menu_keyboard(callback.from_user.id),
-        )
-
-        return
-
-    lines = [
-        "<b>ЦЕЛИ И СУНДУКИ</b>",
-        "",
-    ]
-
-    for goal in goals:
-
-        balance = (
-            allocator.state.goal_balances.get(
-                goal.name,
-                0,
-            )
-        )
-
-        goal_icon = "🧳" if goal.is_chest else "⭐️"
-        lines.append(
-            f"{goal_icon} <b>{goal_display_name(goal.name, goal.is_chest)}</b>\n"
-            f"Доля: {goal.percentage}%\n"
-            f"Накоплено: {fmt_money(balance)} ₽\n"
-        )
-
-    await callback.message.answer(
-        "\n".join(lines),
-        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -756,10 +703,144 @@ async def set_bot_commands(
 # ============================================================
 
 
+def _saved_date(value: str | None) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10]) if value else None
+    except ValueError:
+        return None
+
+
+async def run_income_forecast_maintenance(bot: Bot, current: date) -> None:
+    """Keep piecework averages fresh and remind stable profiles to review theirs."""
+    for telegram_id, started_on in db.users_with_created_at():
+        allocator = db.load_allocator(telegram_id)
+        if allocator is None:
+            continue
+        metadata = db.income_forecast_maintenance(telegram_id)
+
+        if allocator.profile_id == "piecework":
+            calculated = completed_piecework_average(
+                allocator,
+                started_on=started_on,
+                today=current,
+                history=db.load_income_distribution_payloads(telegram_id),
+            )
+            if calculated is None:
+                continue
+            average, completed_month = calculated
+            average = average.quantize(Decimal("0.01"))
+            if (
+                metadata.get("piecework_updated_for") == completed_month
+                and allocator.settings.average_income == average
+            ):
+                continue
+            allocator.settings.average_income = average
+            db.save_allocator(telegram_id, allocator)
+            db.mark_piecework_average_updated(telegram_id, completed_month)
+            try:
+                await bot.send_message(
+                    telegram_id,
+                    "<b>СРЕДНИЙ ДОХОД ОБНОВЛЁН</b>\n\n"
+                    "Аллокатор пересчитал его по шести последним полным месяцам.\n"
+                    f"Новое значение — <b>{fmt_money(average)} ₽ в месяц</b>.\n\n"
+                    "Эту сумму теперь используют финансовые прогнозы.",
+                    reply_markup=keyboard([
+                        [("Проверить настройку", "settings:income")],
+                        [("← Главное меню", "menu:back")],
+                    ]),
+                )
+            except Exception:
+                logging.exception(
+                    "Не удалось сообщить об обновлении среднего дохода пользователю %s",
+                    telegram_id,
+                )
+            continue
+
+        if allocator.profile_id == "cyclic" and not allocator.settings.cyclic_income_uncertain:
+            calculated = completed_cyclic_average(
+                allocator,
+                started_on=started_on,
+                today=current,
+                history=db.load_income_distribution_payloads(telegram_id),
+            )
+            if calculated is None:
+                continue
+            average, completed_month, window_months = calculated
+            average = average.quantize(Decimal("0.01"))
+            if (
+                metadata.get("cyclic_updated_for") == completed_month
+                and allocator.settings.average_income == average
+            ):
+                continue
+            allocator.settings.average_income = average
+            db.save_allocator(telegram_id, allocator)
+            db.mark_cyclic_average_updated(telegram_id, completed_month)
+            try:
+                await bot.send_message(
+                    telegram_id,
+                    "<b>СРЕДНИЙ ДОХОД ОБНОВЛЁН</b>\n\n"
+                    f"Аллокатор пересчитал его по последним полным циклам за {window_months} мес. "
+                    "Рабочие месяцы и месяцы перерыва учтены вместе.\n"
+                    f"Новое значение — <b>{fmt_money(average)} ₽ в месяц</b>.\n\n"
+                    "Эту сумму теперь используют финансовые прогнозы.",
+                    reply_markup=keyboard([
+                        [("Проверить настройку", "settings:income")],
+                        [("← Главное меню", "menu:back")],
+                    ]),
+                )
+            except Exception:
+                logging.exception(
+                    "Не удалось сообщить об обновлении среднего дохода пользователю %s",
+                    telegram_id,
+                )
+            continue
+
+        manual_review = allocator.profile_id == "stable" or (
+            allocator.profile_id == "cyclic"
+            and allocator.settings.cyclic_income_uncertain
+        )
+        if not manual_review:
+            continue
+        if not stable_review_is_due(
+            started_on=started_on,
+            today=current,
+            last_reviewed_on=_saved_date(metadata.get("stable_last_reviewed_at")),
+            last_reminded_on=_saved_date(metadata.get("stable_last_reminder_at")),
+        ):
+            continue
+        try:
+            profile_note = (
+                "Для циклического профиля с плавающими сроками Аллокатор не меняет "
+                "средний доход автоматически: сокращённый или продлённый контракт может "
+                "исказить расчёт."
+                if allocator.profile_id == "cyclic" else
+                "Аллокатор не меняет её автоматически для стабильного профиля, "
+                "чтобы разовая премия или необычный месяц не исказили прогнозы."
+            )
+            await bot.send_message(
+                telegram_id,
+                "<b>ПОРА ПРОВЕРИТЬ СРЕДНИЙ ДОХОД</b>\n\n"
+                "Прошло полгода. Посмотрите доходы за последние шесть месяцев и "
+                "при необходимости вручную обновите среднюю сумму.\n\n"
+                f"{profile_note}",
+                reply_markup=keyboard([
+                    [("Обновить средний доход", "settings:income")],
+                    [("← Главное меню", "menu:back")],
+                ]),
+            )
+            db.mark_stable_income_reminder_sent(telegram_id, current.isoformat())
+        except Exception:
+            logging.exception(
+                "Не удалось напомнить о среднем доходе пользователю %s",
+                telegram_id,
+            )
+
+
 async def run_reminder_iteration(bot: Bot, today_value: date | None = None):
     """One isolated, testable reminder pass."""
     current = today_value or moscow_today()
     today = current.isoformat()
+    await run_income_forecast_maintenance(bot, current)
     for telegram_id, activation_date in db.due_period_reminders(today):
         try:
             await bot.send_message(
@@ -953,6 +1034,7 @@ async def main():
     dp.include_router(taxes_router)
     dp.include_router(debts_router)
     dp.include_router(goals_manager_router)
+    dp.include_router(calculators_router)
 
     # Новый расчётный период
     dp.include_router(

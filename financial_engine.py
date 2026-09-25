@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP, getcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, getcontext
 from math import log
 from typing import Dict, List, Optional, Tuple
 from datetime import date, datetime, timedelta
@@ -30,8 +30,8 @@ ONE = Decimal("1")
 HUNDRED = Decimal("100")
 CENT = Decimal("0.01")
 
-# Goals and chests may be created without a limit, but only this many are
-# allowed to receive new money at the same time.
+# Current positions are ACTIVE or PAUSED. Completed and archived Goals are
+# history and do not consume these product limits.
 MAX_ACTIVE_GOALS = 5
 MAX_ACTIVE_POSITIONS = 8
 RECOMMENDED_ACTIVE_GOALS = 3
@@ -178,7 +178,7 @@ def goal_percentage_bounds(
     assigned_percentages: List[Decimal],
     remaining_positions_after: int,
 ) -> Tuple[Decimal, Decimal]:
-    """Допустимый целый процент для очередной позиции.
+    """Допустимый процент для очередной позиции.
 
     За каждой ещё не настроенной позицией заранее сохраняется минимум 1%.
     Поэтому для пяти позиций максимум первой равен 96%, а после выбранных
@@ -206,14 +206,15 @@ def sequential_goal_percentages(
             result,
             positions_count - index - 1,
         )
-        if value != value.to_integral_value() or not minimum <= value <= maximum:
+        if value != value.quantize(Decimal("0.01")) or not minimum <= value <= maximum:
             raise ValueError(
-                f"Процент позиции должен быть целым числом от {minimum} до {maximum}."
+                f"Процент позиции должен быть числом от {minimum} до {maximum} "
+                "с точностью не больше двух знаков после запятой."
             )
         result.append(value)
 
     remainder = HUNDRED - sum(result, ZERO)
-    if remainder < ONE or remainder != remainder.to_integral_value():
+    if remainder < ONE or remainder != remainder.quantize(Decimal("0.01")):
         raise ValueError("Последней позиции должно остаться не меньше 1%.")
     return [*result, remainder]
 
@@ -280,8 +281,10 @@ def update_goal_percentage(
     if edited is residual:
         raise ValueError("Доля последней позиции рассчитывается автоматически.")
     value = D(new_percentage)
-    if value != value.to_integral_value() or value < ONE:
-        raise ValueError("Процент должен быть целым числом не меньше 1.")
+    if value != value.quantize(Decimal("0.01")) or value < ONE:
+        raise ValueError(
+            "Процент должен быть не меньше 1 и содержать не больше двух знаков после запятой."
+        )
 
     fixed_total = sum(
         (
@@ -338,9 +341,7 @@ PROFILE_MODE_TITLES = {
         3: "Заплати будущему себе.",
         4: "Не на хлебе и воде.",
         5: "Подготовка к Апокалипсису.",
-        6: "Контракт задержался. Паники нет.",
-        7: "Защита есть. Пора расти.",
-        8: "Философский камень найден.",
+        6: "Философский камень найден.",
     },
 }
 
@@ -490,10 +491,14 @@ class Goal:
     previous_percentage: Optional[Decimal] = None
     uid: str = ""
     is_system_chest: bool = False
+    color_index: Optional[int] = None
 
     def __post_init__(self):
         self.uid = str(self.uid or uuid4().hex)
         self.is_system_chest = bool(self.is_system_chest)
+        self.color_index = (
+            None if self.color_index is None else max(0, int(self.color_index))
+        )
         self.name = str(self.name).strip()
         self.percentage = D(self.percentage)
         self.balance = max(ZERO, D(self.balance))
@@ -558,12 +563,32 @@ def active_position_limit_error(
         if active_goal_count >= MAX_ACTIVE_GOALS:
             return (
                 f"Одновременно можно финансировать не больше {MAX_ACTIVE_GOALS} Целей. "
-                "Сначала поставьте одну из активных Целей на паузу."
+                "Сначала заморозьте одну из активных Целей."
             )
     if len(active) >= MAX_ACTIVE_POSITIONS:
         return (
             f"Одновременно можно финансировать не больше {MAX_ACTIVE_POSITIONS} "
-            "Целей и Сундуков. Сначала поставьте одну из активных позиций на паузу."
+            "Целей и Сундуков. Сначала заморозьте одну из активных позиций."
+        )
+    return None
+
+
+def current_position_limit_error(
+    goals: List[Goal],
+    position_type: str,
+) -> Optional[str]:
+    """Return the reason a new current position cannot be created."""
+    current = [goal for goal in goals if goal.status in {"active", "paused"}]
+    normalized_type = str(position_type or "goal").strip().lower()
+    if normalized_type == "goal" and sum(goal.is_goal for goal in current) >= MAX_ACTIVE_GOALS:
+        return (
+            f"Можно создать не больше {MAX_ACTIVE_GOALS} текущих Целей. "
+            "Завершите или удалите одну из них, прежде чем добавлять новую."
+        )
+    if len(current) >= MAX_ACTIVE_POSITIONS:
+        return (
+            f"Можно создать не больше {MAX_ACTIVE_POSITIONS} текущих Целей и Сундуков. "
+            "Завершите Цель или удалите одну из позиций, прежде чем добавлять новую."
         )
     return None
 
@@ -576,6 +601,11 @@ class PhaseLifeBudget:
     household_reserve: Decimal = ZERO
     life_categories: Dict[str, Decimal] = field(default_factory=dict)
     household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
+    # Исходные строки калькулятора Жизни. Категории выше описывают физические
+    # конверты, а эти списки нужны для понятной пользовательской расшифровки.
+    critical_life_breakdown: List[dict] = field(default_factory=list)
+    household_reserve_breakdown: List[dict] = field(default_factory=list)
+    critical_life_storage_items: List[dict] = field(default_factory=list)
     historical_gifts_monthly: Decimal = ZERO
     currency_code: str = "RUB"
     currency_symbol: str = "₽"
@@ -595,6 +625,18 @@ class PhaseLifeBudget:
             str(name): max(ZERO, D(amount))
             for name, amount in self.household_reserve_categories.items()
         }
+        self.critical_life_breakdown = [
+            dict(item) for item in self.critical_life_breakdown
+            if isinstance(item, dict)
+        ]
+        self.household_reserve_breakdown = [
+            dict(item) for item in self.household_reserve_breakdown
+            if isinstance(item, dict)
+        ]
+        self.critical_life_storage_items = [
+            dict(item) for item in self.critical_life_storage_items
+            if isinstance(item, dict)
+        ]
         self.historical_gifts_monthly = max(ZERO, D(self.historical_gifts_monthly))
         self.currency_code = str(self.currency_code or "RUB").strip().upper()
         self.currency_symbol = str(self.currency_symbol or self.currency_code).strip()
@@ -664,6 +706,10 @@ class UserSettings:
     income_work_months: Decimal = Decimal("1")
     reliable_gap_income: Decimal = Decimal("0")
     stabilizer_target_months: Decimal = Decimal("1")
+    # Сроки циклической работы могут быть точными или плавающими. Это влияет
+    # на рекомендуемый размер Подушки и способ обновления среднего дохода,
+    # но не создаёт отдельный резерв.
+    cyclic_income_uncertain: bool = True
     contract_obligations: Dict[str, Decimal] = field(default_factory=dict)
     # Физический конверт каждой части обязательств, заранее подготовленной
     # на рабочие месяцы. Сам расход остаётся единственным: здесь хранится
@@ -746,6 +792,11 @@ class UserSettings:
     life_category_ids: Dict[str, str] = field(default_factory=dict)
     household_reserve_categories: Dict[str, Decimal] = field(default_factory=dict)
     household_reserve_category_ids: Dict[str, str] = field(default_factory=dict)
+    # Полная детализация, введённая в калькуляторе стоимости жизни. Не влияет
+    # на маршрутизацию денег и хранится отдельно от финансовых конвертов.
+    critical_life_breakdown: List[dict] = field(default_factory=list)
+    household_reserve_breakdown: List[dict] = field(default_factory=list)
+    critical_life_storage_items: List[dict] = field(default_factory=list)
     # Подарки вводятся в меню Жизни только как история будущей Цели.
     # Они не входят в БР и УЖ.
     historical_gifts_monthly: Decimal = ZERO
@@ -758,6 +809,7 @@ class UserSettings:
     # ----------------------------
 
     goals: List[Goal] = field(default_factory=list)
+    allocation_needs_review: bool = False
 
     # ----------------------------
     # Кредиты
@@ -787,6 +839,7 @@ class UserSettings:
         self.income_work_months = max(ONE, D(self.income_work_months))
         self.reliable_gap_income = max(ZERO, D(self.reliable_gap_income))
         self.stabilizer_target_months = max(ONE, D(self.stabilizer_target_months))
+        self.cyclic_income_uncertain = bool(self.cyclic_income_uncertain)
         self.contract_obligations = {
             str(name): max(ZERO, D(amount))
             for name, amount in self.contract_obligations.items()
@@ -812,6 +865,9 @@ class UserSettings:
                 household_reserve=self.household_reserve,
                 life_categories=self.life_categories,
                 household_reserve_categories=self.household_reserve_categories,
+                critical_life_breakdown=self.critical_life_breakdown,
+                household_reserve_breakdown=self.household_reserve_breakdown,
+                critical_life_storage_items=self.critical_life_storage_items,
                 completed=True,
             )
         self.phase_life_budgets = normalized_phase_budgets
@@ -924,6 +980,18 @@ class UserSettings:
             name: D(amount)
             for name, amount in self.household_reserve_categories.items()
         }
+        self.critical_life_breakdown = [
+            dict(item) for item in self.critical_life_breakdown
+            if isinstance(item, dict)
+        ]
+        self.household_reserve_breakdown = [
+            dict(item) for item in self.household_reserve_breakdown
+            if isinstance(item, dict)
+        ]
+        self.critical_life_storage_items = [
+            dict(item) for item in self.critical_life_storage_items
+            if isinstance(item, dict)
+        ]
         supplied_household_ids = {
             str(name): str(uid)
             for name, uid in (self.household_reserve_category_ids or {}).items()
@@ -937,6 +1005,7 @@ class UserSettings:
         self.gift_guideline_min = D(self.gift_guideline_min)
         self.gift_guideline_max = D(self.gift_guideline_max)
         self.gift_warning_limit = D(self.gift_warning_limit)
+        self.allocation_needs_review = bool(self.allocation_needs_review)
 
     # ========================================================
     # ПРОИЗВОДНЫЕ ПЕРЕМЕННЫЕ
@@ -1055,7 +1124,20 @@ class UserSettings:
             self.profile_type,
             self.employment_type,
             self.income_rhythm,
-        ) in {PROFILE_PIECEWORK, PROFILE_CYCLIC}
+        ) == PROFILE_PIECEWORK
+
+    @property
+    def recommended_force_majeure_minimum(self) -> Decimal:
+        profile_id = normalize_profile_id(
+            self.profile_type,
+            self.employment_type,
+            self.income_rhythm,
+        )
+        if profile_id == PROFILE_CYCLIC:
+            return Decimal("9") if self.cyclic_income_uncertain else Decimal("6")
+        if profile_id == PROFILE_PIECEWORK:
+            return Decimal("4")
+        return Decimal("3")
 
     @property
     def stabilizer_months(self) -> Decimal:
@@ -1736,6 +1818,13 @@ class FinancialAllocator:
         self.settings = settings
         self.state = state or AllocatorState()
 
+        # В ранней версии у циклического профиля был отдельный резерв задержки.
+        # После упрощения модели эти реальные деньги становятся частью Подушки,
+        # поэтому ни один сохранённый рубль не исчезает при миграции.
+        if self.profile_id == PROFILE_CYCLIC and self.state.pillow_stabilizer > ZERO:
+            self.state.pillow_force_majeure += self.state.pillow_stabilizer
+            self.state.pillow_stabilizer = ZERO
+
         # Старые снимки знали только общий прогресс КМ + БР. При первом
         # восстановлении отделяем БР по тем целям, которые действовали в этот
         # момент. Дальше два прогресса меняются независимо.
@@ -1760,8 +1849,34 @@ class FinancialAllocator:
             )
 
         self.ensure_active_chest()
+        self.ensure_position_color_indices()
+        if len(self.settings.active_goals) == 1:
+            self.settings.active_goals[0].percentage = HUNDRED
+            self.settings.active_goals[0].is_auto_percentage = True
+            self.settings.allocation_needs_review = False
         self._ensure_goal_balances()
         self._ensure_life_categories()
+
+    def ensure_position_color_indices(self) -> None:
+        """Persist a visual identity per Goal/Chest without reindexing neighbours."""
+        for position_type in ("goal", "chest"):
+            used = {
+                goal.color_index
+                for goal in self.settings.goals
+                if goal.position_type == position_type and goal.color_index is not None
+            }
+            next_index = 0
+            for goal in sorted(
+                (item for item in self.settings.goals if item.position_type == position_type),
+                key=lambda item: item.order_index,
+            ):
+                if goal.color_index is not None:
+                    continue
+                while next_index in used:
+                    next_index += 1
+                goal.color_index = next_index
+                used.add(next_index)
+                next_index += 1
 
     def _income_rollback_snapshot(self) -> dict:
         """State immediately before an income, without growing a nested log."""
@@ -2086,7 +2201,25 @@ class FinancialAllocator:
             for duplicate in marked[1:]:
                 duplicate.is_system_chest = False
             system_chest.position_type = "chest"
-            system_chest.status = "active"
+            if system_chest.status != "active":
+                replacement = next(
+                    (goal for goal in self.settings.active_goals if goal.is_chest),
+                    None,
+                )
+                if replacement is not None:
+                    system_chest.is_system_chest = False
+                    replacement.is_system_chest = True
+                    return replacement
+            if system_chest.status != "active":
+                system_chest.status = "active"
+                system_chest.percentage = ZERO
+                active = self.settings.active_goals
+                if len(active) == 1:
+                    system_chest.percentage = HUNDRED
+                    system_chest.is_auto_percentage = True
+                    self.settings.allocation_needs_review = False
+                else:
+                    self.settings.allocation_needs_review = True
             return system_chest
         chests = [g for g in self.settings.active_goals if g.is_chest]
         if chests:
@@ -2107,44 +2240,198 @@ class FinancialAllocator:
         )
         self.settings.goals.append(chest)
         self.state.goal_balances[name] = ZERO
+        if len(self.settings.active_goals) == 1:
+            chest.is_auto_percentage = True
+            self.settings.allocation_needs_review = False
+        else:
+            self.settings.allocation_needs_review = True
         return chest
 
     def is_last_active_chest(self, goal: Goal) -> bool:
         return (goal.is_chest and goal.status == "active"
                 and sum(g.is_chest for g in self.settings.active_goals) == 1)
 
+    def move_system_chest_role(self, source: Goal) -> None:
+        """Move the internal overflow route before pausing a non-last chest.
+
+        The marker is an implementation detail: the user may pause any chest
+        while another active chest is available.
+        """
+        if not source.is_system_chest:
+            return
+        replacement = next(
+            (item for item in self.settings.active_goals
+             if item is not source and item.is_chest),
+            None,
+        )
+        if replacement is None:
+            raise ValueError(
+                "Этот сундук нельзя удалить или заморозить. Он принимает свободные деньги, "
+                "когда другие цели заполнены. Его можно переименовать или изменить долю."
+            )
+        source.is_system_chest = False
+        replacement.is_system_chest = True
+
     def activate_position(self, goal: Goal) -> None:
         """Activate a paused Goal/Chest while enforcing funding limits."""
         if goal not in self.settings.goals:
             raise ValueError("Позиция не принадлежит этому профилю.")
         if goal.status != "paused":
-            raise ValueError("Активировать можно только позицию в ожидании.")
+            raise ValueError("Разморозить можно только замороженную позицию.")
         limit_error = self.position_activation_error(goal.position_type)
         if limit_error:
             raise ValueError(limit_error)
         goal.status = "active"
-        goal.percentage = goal.previous_percentage or ONE
-        normalize_active_goal_percentages(self.settings.goals)
+        goal.percentage = ZERO
+        goal.is_auto_percentage = False
+        self.settle_active_composition_change()
 
     def pause_position(self, goal: Goal) -> None:
         """Pause a position without moving its balance or changing history."""
         if goal not in self.settings.goals:
             raise ValueError("Позиция не принадлежит этому профилю.")
         if goal.status != "active":
-            raise ValueError("Поставить на паузу можно только активную позицию.")
+            raise ValueError("Заморозить можно только активную позицию.")
         if self.is_last_active_chest(goal):
             raise ValueError(
-                "Это последний активный Сундук. Добавьте или возобновите другой, "
-                "чтобы было куда направлять остаток от заполненных Целей."
+                "Этот сундук нельзя удалить или заморозить. Он принимает свободные деньги, "
+                "когда другие цели заполнены. Его можно переименовать или изменить долю."
             )
+        self.move_system_chest_role(goal)
         goal.previous_percentage = goal.percentage
+        released = max(ZERO, goal.percentage)
+        goal.percentage = ZERO
+        goal.is_auto_percentage = False
         goal.status = "paused"
-        normalize_active_goal_percentages(self.settings.goals)
+        self.settle_active_composition_change(released)
+
+    def pause_position_with_distribution(
+        self,
+        goal: Goal,
+        *,
+        recipient: Goal | None = None,
+        evenly: bool = False,
+    ) -> None:
+        """Pause a position and explicitly move its share where the user chose."""
+        if goal not in self.settings.goals:
+            raise ValueError("Позиция не принадлежит этому профилю.")
+        if goal.status != "active":
+            raise ValueError("Заморозить можно только активную позицию.")
+        if self.is_last_active_chest(goal):
+            raise ValueError(
+                "Этот сундук нельзя удалить или заморозить. Он принимает свободные деньги, "
+                "когда другие цели заполнены. Его можно переименовать или изменить долю."
+            )
+        self.move_system_chest_role(goal)
+        remaining = [item for item in self.settings.active_goals if item is not goal]
+        if not remaining:
+            raise ValueError("Нужна хотя бы одна другая активная позиция.")
+        if len(remaining) > 1:
+            if evenly and recipient is not None:
+                raise ValueError("Выберите один способ распределения доли.")
+            if not evenly and recipient not in remaining:
+                raise ValueError("Выбранная позиция больше не активна.")
+
+        review_was_needed = self.settings.allocation_needs_review
+        goal.previous_percentage = goal.percentage
+        released = max(ZERO, D(goal.percentage))
+        goal.percentage = ZERO
+        goal.is_auto_percentage = False
+        goal.status = "paused"
+
+        if len(remaining) == 1:
+            remaining[0].percentage = HUNDRED
+            remaining[0].is_auto_percentage = True
+            self.settings.allocation_needs_review = False
+            return
+
+        for item in remaining:
+            item.is_auto_percentage = False
+        if evenly:
+            regular_share = (released / D(len(remaining))).quantize(
+                Decimal("0.01"), rounding=ROUND_DOWN
+            )
+            distributed = ZERO
+            for item in remaining[:-1]:
+                item.percentage += regular_share
+                distributed += regular_share
+            remaining[-1].percentage += released - distributed
+        else:
+            recipient.percentage += released
+        self.settings.allocation_needs_review = review_was_needed
+
+    def settle_active_composition_change(
+        self,
+        released_percentage: Decimal = ZERO,
+    ) -> None:
+        """Keep allocation valid while asking for review of a changed set."""
+        fallback = self.ensure_active_chest()
+        active = self.settings.active_goals
+        if len(active) == 1:
+            active[0].percentage = HUNDRED
+            active[0].is_auto_percentage = True
+            self.settings.allocation_needs_review = False
+            return
+        for goal in active:
+            goal.is_auto_percentage = False
+        fallback.is_auto_percentage = True
+        if released_percentage > ZERO:
+            fallback.percentage += max(ZERO, D(released_percentage))
+        self.settings.allocation_needs_review = True
+
+    def distribute_completed_share_evenly(
+        self,
+        released_percentage: Decimal,
+    ) -> None:
+        """Split a completed Goal's former share across all active positions."""
+        self.ensure_active_chest()
+        remaining = self.settings.active_goals
+        if not remaining:
+            return
+        if len(remaining) == 1:
+            remaining[0].percentage = HUNDRED
+            remaining[0].is_auto_percentage = True
+            self.settings.allocation_needs_review = False
+            return
+
+        released = max(ZERO, D(released_percentage))
+        regular_share = (released / D(len(remaining))).quantize(
+            Decimal("0.01"), rounding=ROUND_DOWN
+        )
+        distributed = ZERO
+        for item in remaining:
+            item.is_auto_percentage = False
+        for item in remaining[:-1]:
+            item.percentage += regular_share
+            distributed += regular_share
+        remaining[-1].percentage += released - distributed
+        remaining[-1].is_auto_percentage = True
+
+    def complete_goal(self, goal: Goal) -> None:
+        """Complete one Goal and split its released share across active positions."""
+        if goal not in self.settings.goals or not goal.is_goal:
+            raise ValueError("Завершить можно только существующую Цель.")
+        if goal.status not in {"active", "paused"}:
+            raise ValueError("Эту Цель нельзя отметить выполненной.")
+        was_active = goal.status == "active"
+        released = max(ZERO, goal.percentage) if was_active else ZERO
+        if was_active:
+            goal.previous_percentage = goal.percentage
+        goal.percentage = ZERO
+        goal.is_auto_percentage = False
+        goal.status = "completed"
+        goal.completed_at = moscow_now().isoformat()
+        goal.updated_at = goal.completed_at
+        if was_active:
+            self.distribute_completed_share_evenly(released)
 
     def position_activation_error(self, position_type: str) -> Optional[str]:
         """Refresh completed Goals, then check whether an active slot exists."""
         self._complete_funded_goals()
         return active_position_limit_error(self.settings.goals, position_type)
+
+    def position_creation_error(self, position_type: str) -> Optional[str]:
+        return current_position_limit_error(self.settings.goals, position_type)
 
     def goal_remaining_capacity(self, goal: Goal) -> Optional[Decimal]:
         if goal.is_chest or goal.full_target_amount is None:
@@ -2167,11 +2454,7 @@ class FinancialAllocator:
         return current >= goal.full_target_amount
 
     def _complete_funded_goals(self) -> List[Goal]:
-        """Stop funded Goals and route their released share to active chests.
-
-        This is the same explicit fallback used by manual completion. It keeps
-        active percentages at 100% without changing or deleting history.
-        """
+        """Stop funded Goals and split their released share across active positions."""
         completed = [
             goal
             for goal in self.settings.active_goals
@@ -2180,7 +2463,6 @@ class FinancialAllocator:
         if not completed:
             return []
 
-        self.ensure_active_chest()
         released = sum((max(ZERO, goal.percentage) for goal in completed), ZERO)
         completed_at = moscow_now().isoformat()
         for goal in completed:
@@ -2190,15 +2472,7 @@ class FinancialAllocator:
             goal.status = "completed"
             goal.completed_at = completed_at
             goal.updated_at = completed_at
-
-        if released > ZERO:
-            for name, share in self._split_chest_overflow(released).items():
-                chest = next(
-                    goal
-                    for goal in self.settings.active_goals
-                    if goal.is_chest and goal.name == name
-                )
-                chest.percentage += share
+        self.distribute_completed_share_evenly(released)
         return completed
 
     def _ensure_goal_balances(self):
@@ -2477,7 +2751,7 @@ class FinancialAllocator:
             return ZERO
 
         if self.profile_id == PROFILE_CYCLIC:
-            layers = ["МП", "МР", "ФМ", "СтабД"]
+            layers = ["МП", "МР", "ФМ"]
         elif self.profile_id == PROFILE_PIECEWORK:
             layers = ["МП", "ФМ", "СтабД"]
         else:
@@ -2520,9 +2794,15 @@ class FinancialAllocator:
         allocations["Фонд Зарплаты"] = allocations.get("Фонд Зарплаты", ZERO) + (
             self.state.intercontract_reserve - fund_before
         )
-        allocations["Стабилизатор дохода"] = allocations.get("Стабилизатор дохода", ZERO) + (
-            self.state.pillow_stabilizer - stabilizer_before
-        )
+        if self.settings.needs_stabilizer:
+            allocations["Стабилизатор дохода"] = allocations.get("Стабилизатор дохода", ZERO) + (
+                self.state.pillow_stabilizer - stabilizer_before
+            )
+        else:
+            # У стабильного и циклического профилей такого финансового
+            # счёта нет. Не оставляем даже нулевую техническую строку,
+            # чтобы она не могла попасть в отчёты и карточки.
+            allocations.pop("Стабилизатор дохода", None)
         return overflow
 
     @property
@@ -2552,14 +2832,16 @@ class FinancialAllocator:
     def first_distribution_balances(self) -> Dict[str, Decimal]:
         """Текущие остатки, которые участвуют в первом перераспределении."""
         st = self.state
-        return {
+        balances = {
             "Текущая жизнь": money(st.life_balance),
             "Минимальная подушка": money(st.pillow_minimum),
             "Обязательства на время работы": money(st.contract_obligations_reserve),
             "Фонд Зарплаты": money(st.intercontract_reserve),
-            "Стабилизатор дохода": money(st.pillow_stabilizer),
             "Форс-мажорная подушка": money(st.pillow_force_majeure),
         }
+        if self.settings.needs_stabilizer:
+            balances["Стабилизатор дохода"] = money(st.pillow_stabilizer)
+        return balances
 
     def rebalance_first_distribution(self) -> tuple[Dict[str, Decimal], Dict[str, Decimal]]:
         """Перекладывает уже разделённые деньги и возвращает (до, после)."""
@@ -2621,7 +2903,8 @@ class FinancialAllocator:
         overflow = self.waterfall_pillow(total, start_layer)
         result["Минимальная подушка"] = st.pillow_minimum - before_minimum
         result["Фонд Зарплаты"] = st.intercontract_reserve - before_fund
-        result["Стабилизатор дохода"] = st.pillow_stabilizer - before_stabilizer
+        if s.needs_stabilizer:
+            result["Стабилизатор дохода"] = st.pillow_stabilizer - before_stabilizer
         result["Форс-мажорная подушка"] = st.pillow_force_majeure - before_force
 
         if overflow > ZERO:
@@ -2753,9 +3036,12 @@ class FinancialAllocator:
             elif not self.force_majeure_pillow_is_funded():
                 start_layer = "ФМ"
                 overflow = self.waterfall_pillow(remaining, start_layer)
-            else:
+            elif self.settings.needs_stabilizer:
                 start_layer = "СтабД"
                 overflow = self.waterfall_pillow(remaining, start_layer)
+            else:
+                self.state.investments += remaining
+                overflow = ZERO
             if overflow > ZERO:
                 self.state.investments += overflow
         self.state.reconcile_fund_salary_currencies()
@@ -2901,7 +3187,7 @@ class FinancialAllocator:
 
     @property
     def protective_capital_balance(self) -> Decimal:
-        """Совокупный капитал защитных резервов, определяющий кубки."""
+        """Совокупный капитал защитных резервов для общей сводки."""
         total = self.pillow_total_balance
         if self.settings.needs_stabilizer:
             total += self.state.pillow_stabilizer
@@ -2922,13 +3208,12 @@ class FinancialAllocator:
             ]
         salary_critical = self.intercontract_current_life_limit
         salary_full = self.intercontract_current_limit
-        return [
+        targets = [
             (4, salary_critical, "Фонд Зарплаты-КМ"),
             (5, salary_full, "Фонд Зарплаты-УЖ"),
             (6, salary_full + s.force_majeure_limit, "Подушка"),
-            (7, salary_full + s.force_majeure_limit + s.stabilizer_life_limit, "Стабилизатор-КМ"),
-            (8, salary_full + s.force_majeure_limit + s.stabilizer_full_limit, "Стабилизатор-УЖ"),
         ]
+        return targets
 
     @property
     def protective_capital_target(self) -> Decimal:
@@ -3172,6 +3457,100 @@ class FinancialAllocator:
             "tax_changes_range": lower != upper,
         }
 
+    def allocation_setup_capacity_range(self) -> Dict[str, Decimal | str | bool]:
+        """Ориентир потока Целей для мастера долей.
+
+        Это не прогноз следующего фактического поступления. На защитных
+        уровнях расчёт показывает сценарий, в котором свободная часть этапа C
+        делится между защитой и Целями, даже если для ближайшего поступления
+        пользователь выберет «всё в защиту». Бракет сверхдохода D не участвует.
+        """
+        s = self.settings
+        average = max(ZERO, D(s.average_income))
+        if average <= ZERO:
+            return {
+                "minimum": ZERO,
+                "maximum": ZERO,
+                "income_minimum": ZERO,
+                "income_maximum": ZERO,
+                "profile_basis": self.profile_id,
+                "blocked_stage": "income",
+                "tax_changes_range": False,
+            }
+
+        # Экран долей переводит проценты в рубли для обычного месяца, поэтому
+        # использует ровно указанную пользователем доходную базу. Колебания
+        # сдельного дохода и сверхдоход объясняются текстом, но не раздувают
+        # справочный диапазон и не мешают выбрать доли.
+        gross_incomes = (average,)
+
+        tax_rates = {
+            max(ZERO, min(HUNDRED, D(rate)))
+            for rate in s.income_type_tax_rates.values()
+        }
+        if not tax_rates:
+            tax_rates = {max(ZERO, min(HUNDRED, D(s.tax_rate)))}
+
+        profile_level = self.active_mode()
+        goal_unlock = {
+            PROFILE_STABLE: 3,
+            PROFILE_PIECEWORK: 3,
+            PROFILE_CYCLIC: 5,
+        }[self.profile_id]
+        if profile_level < goal_unlock:
+            goal_share = ZERO
+        else:
+            mode = self.allocation_mode()
+            c = s.bracket_c / HUNDRED
+            if mode in {MODE_3, MODE_4, MODE_5}:
+                goal_share = (ONE - c) / Decimal("2")
+            else:
+                goal_share = ONE - c
+
+        capacities: List[Decimal] = []
+        blocked_stages: List[str] = []
+        for gross in gross_incomes:
+            for rate in tax_rates:
+                net = gross * (ONE - rate / HUNDRED)
+                share_a = s.bracket_a / HUNDRED
+                share_b = s.bracket_b / HUNDRED
+                if share_a >= ONE or share_b >= ONE:
+                    capacities.append(ZERO)
+                    blocked_stages.append("settings")
+                    continue
+                stage_a_required = s.critical_life / (ONE - share_a)
+                stage_b_required = s.household_reserve / (ONE - share_b)
+                free = net - stage_a_required - stage_b_required
+                if self.profile_id == PROFILE_CYCLIC:
+                    cycle_months = max(ONE, s.income_work_months + s.income_gap_months)
+                    free -= s.contract_obligations_total / cycle_months
+                if net < stage_a_required:
+                    blocked_stages.append("A")
+                elif net < stage_a_required + stage_b_required:
+                    blocked_stages.append("B")
+                else:
+                    blocked_stages.append("")
+                capacities.append(money(max(ZERO, free) * goal_share))
+
+        lower = min(capacities, default=ZERO)
+        upper = max(capacities, default=ZERO)
+        blocked_stage = ""
+        if upper <= ZERO:
+            blocked_stage = "A" if "A" in blocked_stages else (
+                "B" if "B" in blocked_stages else next(
+                    (stage for stage in blocked_stages if stage), ""
+                )
+            )
+        return {
+            "minimum": money(lower),
+            "maximum": money(upper),
+            "income_minimum": money(min(gross_incomes)),
+            "income_maximum": money(max(gross_incomes)),
+            "profile_basis": self.profile_id,
+            "blocked_stage": blocked_stage,
+            "tax_changes_range": len(tax_rates) > 1,
+        }
+
     def goal_forecast(
         self,
         goal: Goal,
@@ -3281,7 +3660,7 @@ class FinancialAllocator:
         }
 
     def active_mode(self) -> int:
-        """Кубки по общему защитному капиталу; долги остаются жёстким шлюзом."""
+        """Текущий уровень с жёсткими долговыми и профильными шлюзами."""
         s = self.settings
         has_debts = any(credit.active for credit in s.credits)
 
@@ -3289,6 +3668,17 @@ class FinancialAllocator:
             return 1
         if has_debts:
             return 2
+
+        # Фонд зарплаты и Подушка циклического профиля решают разные задачи.
+        # Деньги в одном резерве не выдают кубок за другой резерв.
+        if self.profile_id == PROFILE_CYCLIC:
+            if self.state.intercontract_reserve < self.intercontract_current_life_limit:
+                return 3
+            if self.state.intercontract_reserve < self.intercontract_current_limit:
+                return 4
+            if self.pillow_total_balance < s.force_majeure_limit:
+                return 5
+            return 6
 
         capital = self.protective_capital_balance
         mode = 3
@@ -3331,10 +3721,6 @@ class FinancialAllocator:
                 return MODE_3
             if not self.force_majeure_pillow_is_funded():
                 return MODE_3
-            if self.state.pillow_stabilizer < self.settings.stabilizer_life_limit:
-                return MODE_4
-            if self.state.pillow_stabilizer < self.settings.stabilizer_full_limit:
-                return MODE_5
             return MODE_6
 
         if not self.force_majeure_pillow_is_funded():
@@ -3384,9 +3770,37 @@ class FinancialAllocator:
                 candidates.append((MODE_3, total_debt))
 
         elif current_mode == MODE_3:
-            if self.profile_id == PROFILE_CYCLIC and (
-                st.intercontract_reserve < self.intercontract_current_limit
-            ):
+            if self.profile_id == PROFILE_CYCLIC:
+                if st.intercontract_reserve < self.intercontract_current_life_limit:
+                    candidates.append((MODE_4, max(
+                        ZERO,
+                        self.intercontract_current_life_limit - st.intercontract_reserve,
+                    )))
+                elif st.intercontract_reserve < self.intercontract_current_limit:
+                    candidates.append((MODE_5, max(
+                        ZERO,
+                        self.intercontract_current_limit - st.intercontract_reserve,
+                    )))
+                elif self.pillow_total_balance < s.force_majeure_limit:
+                    candidates.append((MODE_6, max(
+                        ZERO,
+                        s.force_majeure_limit - self.pillow_total_balance,
+                    )))
+                remaining = ZERO
+            else:
+                remaining = max(
+                    ZERO,
+                    s.force_majeure_limit - self.pillow_total_balance,
+                )
+
+            if self.profile_id != PROFILE_CYCLIC and remaining > ZERO:
+                if s.needs_stabilizer:
+                    candidates.append((MODE_4, remaining))
+                else:
+                    candidates.append((MODE_6, remaining))
+
+        elif current_mode == MODE_4:
+            if self.profile_id == PROFILE_CYCLIC:
                 remaining = max(
                     ZERO,
                     self.intercontract_current_limit - st.intercontract_reserve,
@@ -3394,31 +3808,23 @@ class FinancialAllocator:
             else:
                 remaining = max(
                     ZERO,
-                    s.force_majeure_limit - self.pillow_total_balance,
+                    s.stabilizer_life_limit - st.pillow_stabilizer,
                 )
-
-            if remaining > ZERO:
-                if s.needs_stabilizer:
-                    candidates.append((MODE_4, remaining))
-                else:
-                    candidates.append((MODE_6, remaining))
-
-        elif current_mode == MODE_4:
-            remaining = max(
-                ZERO,
-                s.stabilizer_life_limit
-                - st.pillow_stabilizer,
-            )
 
             if remaining > ZERO:
                 candidates.append((MODE_5, remaining))
 
         elif current_mode == MODE_5:
-            remaining = max(
-                ZERO,
-                s.stabilizer_full_limit
-                - st.pillow_stabilizer,
-            )
+            if self.profile_id == PROFILE_CYCLIC:
+                remaining = max(
+                    ZERO,
+                    s.force_majeure_limit - self.pillow_total_balance,
+                )
+            else:
+                remaining = max(
+                    ZERO,
+                    s.stabilizer_full_limit - st.pillow_stabilizer,
+                )
 
             if remaining > ZERO:
                 candidates.append((MODE_6, remaining))
@@ -3479,6 +3885,24 @@ class FinancialAllocator:
             return max(ZERO, s.minimum_reserve_limit - self.pillow_total_balance)
         if mode == 2:
             return sum((c.principal_balance for c in s.credits if c.active), ZERO)
+        if self.profile_id == PROFILE_CYCLIC:
+            if mode == 3:
+                return max(
+                    ZERO,
+                    self.intercontract_current_life_limit
+                    - self.state.intercontract_reserve,
+                )
+            if mode == 4:
+                return max(
+                    ZERO,
+                    self.intercontract_current_limit
+                    - self.state.intercontract_reserve,
+                )
+            if mode == 5:
+                return max(
+                    ZERO,
+                    s.force_majeure_limit - self.pillow_total_balance,
+                )
         next_target = next(
             (target for reached_mode, target, _name in self.resilience_transition_targets() if reached_mode > mode),
             None,
@@ -3630,11 +4054,26 @@ class FinancialAllocator:
                 - D(st.period_life_topups.get("Налоги", ZERO)),
             )
 
-        # A dated tax must still receive its current monthly quota when the
-        # aggregate life balance is already above Критический минимум.  Keep
-        # the ordinary bracket split: the quota only raises the missing life
-        # amount that Stage A has to process.
-        missing = max(normal_missing, tax_missing)
+        # A temporary tax catch-up is outside the recurring Critical Minimum:
+        # only the ordinary annual tax norm is already included in it.  Add
+        # the excess quota instead of letting it replace money intended for
+        # rent, a planned payment, or another life envelope.
+        if current_tax_quotas:
+            already_saved_tax = D(st.period_life_topups.get("Налоги", ZERO))
+            recurring_tax_missing = max(
+                ZERO,
+                sum(s.planned_taxes.values(), ZERO) - already_saved_tax,
+            )
+            temporary_tax_extra = max(
+                ZERO,
+                tax_missing - recurring_tax_missing,
+            )
+            missing = max(
+                tax_missing,
+                normal_missing + temporary_tax_extra,
+            )
+        else:
+            missing = max(normal_missing, tax_missing)
         if missing <= ZERO:
             return amount
         bracket = s.bracket_a
@@ -3965,7 +4404,7 @@ class FinancialAllocator:
         return result
 
     def split_goal_amount(self, amount: Decimal) -> Dict[str, Decimal]:
-        """Чистый расчёт: ограничиваем Цели, переполнение — только в Сундуки."""
+        """Cap funded Goals and split their current overflow across the rest."""
         amount = max(ZERO, D(amount))
         goals = self.settings.active_goals
         if not goals or amount <= ZERO:
@@ -3981,11 +4420,29 @@ class FinancialAllocator:
             part = planned if capacity is None else min(planned, capacity)
             result[goal.name] = part
             overflow += planned - part
-        if overflow > ZERO:
-            if not any(g.is_chest for g in goals):
+        while overflow > ZERO:
+            eligible = []
+            for goal in goals:
+                capacity = self.goal_remaining_capacity(goal)
+                available = (
+                    None if capacity is None
+                    else max(ZERO, capacity - result.get(goal.name, ZERO))
+                )
+                if available is None or available > ZERO:
+                    eligible.append((goal, available))
+            if not eligible:
                 raise ValueError("Добавьте активный Сундук для остатка от заполненных Целей.")
-            for name, part in self._split_chest_overflow(overflow).items():
-                result[name] = result.get(name, ZERO) + part
+
+            share = (overflow / D(len(eligible))).quantize(CENT, rounding=ROUND_DOWN)
+            distributed = ZERO
+            for index, (goal, available) in enumerate(eligible):
+                proposed = overflow - distributed if index == len(eligible) - 1 else share
+                part = proposed if available is None else min(proposed, available)
+                result[goal.name] = result.get(goal.name, ZERO) + part
+                distributed += part
+            if distributed <= ZERO:
+                raise ValueError("Не удалось распределить остаток заполненной Цели.")
+            overflow -= distributed
         return {name: part for name, part in result.items() if part > ZERO}
 
     # ========================================================
@@ -4236,11 +4693,12 @@ class FinancialAllocator:
         allocations: Dict[str, Decimal] = {
             "Подушка": ZERO,
             "Фонд Зарплаты": ZERO,
-            "Стабилизатор дохода": ZERO,
             "Инвестиции": ZERO,
             "Досрочное": ZERO,
             "Бытовой резерв": ZERO,
         }
+        if self.settings.needs_stabilizer:
+            allocations["Стабилизатор дохода"] = ZERO
 
         steps: List[str] = []
 
@@ -4357,7 +4815,10 @@ class FinancialAllocator:
             self.state.pillow_minimum + self.state.pillow_force_majeure - pillow_before
         )
         allocations["Фонд Зарплаты"] = self.state.intercontract_reserve - fund_salary_before
-        allocations["Стабилизатор дохода"] = self.state.pillow_stabilizer - stabilizer_before
+        if self.settings.needs_stabilizer:
+            allocations["Стабилизатор дохода"] = self.state.pillow_stabilizer - stabilizer_before
+        else:
+            allocations.pop("Стабилизатор дохода", None)
 
         # --------------------------------------------
         # Периодическая аналитика
@@ -4582,7 +5043,7 @@ class FinancialAllocator:
 
         priority = self.current_protection_priority()
 
-        return {
+        snapshot = {
             "mode": self.active_mode(),
             "mode_name": self.mode_display_name(),
             "mode_title": self.mode_title(),
@@ -4632,12 +5093,6 @@ class FinancialAllocator:
                     self.state.pillow_force_majeure,
             },
 
-            "stabilizer": {
-                "balance": self.state.pillow_stabilizer,
-                "critical_target": self.settings.stabilizer_life_limit,
-                "full_target": self.settings.stabilizer_full_limit,
-            },
-
             "contract_obligations_reserve": {
                 "balance": self.state.contract_obligations_reserve,
                 "target": self.settings.contract_obligations_total,
@@ -4678,6 +5133,13 @@ class FinancialAllocator:
                 for credit in self.settings.credits
             ],
         }
+        if self.settings.needs_stabilizer:
+            snapshot["stabilizer"] = {
+                "balance": self.state.pillow_stabilizer,
+                "critical_target": self.settings.stabilizer_life_limit,
+                "full_target": self.settings.stabilizer_full_limit,
+            }
+        return snapshot
 
     # ========================================================
     # БЛИЖАЙШИЙ ПЕРЕХОД

@@ -8,3 +8,4 @@ allocator.db-shm
 allocator.db-wal
 backups/
 .DS_Store
+chatgpt_sources/
