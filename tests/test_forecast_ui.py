@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal as D
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from aiogram.exceptions import TelegramBadRequest
 _DATA=tempfile.TemporaryDirectory()
 os.environ['ALLOCATOR_DATA_DIR']=_DATA.name
 from forecast import (
@@ -19,6 +20,7 @@ from forecast import (
     human_path_duration,
     historical_income_tax_rate,
     investment_forecast_text,
+    choose_investment_income_growth,
     last_income_distribution_strategy,
     level_forecast_text,
     parse_decimal,
@@ -815,6 +817,31 @@ class ForecastTextTests(unittest.TestCase):
         self.assertIn('полный размер Стабилизатора', text)
 
 class ForecastFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_investment_growth_continues_after_expired_callback(self):
+        callback = SimpleNamespace(
+            data='forecastinvest:growth:3',
+            from_user=SimpleNamespace(id=42),
+            answer=AsyncMock(side_effect=TelegramBadRequest(
+                method=object(), message='query is too old',
+            )),
+            message=SimpleNamespace(answer=AsyncMock()),
+        )
+        state = SimpleNamespace(get_data=AsyncMock(return_value={
+            'investment_rate': '10',
+            'investment_inflation': '5',
+        }))
+        with patch(
+            'forecast.render_investment_forecast', new=AsyncMock(),
+        ) as render:
+            await choose_investment_income_growth(callback, state)
+
+        callback.message.answer.assert_awaited_once_with(
+            'Рассчитываю. Ожидайте, симуляция может занять некоторое время'
+        )
+        render.assert_awaited_once_with(
+            callback.message, state, 42, D('10'), D('5'), D('3'),
+        )
+
     async def test_financial_path_sends_generated_image(self):
         source = FinancialAllocator(UserSettings(
             has_debts=False,

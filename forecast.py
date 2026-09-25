@@ -11,6 +11,7 @@ from html import escape
 from typing import Callable
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -2223,6 +2224,9 @@ async def _render_saved_investment_scenario(
             reply_markup=keyboard([[("Начать расчёт", "forecast:investments")]]),
         )
         return
+    await message.answer(
+        "Рассчитываю. Ожидайте, симуляция может занять некоторое время"
+    )
     await render_investment_forecast(
         message,
         state,
@@ -2235,7 +2239,13 @@ async def _render_saved_investment_scenario(
 
 @router.callback_query(F.data.startswith("forecastinvest:growth:"))
 async def choose_investment_income_growth(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        # A long-running forecast or a temporarily busy small instance can
+        # make Telegram expire the callback acknowledgement.  The selected
+        # value is still valid, so continue instead of stranding the user.
+        pass
     growth = parse_decimal(callback.data.rsplit(":", 1)[-1])
     if growth is None:
         await callback.message.answer("Не удалось прочитать индексацию. Выберите её ещё раз.")
@@ -2250,7 +2260,10 @@ async def choose_investment_income_growth(callback: CallbackQuery, state: FSMCon
 
 @router.callback_query(F.data == "forecastinvest:growth-inflation")
 async def use_inflation_as_income_growth(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
     data = await state.get_data()
     if "investment_inflation" not in data:
         await callback.message.answer(
